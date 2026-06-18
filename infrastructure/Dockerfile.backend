@@ -1,52 +1,43 @@
-# Stage 1 — builder
-FROM python:3.13-slim AS builder
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /build
-
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-# Copy everything needed for pip install (pyproject.toml + source for hatchling)
-COPY pyproject.toml .
-COPY app ./app
-
-RUN pip install --no-cache-dir .
-
-# Copy remaining files (alembic config/migrations, seed scripts)
-COPY alembic.ini .
-COPY alembic ./alembic
-COPY seed_staging.py .
-
-# Stage 2 — runtime
+# Single-stage build. kaniko + multi-stage Dockerfiles hit a registry
+# push-auth bug (401 on manifest push) with our zot/atlas-builder setup —
+# the same reason blue and hillco2 keep their images single-stage. Build deps
+# are installed, used for `pip install`, then purged in the same layer so the
+# runtime image stays lean.
 FROM python:3.13-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN groupadd --system appuser && useradd --system --gid appuser appuser
-
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app
 
 WORKDIR /app
 
-COPY --from=builder /build/app ./app
-COPY --from=builder /build/alembic.ini .
-COPY --from=builder /build/alembic ./alembic
-COPY --from=builder /build/seed_staging.py .
+# pyproject + package source must be present for the hatchling `pip install .`.
+COPY pyproject.toml ./
+COPY app ./app
 
-ENV PYTHONPATH="/app"
-ENV PYTHONUNBUFFERED=1
+# Install build toolchain + runtime libs, install the app (+deps), then purge
+# the build toolchain in the SAME layer. libpq5 + curl stay for runtime /
+# healthcheck.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential libpq-dev libpq5 curl ca-certificates \
+ && pip install --upgrade pip \
+ && pip install . \
+ && apt-get purge -y --auto-remove build-essential libpq-dev \
+ && rm -rf /var/lib/apt/lists/*
 
-RUN chown -R appuser:appuser /app
+# Alembic config/migrations + seed script (needed on disk for migrations).
+COPY alembic.ini ./alembic.ini
+COPY alembic ./alembic
+COPY seed_staging.py ./seed_staging.py
+
+RUN groupadd --system appuser && useradd --system --gid appuser appuser \
+ && chown -R appuser:appuser /app
 USER appuser
+
+ARG BUILD_COMMIT=unknown
+ENV BUILD_COMMIT=${BUILD_COMMIT}
 
 EXPOSE 8080
 

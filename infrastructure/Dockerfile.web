@@ -1,39 +1,16 @@
-# Stage 1 — builder
-FROM node:20-alpine AS builder
-
-WORKDIR /build
-
-COPY web/package.json web/package-lock.json* ./
-
-RUN npm install
-
-COPY web/ .
-
-ARG VITE_API_BASE_URL
-ARG VITE_FIREBASE_API_KEY
-ARG VITE_FIREBASE_AUTH_DOMAIN
-ARG VITE_FIREBASE_PROJECT_ID
-ARG VITE_FIREBASE_STORAGE_BUCKET
-ARG VITE_FIREBASE_MESSAGING_SENDER_ID
-ARG VITE_FIREBASE_APP_ID
-
-ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
-ENV VITE_FIREBASE_API_KEY=$VITE_FIREBASE_API_KEY
-ENV VITE_FIREBASE_AUTH_DOMAIN=$VITE_FIREBASE_AUTH_DOMAIN
-ENV VITE_FIREBASE_PROJECT_ID=$VITE_FIREBASE_PROJECT_ID
-ENV VITE_FIREBASE_STORAGE_BUCKET=$VITE_FIREBASE_STORAGE_BUCKET
-ENV VITE_FIREBASE_MESSAGING_SENDER_ID=$VITE_FIREBASE_MESSAGING_SENDER_ID
-ENV VITE_FIREBASE_APP_ID=$VITE_FIREBASE_APP_ID
-
-RUN npm run build
-
-# Stage 2 — runtime
+# Single-stage nginx image. The Vite bundle (web/dist) is built OUTSIDE the
+# Dockerfile by CI (see build-and-push.yml "Build web bundle" step) — kaniko +
+# multi-stage hits a registry push-auth bug with our zot setup, same convention
+# blue and hillco2 use. For local builds, run `cd web && npm run build` first.
+# Context is the repo root (so web/dist and infrastructure/nginx.conf resolve).
 FROM nginx:alpine
 
 RUN rm /etc/nginx/conf.d/default.conf
-COPY --from=builder /build/dist /usr/share/nginx/html
-
+COPY web/dist /usr/share/nginx/html
 COPY infrastructure/nginx.conf /etc/nginx/conf.d/default.conf
+
+ARG BUILD_COMMIT=unknown
+ENV BUILD_COMMIT=${BUILD_COMMIT}
 
 EXPOSE 8080
 
