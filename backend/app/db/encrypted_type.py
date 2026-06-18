@@ -14,7 +14,7 @@ def _kms():
 
 
 class EncryptedText(TypeDecorator):
-    """Transparently encrypts/decrypts text columns using Cloud KMS."""
+    """Transparently encrypts/decrypts text columns (AES-256-GCM)."""
 
     impl = Text
     cache_ok = False
@@ -35,7 +35,7 @@ class EncryptedText(TypeDecorator):
 
 
 class EncryptedJSON(TypeDecorator):
-    """Transparently encrypts/decrypts JSON columns using Cloud KMS."""
+    """Transparently encrypts/decrypts JSON columns (AES-256-GCM)."""
 
     impl = Text
     cache_ok = False
