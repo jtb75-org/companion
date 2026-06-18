@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.firebase import verify_firebase_token
 from app.config import settings
 from app.db import get_db
+from app.models.enums import AccountStatus
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
 
@@ -124,35 +125,30 @@ async def complete_profile(
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
+    # Invite-only: every invited or admin-provisioned account already has a
+    # (stub) User row created at invite time. No row means this email was
+    # never invited, so we refuse to self-provision an account here.
+    if user is None:
+        raise HTTPException(
+            status_code=403,
+            detail="No invitation found for this account.",
+        )
+
     first_name = data.get("first_name", "")
     last_name = data.get("last_name", "")
     phone = data.get("phone") or None
     display = f"{first_name} {last_name}".strip() or email
 
-    if user:
-        # Update existing
-        user.first_name = first_name or user.first_name
-        user.last_name = last_name or user.last_name
-        if phone:
-            user.phone = phone
-        if data.get("preferred_name"):
-            user.preferred_name = data["preferred_name"]
-        user.display_name = display
-    else:
-        # Create new user record (admin or invited user signing in for first time)
-        user = User(
-            email=email,
-            first_name=first_name,
-            last_name=last_name,
-            phone=phone,
-            preferred_name=data.get("preferred_name", first_name),
-            display_name=display,
-            primary_language="en",
-            voice_id="warm",
-            pace_setting="normal",
-            warmth_level="warm",
-        )
-        db.add(user)
+    user.first_name = first_name or user.first_name
+    user.last_name = last_name or user.last_name
+    if phone:
+        user.phone = phone
+    if data.get("preferred_name"):
+        user.preferred_name = data["preferred_name"]
+    user.display_name = display
+    # Completing the profile activates an invited stub account.
+    if user.account_status == AccountStatus.INVITED:
+        user.account_status = AccountStatus.ACTIVE
 
     await db.flush()
     return {"completed": True, "user_id": str(user.id)}
