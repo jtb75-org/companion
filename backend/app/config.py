@@ -11,10 +11,14 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
-    # Google Cloud (still used for Gemini/Vertex generation + KMS)
+    # Google Cloud (still used for Gemini/Vertex generation)
     gcp_project_id: str = "companion-dev"
     pubsub_emulator_host: str | None = None
-    kms_key_id: str = ""
+
+    # Field-level encryption — local AES-256-GCM key (base64 of 32 bytes:
+    # `openssl rand -base64 32`), delivered via SealedSecret. Required
+    # outside development/test.
+    field_encryption_key: str = ""
 
     # Object storage (S3-compatible, MinIO) — replaces GCS.
     s3_endpoint_url: str = ""  # e.g. http://minio.minio.svc.cluster.local:9000
