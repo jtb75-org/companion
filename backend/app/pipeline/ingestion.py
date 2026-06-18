@@ -9,26 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.document import Document
 from app.pipeline.schemas import NormalizedDocument
+from app.services import storage_service
 
 logger = logging.getLogger(__name__)
-
-
-def _download_from_gcs(gcs_uri: str) -> bytes:
-    """Download a blob from GCS. Synchronous."""
-    from google.cloud import storage
-
-    # Parse gs://bucket/path or just path
-    if gcs_uri.startswith("gs://"):
-        parts = gcs_uri.replace("gs://", "").split("/", 1)
-        bucket_name, blob_path = parts[0], parts[1]
-    else:
-        bucket_name = settings.gcs_bucket_documents
-        blob_path = gcs_uri
-
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(blob_path)
-    return blob.download_as_bytes()
 
 
 def _ocr_with_document_ai(
@@ -87,8 +70,8 @@ async def process_camera_scan(
                 # Multi-page: OCR each page and concatenate
                 page_texts = []
                 for i, ref in enumerate(page_refs):
-                    logger.info("Downloading page %d from GCS: %s", i, ref)
-                    data = await asyncio.to_thread(_download_from_gcs, ref)
+                    logger.info("Downloading page %d from storage: %s", i, ref)
+                    data = await storage_service.download(ref)
                     logger.info("Running OCR on page %d (%d bytes)", i, len(data))
                     text = await asyncio.to_thread(_ocr_with_document_ai, data, mime_type)
                     page_texts.append(text)
@@ -102,8 +85,8 @@ async def process_camera_scan(
                 )
             else:
                 # Single page (or legacy): download and OCR
-                logger.info("Downloading from GCS: %s", doc.raw_text_ref)
-                data = await asyncio.to_thread(_download_from_gcs, doc.raw_text_ref)
+                logger.info("Downloading from storage: %s", doc.raw_text_ref)
+                data = await storage_service.download(doc.raw_text_ref)
                 logger.info("Running OCR on %d bytes (%s)", len(data), mime_type)
                 raw_text = await asyncio.to_thread(_ocr_with_document_ai, data, mime_type)
                 logger.info("OCR extracted %d characters", len(raw_text))

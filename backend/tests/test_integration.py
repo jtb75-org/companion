@@ -236,7 +236,7 @@ class TestDocumentPipeline:
                 "file": ("bill.jpg", fake_image, "image/jpeg"),
             },
         )
-        # 201 if GCS works, 502 if GCS unavailable in test
+        # 201 if storage works, 502 if storage unavailable in test
         assert r.status_code in (201, 502)
 
     async def test_scan_junk_mail(self, client: AsyncClient):

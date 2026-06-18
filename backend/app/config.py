@@ -11,11 +11,17 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
-    # Google Cloud
+    # Google Cloud (still used for Gemini/Vertex generation + KMS)
     gcp_project_id: str = "companion-dev"
     pubsub_emulator_host: str | None = None
-    gcs_bucket_documents: str = "companion-docs-dev"
     kms_key_id: str = ""
+
+    # Object storage (S3-compatible, MinIO) — replaces GCS.
+    s3_endpoint_url: str = ""  # e.g. http://minio.minio.svc.cluster.local:9000
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_bucket_documents: str = "companion-documents"
+    s3_region: str = "us-east-1"
 
     # Firebase
     firebase_project_id: str = "companion-dev"
@@ -27,8 +33,11 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     gemini_location: str = "us-central1"
 
-    # RAG / Embeddings
-    embedding_model: str = "text-embedding-005"
+    # RAG / Embeddings — local Ollama (nomic-embed-text, 768-dim). Replaces
+    # Vertex text-embedding-005 (also 768-dim, so no schema migration).
+    ollama_base_url: str = "http://192.168.0.104:11434"
+    embedding_model: str = "nomic-embed-text"
+    embedding_timeout_seconds: float = 60.0
     rag_chunk_size: int = 800
     rag_chunk_overlap: int = 100
     rag_top_k: int = 5
