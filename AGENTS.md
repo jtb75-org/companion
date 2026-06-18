@@ -105,8 +105,8 @@ design).
 
 ### 7. `infra-migration` — platform & the self-hosted move
 - **Scope:** `infrastructure/**`, `.github/workflows/**`, `firestore.rules`,
-  `scripts/**`, and the migration repos (`~/repo/argocd-apps`,
-  `~/repo/authentik-gitops`).
+  `scripts/**`, and the migration/gitops repos (`~/repo/companion-gitops`,
+  `~/repo/argocd-apps`, `~/repo/authentik-gitops`).
 - **Reference:** [`docs/migration-plan.md`](docs/migration-plan.md),
   [`docs/deployment-runbook.md`](docs/deployment-runbook.md).
 - **Mandate:** Terraform (legacy GCP, being retired), Docker, CI/CD, and the
@@ -136,6 +136,19 @@ design).
   drop traceability.
 
 ---
+
+## Workflow & branching
+
+All work follows **branch → PR → merge-to-main** (see
+[`CONTRIBUTING.md`](CONTRIBUTING.md)). No agent commits directly to `main`.
+
+- Branch off latest `main` with a typed prefix: `feature/`, `fix/`, `chore/`,
+  `docs/`, `refactor/` + kebab-case description.
+- Conventional Commits matching the branch type (`feat:`, `fix:`, `chore:`,
+  `docs:`, `refactor:`).
+- Open a PR to `main`; **merge on green CI**. Squash-merge, delete branch.
+- This applies in the gitops repos too (`companion-gitops`, `argocd-apps`) —
+  except the CI-owned image-tag bump, which commits straight to `main`.
 
 ## Coordination patterns
 

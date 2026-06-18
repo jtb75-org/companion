@@ -1,10 +1,14 @@
 name: CI
 
 on:
+  # main is handled by build-and-push.yml, which calls this workflow via
+  # workflow_call before building. Every other branch and every PR is gated here.
   push:
-    branches: [main, "feature/**"]
+    branches-ignore: [main]
   pull_request:
     branches: [main]
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read

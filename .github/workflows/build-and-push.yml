@@ -1,0 +1,113 @@
+name: Build and Push
+
+# Self-hosted deploy path: on every push to main, run the CI gate, build the
+# backend + web images with kaniko, push to zot, then bump the image tags in
+# companion-gitops. ArgoCD reconciles from there.
+#
+# The legacy GCP deploy workflows (deploy-staging.yml / deploy-prod.yml) still
+# exist and are unaffected until the self-hosted migration completes.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  REGISTRY: zot.lan.ng20.org
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build, push, and bump gitops
+    needs: test
+    runs-on: jtb75-arc
+    container:
+      # Generic builder image (git + kaniko) reused across repos.
+      image: zot.lan.ng20.org/atlas/builder:latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Short SHA
+        id: sha
+        run: |
+          short=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          echo "short=${short}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure registry auth (kaniko)
+        env:
+          ZOT_USERNAME: ${{ secrets.ZOT_USERNAME }}
+          ZOT_PASSWORD: ${{ secrets.ZOT_PASSWORD }}
+        run: |
+          AUTH=$(printf '%s:%s' "${ZOT_USERNAME}" "${ZOT_PASSWORD}" | base64 | tr -d '\n')
+          CONFIG=$(printf '{"auths":{"%s":{"auth":"%s"}}}' "${REGISTRY}" "${AUTH}")
+          mkdir -p /opt/kaniko/.docker /root/.docker "${HOME:-/root}/.docker"
+          printf '%s\n' "${CONFIG}" > /opt/kaniko/.docker/config.json
+          printf '%s\n' "${CONFIG}" > /root/.docker/config.json
+          printf '%s\n' "${CONFIG}" > "${HOME:-/root}/.docker/config.json"
+
+      - name: Kaniko build + push — backend
+        run: |
+          /opt/kaniko/executor \
+            --context="${GITHUB_WORKSPACE}/backend" \
+            --dockerfile="${GITHUB_WORKSPACE}/infrastructure/Dockerfile.backend" \
+            --destination="${REGISTRY}/companion-backend:${{ steps.sha.outputs.short }}" \
+            --destination="${REGISTRY}/companion-backend:main-latest" \
+            --build-arg="BUILD_COMMIT=${{ steps.sha.outputs.short }}" \
+            --snapshot-mode=redo
+
+      - name: Kaniko build + push — web
+        # Dockerfile.web expects the repo root as context (it references
+        # infrastructure/nginx.conf and web/). VITE_* are baked at build time;
+        # source the API URL from a repo var and Firebase config from secrets.
+        run: |
+          /opt/kaniko/executor \
+            --context="${GITHUB_WORKSPACE}" \
+            --dockerfile="${GITHUB_WORKSPACE}/infrastructure/Dockerfile.web" \
+            --destination="${REGISTRY}/companion-web:${{ steps.sha.outputs.short }}" \
+            --destination="${REGISTRY}/companion-web:main-latest" \
+            --build-arg="VITE_API_BASE_URL=${{ vars.VITE_API_BASE_URL }}" \
+            --build-arg="VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }}" \
+            --build-arg="VITE_FIREBASE_AUTH_DOMAIN=${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}" \
+            --build-arg="VITE_FIREBASE_PROJECT_ID=${{ vars.VITE_FIREBASE_PROJECT_ID }}" \
+            --build-arg="VITE_FIREBASE_STORAGE_BUCKET=${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}" \
+            --build-arg="VITE_FIREBASE_MESSAGING_SENDER_ID=${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}" \
+            --build-arg="VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}" \
+            --snapshot-mode=redo
+
+      - name: Checkout companion-gitops
+        uses: actions/checkout@v4
+        with:
+          repository: jtb75-org/companion-gitops
+          token: ${{ secrets.GITOPS_DEPLOY_TOKEN }}
+          path: companion-gitops
+          persist-credentials: true
+
+      - name: Update image tags in gitops
+        working-directory: companion-gitops/overlays/onprem
+        env:
+          NEW_TAG: ${{ steps.sha.outputs.short }}
+        run: |
+          # Quote so all-digit short SHAs don't parse as YAML integers.
+          for img in companion-backend companion-web; do
+            sed -i "/name: ${REGISTRY}\/${img}$/,/newTag:/ s|newTag: .*|newTag: \"${NEW_TAG}\"|" kustomization.yaml
+          done
+          grep -A2 "name: ${REGISTRY}/companion-" kustomization.yaml || true
+
+      - name: Commit and push
+        working-directory: companion-gitops
+        run: |
+          git config user.name "companion-ci"
+          git config user.email "ci@ng20.org"
+          if git diff --quiet; then
+            echo "No image-tag change to commit."
+            exit 0
+          fi
+          git add overlays/onprem/kustomization.yaml
+          git commit -m "ci: bump companion images to ${{ steps.sha.outputs.short }}"
+          git push origin HEAD:main

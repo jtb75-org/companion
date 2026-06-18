@@ -9,10 +9,18 @@ Ollama on Mac Studios.
 ~870 lines, Phase -1 through Phase 12, updated 2026-04-19.
 
 **Related repos:**
-- `~/repo/argocd-apps` (github.com/jtb75/argocd-apps) — gitops source of
-  truth. Companion does not have its own gitops repo.
+- `~/repo/companion-gitops` (github.com/jtb75-org/companion-gitops) —
+  Companion's own ArgoCD GitOps repo (base + overlays/onprem). Image tags
+  bumped by Companion CI on each push to `main`. Modeled on `blue-gitops`.
+- `~/repo/argocd-apps` (github.com/jtb75-org/argocd-apps) — cluster gitops
+  source of truth; its root-app watches `applications/`, where
+  `companion.yaml` registers the Companion app.
 - `~/repo/authentik-gitops` — reference manifests for Authentik; ~80%
   reusable, being adapted into `argocd-apps/infra/authentik/`.
+
+**Dev workflow:** branch → PR → merge-to-main, merge on green CI. Branch
+prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
+`AGENTS.md`.
 
 ## Current state (2026-04-19)
 
