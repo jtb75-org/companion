@@ -33,9 +33,11 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     gemini_location: str = "us-central1"
 
-    # RAG / Embeddings — local Ollama (nomic-embed-text, 768-dim). Replaces
-    # Vertex text-embedding-005 (also 768-dim, so no schema migration).
-    ollama_base_url: str = "http://192.168.0.104:11434"
+    # RAG / Embeddings — via the shared LiteLLM gateway (OpenAI-compatible),
+    # which load-balances nomic-embed-text (768-dim) across both Mac Studios.
+    # Chat generation stays direct on Vertex (see llm_provider).
+    embedding_api_base: str = "http://192.168.0.104:4000/v1"
+    embedding_api_key: str = ""
     embedding_model: str = "nomic-embed-text"
     embedding_timeout_seconds: float = 60.0
     rag_chunk_size: int = 800

@@ -1,12 +1,14 @@
-"""Embedding client — local Ollama (nomic-embed-text), replaces Vertex AI.
+"""Embedding client — via the shared LiteLLM gateway (OpenAI-compatible).
 
-Document and query embeddings MUST come from the same model, so both the
-ingestion pipeline and chat retrieval go through this module.
+LiteLLM fronts nomic-embed-text on both Mac Studios and load-balances /
+fails over between them, so this is the embedding HA layer. Document and
+query embeddings MUST come from the same model, so both the ingestion
+pipeline and chat retrieval go through this module.
 """
 
 import logging
 
-import httpx
+import openai
 
 from app.config import settings
 
@@ -23,28 +25,31 @@ def _apply_prefix(texts: list[str], kind: str) -> list[str]:
     return texts
 
 
+def _make_client() -> openai.AsyncOpenAI:
+    return openai.AsyncOpenAI(
+        base_url=settings.embedding_api_base,
+        # LiteLLM rejects empty keys; placeholder keeps the SDK constructable
+        # in local/test envs where no gateway key is configured.
+        api_key=settings.embedding_api_key or "missing",
+        timeout=settings.embedding_timeout_seconds,
+    )
+
+
 async def _embed(texts: list[str], kind: str) -> list[list[float]]:
     if not texts:
         return []
-    payload = {
-        "model": settings.embedding_model,
-        "input": _apply_prefix(texts, kind),
-    }
-    async with httpx.AsyncClient(
-        timeout=settings.embedding_timeout_seconds
-    ) as client:
-        resp = await client.post(
-            f"{settings.ollama_base_url}/api/embed", json=payload
+    async with _make_client() as client:
+        resp = await client.embeddings.create(
+            model=settings.embedding_model,
+            input=_apply_prefix(texts, kind),
         )
-        resp.raise_for_status()
-        data = resp.json()
-    embeddings = data.get("embeddings")
-    if not embeddings or len(embeddings) != len(texts):
+    # OpenAI returns data ordered by input index; sort defensively.
+    items = sorted(resp.data, key=lambda d: getattr(d, "index", 0))
+    if len(items) != len(texts):
         raise ValueError(
-            f"Ollama returned {len(embeddings or [])} embeddings "
-            f"for {len(texts)} inputs"
+            f"Gateway returned {len(items)} embeddings for {len(texts)} inputs"
         )
-    return embeddings
+    return [d.embedding for d in items]
 
 
 async def embed_documents(texts: list[str]) -> list[list[float]]:
