@@ -1,7 +1,8 @@
-"""Unit tests for pipeline/embedding_client.py — Ollama embeddings."""
+"""Unit tests for pipeline/embedding_client.py — LiteLLM gateway embeddings."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,17 +11,20 @@ from app.config import settings
 from app.pipeline import embedding_client
 
 
-def _mock_client(json_payload):
-    """Build a mock httpx.AsyncClient context manager + captured client."""
-    resp = MagicMock()
-    resp.raise_for_status = MagicMock()
-    resp.json = MagicMock(return_value=json_payload)
+def _mock_client(vectors):
+    """Mock AsyncOpenAI used as an async context manager.
+
+    ``vectors`` is a list of embedding lists; returns (cm, client) where the
+    client's embeddings.create is an AsyncMock yielding an OpenAI-shaped resp.
+    """
+    resp = SimpleNamespace(
+        data=[SimpleNamespace(embedding=v, index=i) for i, v in enumerate(vectors)]
+    )
     client = MagicMock()
-    client.post = AsyncMock(return_value=resp)
-    cm = MagicMock()
-    cm.__aenter__ = AsyncMock(return_value=client)
-    cm.__aexit__ = AsyncMock(return_value=False)
-    return cm, client
+    client.embeddings.create = AsyncMock(return_value=resp)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    return client
 
 
 # ---------------------------------------------------------------------------
@@ -32,9 +36,7 @@ def test_apply_prefix_nomic_document_and_query():
     assert embedding_client._apply_prefix(["hi"], "document") == [
         "search_document: hi"
     ]
-    assert embedding_client._apply_prefix(["hi"], "query") == [
-        "search_query: hi"
-    ]
+    assert embedding_client._apply_prefix(["hi"], "query") == ["search_query: hi"]
 
 
 def test_apply_prefix_non_nomic_passthrough():
@@ -48,20 +50,37 @@ def test_apply_prefix_non_nomic_passthrough():
 
 
 async def test_embed_documents_posts_prefixed_inputs():
-    cm, client = _mock_client({"embeddings": [[0.1, 0.2], [0.3, 0.4]]})
-    with patch.object(embedding_client.httpx, "AsyncClient", return_value=cm):
+    client = _mock_client([[0.1, 0.2], [0.3, 0.4]])
+    with patch.object(embedding_client, "_make_client", return_value=client):
         out = await embedding_client.embed_documents(["a", "b"])
     assert out == [[0.1, 0.2], [0.3, 0.4]]
-    _, kwargs = client.post.call_args
-    assert kwargs["json"]["model"] == settings.embedding_model
-    assert kwargs["json"]["input"] == ["search_document: a", "search_document: b"]
+    _, kwargs = client.embeddings.create.call_args
+    assert kwargs["model"] == settings.embedding_model
+    assert kwargs["input"] == ["search_document: a", "search_document: b"]
 
 
 async def test_embed_query_returns_single_vector():
-    cm, _ = _mock_client({"embeddings": [[1.0, 2.0, 3.0]]})
-    with patch.object(embedding_client.httpx, "AsyncClient", return_value=cm):
+    client = _mock_client([[1.0, 2.0, 3.0]])
+    with patch.object(embedding_client, "_make_client", return_value=client):
         out = await embedding_client.embed_query("hello")
     assert out == [1.0, 2.0, 3.0]
+
+
+async def test_embed_reorders_by_index():
+    """Out-of-order gateway data must be sorted back to input order."""
+    resp = SimpleNamespace(
+        data=[
+            SimpleNamespace(embedding=[9.0], index=1),
+            SimpleNamespace(embedding=[8.0], index=0),
+        ]
+    )
+    client = MagicMock()
+    client.embeddings.create = AsyncMock(return_value=resp)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    with patch.object(embedding_client, "_make_client", return_value=client):
+        out = await embedding_client.embed_documents(["a", "b"])
+    assert out == [[8.0], [9.0]]
 
 
 async def test_embed_empty_short_circuits():
@@ -70,7 +89,7 @@ async def test_embed_empty_short_circuits():
 
 
 async def test_embed_count_mismatch_raises():
-    cm, _ = _mock_client({"embeddings": [[0.1]]})  # 1 vec for 2 inputs
-    with patch.object(embedding_client.httpx, "AsyncClient", return_value=cm):
+    client = _mock_client([[0.1]])  # 1 vec for 2 inputs
+    with patch.object(embedding_client, "_make_client", return_value=client):
         with pytest.raises(ValueError):
             await embedding_client.embed_documents(["a", "b"])
