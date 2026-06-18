@@ -61,23 +61,36 @@ jobs:
             --build-arg="BUILD_COMMIT=${{ steps.sha.outputs.short }}" \
             --snapshot-mode=redo
 
+      - name: Build web bundle (outside Docker)
+        # Built outside the Dockerfile so the web image stays single-stage
+        # (kaniko + multi-stage = registry push-auth bug). VITE_* are baked into
+        # the bundle here; API URL from a repo var, Firebase config from
+        # vars/secrets. Same approach as blue/hillco2.
+        working-directory: web
+        env:
+          COREPACK_ENABLE_STRICT: "0"
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+        run: |
+          npm install
+          npm run build
+          ls -la dist/
+
       - name: Kaniko build + push — web
-        # Dockerfile.web expects the repo root as context (it references
-        # infrastructure/nginx.conf and web/). VITE_* are baked at build time;
-        # source the API URL from a repo var and Firebase config from secrets.
+        # Single-stage Dockerfile.web copies the prebuilt web/dist; context is
+        # the repo root (for web/dist + infrastructure/nginx.conf).
         run: |
           /opt/kaniko/executor \
             --context="${GITHUB_WORKSPACE}" \
             --dockerfile="${GITHUB_WORKSPACE}/infrastructure/Dockerfile.web" \
             --destination="${REGISTRY}/companion-web:${{ steps.sha.outputs.short }}" \
             --destination="${REGISTRY}/companion-web:main-latest" \
-            --build-arg="VITE_API_BASE_URL=${{ vars.VITE_API_BASE_URL }}" \
-            --build-arg="VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }}" \
-            --build-arg="VITE_FIREBASE_AUTH_DOMAIN=${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}" \
-            --build-arg="VITE_FIREBASE_PROJECT_ID=${{ vars.VITE_FIREBASE_PROJECT_ID }}" \
-            --build-arg="VITE_FIREBASE_STORAGE_BUCKET=${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}" \
-            --build-arg="VITE_FIREBASE_MESSAGING_SENDER_ID=${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}" \
-            --build-arg="VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}" \
+            --build-arg="BUILD_COMMIT=${{ steps.sha.outputs.short }}" \
             --snapshot-mode=redo
 
       - name: Checkout companion-gitops
