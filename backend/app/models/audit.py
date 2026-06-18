@@ -36,6 +36,26 @@ class CaregiverActivityLog(Base):
     user = relationship("User", back_populates="caregiver_activity_logs")
 
 
+class AccountAuditLog(Base):
+    """Account/auth access-control events (e.g. activation, refused signup)."""
+
+    __tablename__ = "account_audit_log"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    event: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    # Nullable + no FK: a refused signup has no user row.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    details: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default="now()"
+    )
+
+
 class DeletionAuditLog(Base):
     __tablename__ = "deletion_audit_log"
 

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.firebase import verify_firebase_token
 from app.config import settings
 from app.db import get_db
+from app.models.audit import AccountAuditLog
 from app.models.enums import AccountStatus
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
@@ -129,6 +130,10 @@ async def complete_profile(
     # (stub) User row created at invite time. No row means this email was
     # never invited, so we refuse to self-provision an account here.
     if user is None:
+        # Audit the refused signup. Commit it on its own so it survives the
+        # request rollback triggered by the 403 below.
+        db.add(AccountAuditLog(event="signup_refused", email=email))
+        await db.commit()
         raise HTTPException(
             status_code=403,
             detail="No invitation found for this account.",
@@ -149,6 +154,11 @@ async def complete_profile(
     # Completing the profile activates an invited stub account.
     if user.account_status == AccountStatus.INVITED:
         user.account_status = AccountStatus.ACTIVE
+        db.add(
+            AccountAuditLog(
+                event="account_activated", email=email, user_id=user.id
+            )
+        )
 
     await db.flush()
     return {"completed": True, "user_id": str(user.id)}
