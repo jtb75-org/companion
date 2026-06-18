@@ -67,14 +67,18 @@ async def check_auth(
         response["caregiver_count"] = len(auth_result.caregiver_contacts)
         response["has_charges"] = len(auth_result.caregiver_contacts) > 0
 
-    # Check if user has a complete profile
+    # Profile completion only applies to MEMBER accounts. Admins/caregivers
+    # without a member row don't need a member profile (and can't create one —
+    # signup is invite-only, so complete-profile would 403). Only an existing
+    # member account with missing names should be routed to the completion
+    # screen.
     user_result = await db.execute(
         select(UserModel).where(UserModel.email == email)
     )
     user_record = user_result.scalar_one_or_none()
 
-    response["profile_complete"] = bool(
-        user_record and user_record.first_name and user_record.last_name
+    response["profile_complete"] = user_record is None or bool(
+        user_record.first_name and user_record.last_name
     )
     response["has_account"] = user_record is not None
 
