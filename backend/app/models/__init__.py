@@ -1,7 +1,11 @@
 from app.models.admin_user import AdminUser
 from app.models.appointment import Appointment
 from app.models.assignment_request import CaregiverAssignmentRequest
-from app.models.audit import CaregiverActivityLog, DeletionAuditLog
+from app.models.audit import (
+    AccountAuditLog,
+    CaregiverActivityLog,
+    DeletionAuditLog,
+)
 from app.models.base import Base
 from app.models.bill import Bill
 from app.models.chat_session import ChatMessage, ChatSession
@@ -91,6 +95,7 @@ __all__ = [
     "ChatSession",
     "ChatMessage",
     "CaregiverActivityLog",
+    "AccountAuditLog",
     "DeletionAuditLog",
     "DeviceToken",
     "PendingReview",
