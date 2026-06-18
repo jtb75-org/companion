@@ -1,6 +1,5 @@
 """App API — Document routes."""
 
-import asyncio
 import logging
 import uuid
 
@@ -13,15 +12,13 @@ from fastapi import (
     UploadFile,
     status,
 )
-from google.cloud import storage
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import User, require_complete_profile
-from app.config import settings
 from app.db import get_db
 from app.models.enums import DocumentStatus, SourceChannel
 from app.schemas.document import DocumentStatusUpdate
-from app.services import document_service
+from app.services import document_service, storage_service
 
 logger = logging.getLogger(__name__)
 
@@ -35,19 +32,6 @@ ALLOWED_SCAN_TYPES = {
 }
 MAX_SCAN_SIZE = 10 * 1024 * 1024  # 10 MB
 
-
-async def _upload_to_gcs(
-    blob_path: str, data: bytes, content_type: str
-) -> str:
-    """Upload bytes to GCS in a thread (sync client)."""
-    def _upload():
-        client = storage.Client()
-        bucket = client.bucket(settings.gcs_bucket_documents)
-        blob = bucket.blob(blob_path)
-        blob.upload_from_string(data, content_type=content_type)
-        return f"gs://{bucket.name}/{blob_path}"
-
-    return await asyncio.to_thread(_upload)
 
 @router.post("/scan/analyze")
 async def analyze_scan_quality(
@@ -101,7 +85,7 @@ async def scan_document(
             )
         pages_data.append((data, content_type))
 
-    # Upload all pages to GCS
+    # Upload all pages to object storage (MinIO)
     doc_id = uuid.uuid4()
     page_refs: list[str] = []
     first_gcs_uri = ""
@@ -109,12 +93,12 @@ async def scan_document(
         for i, (data, content_type) in enumerate(pages_data):
             ext = ALLOWED_SCAN_TYPES[content_type]
             blob_path = f"scans/{user.id}/{doc_id}/page_{i:03d}.{ext}"
-            gcs_uri = await _upload_to_gcs(blob_path, data, content_type)
-            page_refs.append(gcs_uri)
+            uri = await storage_service.upload(blob_path, data, content_type)
+            page_refs.append(uri)
             if i == 0:
-                first_gcs_uri = gcs_uri
+                first_gcs_uri = uri
     except Exception:
-        logger.exception("GCS upload failed for user %s", user.id)
+        logger.exception("Storage upload failed for user %s", user.id)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Failed to upload file to storage.",

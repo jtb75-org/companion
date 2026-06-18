@@ -1,13 +1,12 @@
 """Vector search — retrieve relevant document chunks for RAG."""
 
-import asyncio
 import logging
 from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+from app.pipeline.embedding_client import embed_query
 
 logger = logging.getLogger(__name__)
 
@@ -73,28 +72,5 @@ async def retrieve_relevant_chunks(
 
 
 async def _embed_query(query: str) -> list[float]:
-    """Embed a query string using Vertex AI."""
-    import vertexai
-    from vertexai.language_models import (
-        TextEmbeddingInput,
-        TextEmbeddingModel,
-    )
-
-    def _sync_embed():
-        vertexai.init(
-            project=settings.gcp_project_id,
-            location=settings.gemini_location,
-        )
-        model = TextEmbeddingModel.from_pretrained(
-            settings.embedding_model
-        )
-        inputs = [
-            TextEmbeddingInput(
-                text=query,
-                task_type="RETRIEVAL_QUERY",
-            )
-        ]
-        result = model.get_embeddings(inputs)
-        return result[0].values
-
-    return await asyncio.to_thread(_sync_embed)
+    """Embed a query string using the local embedding model."""
+    return await embed_query(query)

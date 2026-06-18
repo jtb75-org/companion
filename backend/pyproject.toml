@@ -25,6 +25,9 @@ dependencies = [
     # Auth
     "firebase-admin>=6.5.0",
 
+    # Object storage (S3-compatible MinIO; replaces GCS)
+    "boto3>=1.35.0",
+
     # Google Cloud
     "google-cloud-pubsub>=2.23.0",
     "google-cloud-storage>=2.18.0",

@@ -7,12 +7,12 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.models.audit import DeletionAuditLog
 from app.models.document import Document
 from app.models.enums import AccountStatus, DeletionReason
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
+from app.services import storage_service
 
 logger = logging.getLogger(__name__)
 
@@ -42,30 +42,12 @@ async def _get_grace_days() -> int:
 
 
 # ---------------------------------------------------------------------------
-# GCS cleanup
+# Object storage cleanup
 # ---------------------------------------------------------------------------
 
-def delete_gcs_objects(bucket_name: str, paths: list[str]) -> tuple[int, int]:
-    """Delete GCS objects. Returns (deleted_count, failed_count)."""
-    if not paths:
-        return 0, 0
-    try:
-        from google.cloud import storage
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-    except Exception:
-        logger.exception("Failed to initialize GCS client")
-        return 0, len(paths)
-
-    deleted, failed = 0, 0
-    for path in paths:
-        try:
-            bucket.blob(path).delete()
-            deleted += 1
-        except Exception:
-            logger.warning(f"Failed to delete GCS object: {path}")
-            failed += 1
-    return deleted, failed
+def delete_storage_objects(uris: list[str]) -> tuple[int, int]:
+    """Delete document objects from storage. Returns (deleted, failed)."""
+    return storage_service.delete_objects(uris)
 
 
 # ---------------------------------------------------------------------------
@@ -255,8 +237,8 @@ async def execute_deletion(db: AsyncSession, user_id: UUID) -> dict:
         "caregivers_notified": len(caregivers),
     }
 
-    # 4. Delete GCS objects (best-effort)
-    gcs_deleted, gcs_failed = delete_gcs_objects(settings.gcs_bucket_documents, gcs_paths)
+    # 4. Delete storage objects (best-effort)
+    gcs_deleted, gcs_failed = delete_storage_objects(gcs_paths)
     audit_details["gcs_deleted"] = gcs_deleted
     audit_details["gcs_failed"] = gcs_failed
 

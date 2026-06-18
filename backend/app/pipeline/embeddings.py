@@ -1,16 +1,15 @@
 """Embedding service — generates vector embeddings for document chunks."""
 
-import asyncio
 import logging
 from uuid import UUID
 
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.pipeline.chunking import chunk_document
+from app.pipeline.embedding_client import embed_documents
 from app.pipeline.schemas import (
     ClassificationResult,
     ExtractionResult,
@@ -64,9 +63,9 @@ async def embed_document(
         )
     )
 
-    # Get embeddings from Vertex AI
+    # Get embeddings from local Ollama (nomic-embed-text)
     texts = [c["chunk_text"] for c in chunks]
-    embeddings = await _get_embeddings(texts)
+    embeddings = await embed_documents(texts)
 
     # Insert chunk rows
     for chunk_data, embedding in zip(
@@ -90,33 +89,3 @@ async def embed_document(
         document_id,
     )
     return len(chunks)
-
-
-async def _get_embeddings(
-    texts: list[str],
-) -> list[list[float]]:
-    """Get embeddings from Vertex AI text-embedding model."""
-    import vertexai
-    from vertexai.language_models import (
-        TextEmbeddingInput,
-        TextEmbeddingModel,
-    )
-
-    def _sync_embed():
-        vertexai.init(
-            project=settings.gcp_project_id,
-            location=settings.gemini_location,
-        )
-        model = TextEmbeddingModel.from_pretrained(
-            settings.embedding_model
-        )
-        inputs = [
-            TextEmbeddingInput(
-                text=t, task_type="RETRIEVAL_DOCUMENT"
-            )
-            for t in texts
-        ]
-        result = model.get_embeddings(inputs)
-        return [e.values for e in result]
-
-    return await asyncio.to_thread(_sync_embed)
