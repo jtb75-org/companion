@@ -3,7 +3,11 @@
 # same reason the backend and web images are single-stage. Build deps are
 # installed, used for pip + the model warmup, then purged in the same layer so
 # the runtime image stays as lean as a PaddleOCR image gets.
-FROM python:3.12-slim
+# Python 3.10 (not 3.12): PaddleOCR's dependency tree (opencv, shapely,
+# scikit-image, lanms, pyclipper, pdf2docx, ...) has prebuilt wheels for 3.10,
+# so nothing compiles in kaniko (3.12 forced source builds that segfaulted),
+# and stdlib distutils still exists.
+FROM python:3.10-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
