@@ -1,8 +1,8 @@
 import uuid
-from datetime import date, datetime, time
+from datetime import datetime, time
 
-from sqlalchemy import Boolean, Date, Text, Time, text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import Boolean, Text, Time, text
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
@@ -14,14 +14,19 @@ class User(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
+    # email/first_name/last_name/display_name/preferred_name are intentionally
+    # PLAINTEXT: email is the unique identity key; the names drive auth gates
+    # (require_complete_profile), display, and lookups. Encrypting them would
+    # break those. phone/date_of_birth/address ARE encrypted at rest
+    # (per-tenant envelope) and so are stored as tagged-ciphertext Text.
     email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     phone: Mapped[str | None] = mapped_column(Text, nullable=True)
     preferred_name: Mapped[str] = mapped_column(Text, nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     first_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    date_of_birth: Mapped[date | None] = mapped_column(Date, nullable=True)
-    address: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    date_of_birth: Mapped[str | None] = mapped_column(Text, nullable=True)
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     primary_language: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="en"

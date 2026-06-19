@@ -6,7 +6,6 @@ from sqlalchemy import ForeignKey, Numeric, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.encrypted_type import EncryptedJSON, EncryptedText
 from app.models.base import Base
 from app.models.enums import (
     DocumentClassification,
@@ -36,9 +35,11 @@ class Document(Base):
         Numeric(4, 3), nullable=True
     )
     urgency_level: Mapped[UrgencyLevel | None] = mapped_column(nullable=True)
-    extracted_fields: Mapped[dict | None] = mapped_column(EncryptedJSON, nullable=True)
-    spoken_summary: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
-    card_summary: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
+    # Encrypted at rest (per-tenant envelope, app.services.field_crypto).
+    # Stored as tagged-ciphertext Text; extracted_fields holds encrypted JSON.
+    extracted_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
+    spoken_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    card_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     reading_grade: Mapped[Decimal | None] = mapped_column(
         Numeric(3, 1), nullable=True
     )

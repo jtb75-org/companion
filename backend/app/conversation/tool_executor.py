@@ -610,9 +610,20 @@ async def _get_pending_reviews(
     )
     reviews = result.scalars().all()
 
+    from app.services.field_crypto import decrypt_row_field
+
     items = []
     for i, r in enumerate(reviews, 1):
         doc = await db.get(Document, r.document_id) if r.document_id else None
+        proposed = await decrypt_row_field(
+            db, r, "proposed_record_data"
+        ) or {}
+        doc_card = (
+            await decrypt_row_field(db, doc, "card_summary") if doc else None
+        )
+        doc_spoken = (
+            await decrypt_row_field(db, doc, "spoken_summary") if doc else None
+        )
         # Get document content for full context
         ocr_text = ""
         if doc:
@@ -622,11 +633,13 @@ async def _get_pending_reviews(
                     "ocr_text", ""
                 )
             # Fallback to extracted fields as content source
-            if not ocr_text and doc.extracted_fields:
-                import json
-                ocr_text = json.dumps(
-                    doc.extracted_fields, indent=2
+            if not ocr_text:
+                doc_fields = await decrypt_row_field(
+                    db, doc, "extracted_fields"
                 )
+                if doc_fields:
+                    import json
+                    ocr_text = json.dumps(doc_fields, indent=2)
         ocr_text = ocr_text[:1500]
         # Wrap OCR text in explicit data delimiters to prevent
         # indirect prompt injection from document content
@@ -641,7 +654,7 @@ async def _get_pending_reviews(
         logger.info(
             "REVIEW_DATA: doc=%s spoken=%s text_len=%d",
             r.document_id,
-            bool(doc.spoken_summary if doc else None),
+            bool(doc_spoken),
             len(ocr_text),
         )
 
@@ -650,7 +663,7 @@ async def _get_pending_reviews(
             "review_uuid": str(r.id),
             "source": r.source_description,
             "recommended_action": r.recommended_action,
-            "proposed_data": r.proposed_record_data,
+            "proposed_data": proposed,
             "confidence": (
                 float(r.confidence_score)
                 if r.confidence_score else None
@@ -658,10 +671,10 @@ async def _get_pending_reviews(
             "is_urgent": r.is_urgent,
             "is_past_due": r.is_past_due,
             "is_duplicate": r.is_duplicate,
-            "card_summary": doc.card_summary if doc else None,
+            "card_summary": doc_card,
             "spoken_summary": (
-                r.proposed_record_data.get("_spoken_summary")
-                or (doc.spoken_summary if doc else None)
+                proposed.get("_spoken_summary")
+                or doc_spoken
             ),
             "document_text": ocr_text,
             "classification": (
@@ -750,7 +763,8 @@ async def _confirm_document_action(
             **(await _get_remaining_info()),
         }
 
-    fields = review.proposed_record_data or {}
+    from app.services.field_crypto import decrypt_row_field
+    fields = await decrypt_row_field(db, review, "proposed_record_data") or {}
     rec_action = review.recommended_action
 
     if rec_action == RecommendedAction.ADD_BILL:
@@ -885,9 +899,16 @@ async def _update_review_fields(
     if review is None:
         return {"error": True, "message": "Review not found."}
 
-    data = dict(review.proposed_record_data)
+    from app.services.field_crypto import (
+        decrypt_row_field,
+        encrypt_json_for_user,
+    )
+    current = await decrypt_row_field(db, review, "proposed_record_data")
+    data = dict(current or {})
     data.update(updates)
-    review.proposed_record_data = data
+    review.proposed_record_data = await encrypt_json_for_user(
+        db, user_id, data
+    )
     await db.flush()
 
     return {
