@@ -18,7 +18,26 @@ class Settings(BaseSettings):
     # Field-level encryption — local AES-256-GCM key (base64 of 32 bytes:
     # `openssl rand -base64 32`), delivered via SealedSecret. Required
     # outside development/test.
+    #
+    # Legacy single global key. Still honored as the implicit ``k1`` KEK
+    # for back-compat (decrypts pre-existing ``f1:`` ciphertext and acts as
+    # the legacy single-key path). New deployments should set
+    # ``field_keyring`` instead.
     field_encryption_key: str = ""
+
+    # Versioned KEK keyring (envelope encryption). JSON of the form:
+    #   {"primary": "k2", "keys": {"k1": "<b64-32>", "k2": "<b64-32>"}}
+    # The ``primary`` key wraps newly-created per-user DEKs; every key id
+    # in ``keys`` can still unwrap DEKs sealed under it (KEK rotation).
+    # If unset, ``field_encryption_key`` is used as an implicit ``k1``.
+    # Delivered via SealedSecret. Required outside development/test.
+    field_keyring: str = ""
+
+    # Dedicated field-level key for high-sensitivity field TYPES (SSN, bank
+    # account numbers, MRN, etc.) — a single per-field-type key, NOT
+    # per-user. JSON of the form: {"primary": "fl1", "keys": {"fl1": "<b64-32>"}}.
+    # Capability only today (no column uses it); see field_crypto.py §7.
+    field_level_keyring: str = ""
 
     # Object storage (S3-compatible, MinIO) — replaces GCS.
     s3_endpoint_url: str = ""  # e.g. http://minio.minio.svc.cluster.local:9000

@@ -84,15 +84,22 @@ async def route(
     fields["_card_summary"] = summarization.card_summary
     doc_type = classification.classification
 
+    # PendingReview.proposed_record_data is encrypted at rest (per-tenant
+    # envelope). Encrypt the dict once; every PendingReview constructed below
+    # stores this ciphertext. Record-creation helpers still receive the plain
+    # ``fields`` dict.
+    from app.services.field_crypto import encrypt_json_for_user
+    fields_blob = await encrypt_json_for_user(db, user_id, fields)
+
     if doc_type == "bill":
         suggested_action, pending_review_id = await _handle_bill(
-            db, user_id, classification, fields,
+            db, user_id, classification, fields, fields_blob,
             care_model, source_desc, records_created,
         )
 
     elif doc_type == "medical":
         suggested_action, pending_review_id = await _handle_medical(
-            db, user_id, classification, fields,
+            db, user_id, classification, fields, fields_blob,
             care_model, source_desc, records_created,
         )
 
@@ -103,7 +110,7 @@ async def route(
             document_id=classification.document_id,
             review_status=ReviewStatus.PENDING,
             recommended_action=RecommendedAction.REVIEW_WITH_CONTACT,
-            proposed_record_data=fields,
+            proposed_record_data=fields_blob,
             confidence_score=Decimal(
                 str(classification.confidence_score)
             ),
@@ -128,7 +135,7 @@ async def route(
                 document_id=classification.document_id,
                 review_status=ReviewStatus.AUTO_CREATED,
                 recommended_action=RecommendedAction.FILE_ONLY,
-                proposed_record_data=fields,
+                proposed_record_data=fields_blob,
                 confidence_score=Decimal(
                     str(classification.confidence_score)
                 ),
@@ -142,7 +149,7 @@ async def route(
                 document_id=classification.document_id,
                 review_status=ReviewStatus.PENDING,
                 recommended_action=RecommendedAction.FILE_ONLY,
-                proposed_record_data=fields,
+                proposed_record_data=fields_blob,
                 confidence_score=Decimal(
                     str(classification.confidence_score)
                 ),
@@ -166,11 +173,16 @@ async def _handle_bill(
     user_id: UUID,
     classification: ClassificationResult,
     fields: dict,
+    fields_blob: str,
     care_model: str,
     source_desc: str,
     records_created: list[dict],
 ) -> tuple[str | None, UUID | None]:
-    """Handle bill routing with care model awareness."""
+    """Handle bill routing with care model awareness.
+
+    ``fields`` is the plain dict (for record creation / duplicate checks);
+    ``fields_blob`` is the encrypted ciphertext stored on PendingReview.
+    """
     amount = fields.get("amount_due", "?")
     due_str = fields.get("due_date", "soon")
 
@@ -201,7 +213,7 @@ async def _handle_bill(
             document_id=classification.document_id,
             review_status=ReviewStatus.AUTO_CREATED,
             recommended_action=RecommendedAction.ADD_BILL,
-            proposed_record_data=fields,
+            proposed_record_data=fields_blob,
             confidence_score=Decimal(
                 str(classification.confidence_score)
             ),
@@ -229,7 +241,7 @@ async def _handle_bill(
         document_id=classification.document_id,
         review_status=ReviewStatus.PENDING,
         recommended_action=RecommendedAction.ADD_BILL,
-        proposed_record_data=fields,
+        proposed_record_data=fields_blob,
         confidence_score=Decimal(
             str(classification.confidence_score)
         ),
@@ -252,11 +264,16 @@ async def _handle_medical(
     user_id: UUID,
     classification: ClassificationResult,
     fields: dict,
+    fields_blob: str,
     care_model: str,
     source_desc: str,
     records_created: list[dict],
 ) -> tuple[str | None, UUID | None]:
-    """Handle medical document routing."""
+    """Handle medical document routing.
+
+    ``fields`` is the plain dict; ``fields_blob`` is the encrypted ciphertext
+    stored on PendingReview.
+    """
     provider = fields.get("provider", "your doctor")
     notice = fields.get("nature_of_notice", "").lower()
     action = fields.get("required_action")
@@ -269,7 +286,7 @@ async def _handle_medical(
             document_id=classification.document_id,
             review_status=ReviewStatus.PENDING,
             recommended_action=RecommendedAction.REVIEW_WITH_CONTACT,
-            proposed_record_data=fields,
+            proposed_record_data=fields_blob,
             confidence_score=Decimal(str(classification.confidence_score)),
             source_description=source_desc,
         )
@@ -291,7 +308,7 @@ async def _handle_medical(
             document_id=classification.document_id,
             review_status=ReviewStatus.AUTO_CREATED,
             recommended_action=RecommendedAction.ADD_APPOINTMENT,
-            proposed_record_data=fields,
+            proposed_record_data=fields_blob,
             confidence_score=Decimal(
                 str(classification.confidence_score)
             ),
@@ -313,7 +330,7 @@ async def _handle_medical(
         document_id=classification.document_id,
         review_status=ReviewStatus.PENDING,
         recommended_action=RecommendedAction.ADD_APPOINTMENT,
-        proposed_record_data=fields,
+        proposed_record_data=fields_blob,
         confidence_score=Decimal(
             str(classification.confidence_score)
         ),

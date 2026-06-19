@@ -47,6 +47,7 @@ from app.models.system_config import ConfigAuditLog, SystemConfig
 from app.models.todo import Todo
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
+from app.models.user_encryption_key import UserEncryptionKey
 
 __all__ = [
     "Base",
@@ -99,4 +100,5 @@ __all__ = [
     "DeletionAuditLog",
     "DeviceToken",
     "PendingReview",
+    "UserEncryptionKey",
 ]

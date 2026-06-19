@@ -13,6 +13,7 @@ from app.models.bill import Bill
 from app.models.functional_memory import FunctionalMemory
 from app.models.medication import Medication
 from app.models.user import User
+from app.services.field_crypto import decrypt_row_field
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,8 @@ async def _build_memory_context(db: AsyncSession, user: User) -> str:
     )
     memories = result.scalars().all()
     for mem in memories:
-        lines.append(f"- {mem.key}: {mem.value}")
+        mem_value = await decrypt_row_field(db, mem, "value")
+        lines.append(f"- {mem.key}: {mem_value}")
 
     # Medications
     result = await db.execute(
@@ -262,7 +264,9 @@ async def _build_alerts_context(db: AsyncSession, user_id: UUID) -> str:
         )
         review = None
     if review:
-        data = review.proposed_record_data or {}
+        data = await decrypt_row_field(
+            db, review, "proposed_record_data"
+        ) or {}
         sender = data.get("sender", "someone")
         amount = data.get("amount_due", "")
         desc = f"from {review.source_description}"

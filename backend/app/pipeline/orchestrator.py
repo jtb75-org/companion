@@ -115,10 +115,11 @@ async def process_document(
             document_id, "extraction", "started",
         )
         extraction_result = await extract(normalized, classification_result, db)
-        # Convert Decimals to floats for JSONB storage
-        import json
-        doc.extracted_fields = json.loads(
-            json.dumps(extraction_result.extracted_fields, default=str)
+        # Encrypt at rest (per-tenant envelope). Stored as tagged-ciphertext
+        # Text holding the JSON of extracted_fields.
+        from app.services.field_crypto import encrypt_json_for_user
+        doc.extracted_fields = await encrypt_json_for_user(
+            db, user_id, extraction_result.extracted_fields
         )
         await db.flush()
         await _record_metric(db, document_id, "extraction", "completed", stage_start, {
@@ -134,8 +135,13 @@ async def process_document(
             document_id, "summarization", "started",
         )
         summarization_result = await summarize(classification_result, extraction_result, db)
-        doc.spoken_summary = summarization_result.spoken_summary
-        doc.card_summary = summarization_result.card_summary
+        from app.services.field_crypto import encrypt_for_user
+        doc.spoken_summary = await encrypt_for_user(
+            db, user_id, summarization_result.spoken_summary
+        )
+        doc.card_summary = await encrypt_for_user(
+            db, user_id, summarization_result.card_summary
+        )
         doc.reading_grade = Decimal(str(summarization_result.reading_grade))
         doc.status = DocumentStatus.SUMMARIZED
         await db.flush()

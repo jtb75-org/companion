@@ -9,6 +9,7 @@ from app.db import get_db
 from app.models.document import Document
 from app.models.enums import ReviewStatus
 from app.models.pending_review import PendingReview
+from app.services.field_crypto import decrypt_row_field
 
 router = APIRouter(prefix="/reviews", tags=["Reviews"])
 
@@ -50,7 +51,8 @@ async def get_pending_reviews(
             "is_past_due": r.is_past_due,
             "is_duplicate": r.is_duplicate,
             "card_summary": (
-                doc.card_summary if doc else None
+                await decrypt_row_field(db, doc, "card_summary")
+                if doc else None
             ),
             "classification": (
                 getattr(
@@ -60,7 +62,9 @@ async def get_pending_reviews(
                 if doc and doc.classification
                 else None
             ),
-            "proposed_data": r.proposed_record_data,
+            "proposed_data": await decrypt_row_field(
+                db, r, "proposed_record_data"
+            ),
             "created_at": (
                 r.created_at.isoformat()
                 if r.created_at

@@ -49,6 +49,10 @@ async def retrieve_relevant_chunks(
     )
     rows = result.fetchall()
 
+    # chunk_text is encrypted per-user at rest; decrypt it (all rows belong to
+    # user_id, which the query already scopes by) before it reaches the prompt.
+    from app.services.field_crypto import decrypt_value
+
     # Filter by minimum similarity threshold
     chunks = []
     for row in rows:
@@ -56,7 +60,7 @@ async def retrieve_relevant_chunks(
         if sim < 0.3:
             continue
         chunks.append({
-            "chunk_text": row.chunk_text,
+            "chunk_text": await decrypt_value(db, user_id, row.chunk_text),
             "source_field": row.source_field,
             "classification": row.classification,
             "similarity": sim,

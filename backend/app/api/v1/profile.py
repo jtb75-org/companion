@@ -40,6 +40,7 @@ async def get_my_profile(
     if not user:
         return {"exists": False, "profile_complete": False}
 
+    from app.services.field_crypto import get_user_phone
     return {
         "exists": True,
         "profile_complete": bool(user.first_name and user.last_name),
@@ -49,7 +50,7 @@ async def get_my_profile(
         "last_name": user.last_name,
         "preferred_name": user.preferred_name,
         "display_name": user.display_name,
-        "phone": user.phone,
+        "phone": await get_user_phone(db, user),
     }
 
 
@@ -147,7 +148,10 @@ async def complete_profile(
     user.first_name = first_name or user.first_name
     user.last_name = last_name or user.last_name
     if phone:
-        user.phone = phone
+        # phone is encrypted at rest (per-tenant envelope). The user row
+        # already exists (fetched above), so its id is available for the DEK.
+        from app.services.field_crypto import set_user_profile_pii
+        await set_user_profile_pii(db, user, phone=phone)
     if data.get("preferred_name"):
         user.preferred_name = data["preferred_name"]
     user.display_name = display
