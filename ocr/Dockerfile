@@ -25,10 +25,11 @@ COPY requirements.txt ./
 #   libgl1, libglib2.0-0   -> OpenCV (cv2) shared libs
 #   libgomp1               -> OpenMP runtime paddle/numpy use
 #   libglib2.0-0           -> gobject deps pulled by opencv
-# curl stays for the container HEALTHCHECK. build-essential is only needed to
-# compile any sdist wheels and is purged in this same layer.
+# curl stays for the container HEALTHCHECK. We do NOT install build-essential:
+# every dep installs from a prebuilt wheel (no compilation), and on this base
+# `build-essential` drags in gcc-14/libstdc++ that needs GLIBC_2.38 (> the
+# base's 2.36) and breaks apt.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential \
       libgl1 \
       libglib2.0-0 \
       libgomp1 \
@@ -36,10 +37,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxext6 \
       libxrender1 \
       curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
  && pip install --upgrade pip setuptools wheel \
- && pip install -r requirements.txt \
- && apt-get purge -y --auto-remove build-essential \
- && rm -rf /var/lib/apt/lists/*
+ && pip install -r requirements.txt
 
 # NOTE: models are loaded LAZILY on first /ocr request (on a real node), not
 # baked in at build — instantiating PaddleOCR (model load + a warmup inference)
