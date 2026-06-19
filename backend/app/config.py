@@ -33,6 +33,21 @@ class Settings(BaseSettings):
     # Delivered via SealedSecret. Required outside development/test.
     field_keyring: str = ""
 
+    # OpenBao Transit — remote KEK for wrapping per-tenant DEKs. When
+    # ``openbao_addr`` is set, ``field_crypto`` wraps/unwraps each user's DEK
+    # via OpenBao's Transit engine (the KEK never lives in the app) instead of
+    # the local KEK keyring above. When empty (dev/test and the current
+    # deploy until OpenBao is wired) the local KEK path is used. When set in
+    # prod and OpenBao is unreachable, DEK wrap/unwrap FAILS CLOSED (raises;
+    # no silent local fallback). Auth is Kubernetes auth: the api pod presents
+    # its ServiceAccount JWT to ``auth/<k8s_auth_mount>/login`` under the
+    # role ``openbao_k8s_role``. See services/openbao_transit.py.
+    openbao_addr: str = ""  # e.g. http://openbao.openbao.svc.cluster.local:8200
+    openbao_transit_key: str = "companion-kek"
+    openbao_transit_mount: str = "transit"
+    openbao_k8s_role: str = "companion"
+    openbao_k8s_auth_mount: str = "kubernetes"
+
     # Dedicated field-level key for high-sensitivity field TYPES (SSN, bank
     # account numbers, MRN, etc.) — a single per-field-type key, NOT
     # per-user. JSON of the form: {"primary": "fl1", "keys": {"fl1": "<b64-32>"}}.
