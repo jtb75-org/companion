@@ -1,107 +1,63 @@
-"""Unit tests for services/kms_service.py — local AES-256-GCM field encryption."""
+"""Unit tests for the legacy kms_service shim (decrypt-only).
+
+The live field-encryption logic now lives in services/field_crypto.py (see
+test_field_crypto.py). This module only verifies the back-compat shim: it
+still decrypts legacy ``f1:``/``enc:`` values, fails closed on untagged data in
+prod, and refuses to encrypt (un-tenanted writes are no longer allowed).
+"""
 
 from __future__ import annotations
 
 import base64
 import os
-from unittest.mock import patch
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from app.config import settings
-from app.services import kms_service
-
-
-@pytest.fixture(autouse=True)
-def _clear_key_cache():
-    """_key() is lru_cached on the configured key; clear around each test."""
-    kms_service._key.cache_clear()
-    yield
-    kms_service._key.cache_clear()
+from app.services import field_crypto, kms_service
 
 
 def _gen_key() -> str:
     return base64.b64encode(os.urandom(32)).decode()
 
 
-def _svc():
-    return kms_service.LocalEncryptionService()
+@pytest.fixture(autouse=True)
+def _reset():
+    field_crypto.reset_keyring_cache()
+    yield
+    field_crypto.reset_keyring_cache()
 
 
-def test_aesgcm_roundtrip_with_key():
-    with patch.object(settings, "field_encryption_key", _gen_key()):
-        svc = _svc()
-        ct = svc.encrypt("secret PHI value")
-        assert ct.startswith("f1:")
-        assert "secret PHI value" not in ct  # actually encrypted
-        assert svc.decrypt(ct) == "secret PHI value"
+def _f1(plaintext: str, key_b64: str) -> str:
+    key = base64.b64decode(key_b64)
+    nonce = os.urandom(12)
+    ct = AESGCM(key).encrypt(nonce, plaintext.encode(), None)
+    return "f1:" + base64.b64encode(nonce + ct).decode()
 
 
-def test_ciphertext_is_nondeterministic():
-    """Random nonce per call: same plaintext -> different ciphertext."""
-    with patch.object(settings, "field_encryption_key", _gen_key()):
-        svc = _svc()
-        assert svc.encrypt("x") != svc.encrypt("x")
+def test_get_kms_service_still_importable():
+    assert kms_service.get_kms_service() is kms_service.get_kms_service()
 
 
-def test_tampered_ciphertext_fails():
-    """GCM auth tag must reject modified ciphertext."""
-    with patch.object(settings, "field_encryption_key", _gen_key()):
-        svc = _svc()
-        ct = svc.encrypt("hello")
-        tampered = ct[:-2] + ("AA" if ct[-2:] != "AA" else "BB")
-        with pytest.raises(RuntimeError):
-            svc.decrypt(tampered)
+def test_decrypt_legacy_f1(monkeypatch):
+    key = _gen_key()
+    monkeypatch.setattr(settings, "field_encryption_key", key)
+    field_crypto.reset_keyring_cache()
+    blob = _f1("legacy PHI", key)
+    assert kms_service.get_kms_service().decrypt(blob) == "legacy PHI"
 
 
-def test_wrong_key_cannot_decrypt():
-    with patch.object(settings, "field_encryption_key", _gen_key()):
-        ct = _svc().encrypt("hello")
-    kms_service._key.cache_clear()
-    with patch.object(settings, "field_encryption_key", _gen_key()):
-        with pytest.raises(RuntimeError):
-            _svc().decrypt(ct)
+def test_decrypt_dev_marker():
+    assert kms_service.get_kms_service().decrypt("enc:hello") == "hello"
 
 
-def test_bad_key_length_raises():
-    with patch.object(
-        settings, "field_encryption_key", base64.b64encode(os.urandom(16)).decode()
-    ):
-        with pytest.raises(RuntimeError):
-            _svc().encrypt("x")
+def test_encrypt_is_removed():
+    with pytest.raises(RuntimeError):
+        kms_service.get_kms_service().encrypt("nope")
 
 
-def test_dev_fallback_without_key():
-    with (
-        patch.object(settings, "field_encryption_key", ""),
-        patch.object(settings, "environment", "test"),
-    ):
-        svc = _svc()
-        ct = svc.encrypt("hello")
-        assert ct == "enc:hello"
-        assert svc.decrypt(ct) == "hello"
-
-
-@pytest.mark.parametrize("env", ["prod", "staging"])
-def test_no_key_fails_closed_outside_dev(env):
-    with (
-        patch.object(settings, "field_encryption_key", ""),
-        patch.object(settings, "environment", env),
-    ):
-        with pytest.raises(RuntimeError):
-            _svc().encrypt("x")
-
-
-def test_untagged_value_fails_closed_in_prod():
-    with (
-        patch.object(settings, "field_encryption_key", _gen_key()),
-        patch.object(settings, "environment", "prod"),
-    ):
-        with pytest.raises(RuntimeError):
-            _svc().decrypt("raw-untagged-value")
-
-
-def test_decrypt_legacy_enc_prefix_with_key_present():
-    """Legacy enc: dev values still decrypt even when a real key is set."""
-    with patch.object(settings, "field_encryption_key", _gen_key()):
-        assert _svc().decrypt("enc:legacy") == "legacy"
+def test_untagged_fails_closed_in_prod(monkeypatch):
+    monkeypatch.setattr(settings, "environment", "production")
+    with pytest.raises(RuntimeError):
+        kms_service.get_kms_service().decrypt("raw-untagged")
