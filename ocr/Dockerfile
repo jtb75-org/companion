@@ -51,22 +51,24 @@ RUN pip install --no-cache-dir \
       opencv-python-headless==4.11.0.86 scikit-image==0.25.2 scipy==1.15.3
 RUN pip install --no-cache-dir -r requirements.txt
 
-# CRITICAL — undo system-library shadowing left by the wheels above.
-# opencv-python-headless 4.11 (and friends) are built on a gcc-13 manylinux and
-# their install drops NEWER libstdc++.so.6.0.33 / libbsd.so.0.12.2 into
-# /usr/lib AND repoints the system symlinks at them. Those gcc-13 libs require
-# GLIBC_2.38, but this base is glibc 2.36 (bookworm), so every native import
-# (pymupdf._extra, cv2, paddle) then dies at runtime with
-#   "version `GLIBC_2.38' not found (required by libstdc++.so.6)".
-# opencv loads its OWN copies from <pkg>.libs/ via RPATH, so the system copies
-# are pure breakage: delete the intruders and let ldconfig fall back to the
-# dpkg-owned bookworm-stock libs (libstdc++.so.6.0.30 / libbsd.so.0.11.7).
-# Verified end-to-end on a real node: fitz+paddle+cv2+paddleocr import and a
-# live OCR inference all succeed once these are removed. (Filenames are fixed by
-# the pins above; bump them here if those pins change.)
-RUN rm -f /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33 \
-          /usr/lib/x86_64-linux-gnu/libbsd.so.0.12.2 \
- && ldconfig
+# CRITICAL — strip the Debian-trixie shared-library overlay the pip layer above
+# drops onto this bookworm (glibc 2.36) base. It dumps newer (gcc-13, glibc
+# 2.38/2.39) DUPLICATES of dozens of core system libs into /usr/lib and ldconfig
+# repoints each soname at the higher version; those need GLIBC_2.38+, so every
+# native import (pymupdf._extra, cv2, paddle) AND core tools (curl, apt, sed)
+# break at runtime with "GLIBC_2.38 not found". The plain base is clean — only
+# our build adds these, non-deterministically — so clean_libs.py runs every time:
+# for each soname with 2+ real versions it keeps the bookworm (lowest) one and
+# removes the trixie dups, then ldconfig repoints the symlinks. A few packages
+# (libldap) are *replaced*, not duplicated, so we reinstall them from apt (which
+# works again once the dup glibc-2.38 libs are gone) to keep curl/HEALTHCHECK
+# functional. Verified end-to-end on a real node: paddle/cv2/pymupdf import and
+# a live OCR inference succeed, and curl/apt/sed work again.
+COPY clean_libs.py ./clean_libs.py
+RUN python3 clean_libs.py \
+ && apt-get update \
+ && apt-get install --reinstall -y --no-install-recommends curl libldap-2.5-0 \
+ && rm -rf /var/lib/apt/lists/*
 
 # NOTE: models are loaded LAZILY on first /ocr request (on a real node), not
 # baked in at build — instantiating PaddleOCR (model load + a warmup inference)
