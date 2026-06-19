@@ -11,7 +11,6 @@ from app.models.enums import PaymentStatus
 from app.models.medication import Medication, MedicationConfirmation
 from app.models.todo import Todo
 from app.models.trusted_contact import TrustedContact
-from app.services.field_crypto import decrypt_row_field
 
 
 async def list_contacts(
@@ -299,15 +298,16 @@ async def get_dashboard_summary(db: AsyncSession, user_id: UUID) -> dict:
             await db.get(Document, r.document_id)
             if r.document_id else None
         )
+        # Tier 2 caregivers see category + status + age only — NEVER document
+        # contents or financial figures. card_summary (a content summary that
+        # can include amounts) is deliberately NOT exposed here.
+        # Ref: caregiver-access-and-privacy.md §3 ("Never document contents",
+        # "Never specific financial figures") + §4.
         recent_documents.append({
             "review_id": str(r.id),
             "review_status": r.review_status,
             "recommended_action": r.recommended_action,
             "source_description": r.source_description,
-            "card_summary": (
-                await decrypt_row_field(db, doc, "card_summary")
-                if doc else None
-            ),
             "classification": (
                 getattr(
                     doc.classification, "value",
