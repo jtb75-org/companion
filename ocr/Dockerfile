@@ -7,7 +7,9 @@
 # scikit-image, lanms, pyclipper, pdf2docx, ...) has prebuilt wheels for 3.10,
 # so nothing compiles in kaniko (3.12 forced source builds that segfaulted),
 # and stdlib distutils still exists.
-FROM python:3.10-slim
+# slim-bookworm (Debian 12 / glibc 2.36): paddlepaddle 2.6.2's wheel
+# segfaults on bare `slim` (now Debian 13 / glibc 2.41 — too new).
+FROM python:3.10-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -39,11 +41,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && apt-get purge -y --auto-remove build-essential \
  && rm -rf /var/lib/apt/lists/*
 
-# Pre-download the PaddleOCR models into the image so the container ships with
-# them — no cold first-request download. Models land under /root/.paddleocr.
-COPY warmup.py ./warmup.py
-RUN python warmup.py
-
+# NOTE: models are loaded LAZILY on first /ocr request (on a real node), not
+# baked in at build — instantiating PaddleOCR (model load + a warmup inference)
+# segfaults inside kaniko. First request is slower; /health stays cheap so the
+# pod still goes Ready promptly. (warmup.py retained for optional local use.)
 COPY server.py ./server.py
 
 ARG BUILD_COMMIT=unknown
