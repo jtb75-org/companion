@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     documentai_processor_id: str = "6785df08989fd9a6"
     documentai_location: str = "us"
 
+    # OCR provider selection (see app/pipeline/ocr/). The primary engine's
+    # text flows downstream exactly as before; the optional shadow engine runs
+    # best-effort for A/B comparison and never affects the pipeline.
+    ocr_provider: str = "documentai"  # PRIMARY: documentai | paddleocr
+    ocr_shadow_provider: str = ""  # if set (and != primary), run for compare
+    ocr_service_url: str = ""  # PaddleOCR HTTP service base URL
+
     # App
     app_url: str = "http://localhost:5173"  # Frontend URL for email links
     environment: str = "development"

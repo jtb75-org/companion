@@ -610,7 +610,7 @@ async def _get_pending_reviews(
     )
     reviews = result.scalars().all()
 
-    from app.services.field_crypto import decrypt_row_field
+    from app.services.field_crypto import decrypt_row_field, decrypt_value
 
     items = []
     for i, r in enumerate(reviews, 1):
@@ -627,11 +627,11 @@ async def _get_pending_reviews(
         # Get document content for full context
         ocr_text = ""
         if doc:
-            # Try OCR text first
+            # Try OCR text first (stored encrypted per-user at rest).
             if doc.source_metadata:
-                ocr_text = doc.source_metadata.get(
-                    "ocr_text", ""
-                )
+                ocr_text = await decrypt_value(
+                    db, doc.user_id, doc.source_metadata.get("ocr_text", "")
+                ) or ""
             # Fallback to extracted fields as content source
             if not ocr_text:
                 doc_fields = await decrypt_row_field(

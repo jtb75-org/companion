@@ -31,11 +31,16 @@ async def embed_document(
 
     Returns the number of chunks embedded.
     """
-    # Get OCR text from the document's source_metadata
+    # Get OCR text from the document's source_metadata. It is stored encrypted
+    # per-user at rest (PHI), so decrypt before chunking/embedding.
+    from app.services.field_crypto import decrypt_value
+
     doc = await db.get(Document, document_id)
     ocr_text = ""
     if doc and doc.source_metadata:
-        ocr_text = doc.source_metadata.get("ocr_text", "")
+        ocr_text = await decrypt_value(
+            db, user_id, doc.source_metadata.get("ocr_text", "")
+        ) or ""
     if not ocr_text:
         ocr_text = extraction_result.extracted_fields.get(
             "raw_text", ""
