@@ -1,7 +1,7 @@
 # PaddleOCR HTTP service deps. Pinned for reproducible kaniko builds.
 # paddlepaddle is the CPU wheel (no GPU on the K3s Minisforum nodes).
 paddleocr==2.7.3
-paddlepaddle==2.6.1
+paddlepaddle==2.6.2  # 2.6.1 has no py3.12 wheel; 2.6.2 is lowest available
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
 pymupdf==1.24.5
