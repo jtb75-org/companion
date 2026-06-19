@@ -47,7 +47,8 @@
       "Bash(gh run:*)",
       "Bash(python:*)",
       "Bash(python3:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Read(//Users/joe/repo/blue/**)"
     ]
   }
 }
