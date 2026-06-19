@@ -37,9 +37,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxext6 \
       libxrender1 \
       curl ca-certificates \
- && rm -rf /var/lib/apt/lists/* \
- && pip install --upgrade pip setuptools wheel \
- && pip install -r requirements.txt
+ && rm -rf /var/lib/apt/lists/*
+
+# Install in SEPARATE layers so no single image blob is ~2GB: a 2GB layer
+# times out (502) pushing through the zot ingress. Splitting paddle, the CV
+# stack, and paddleocr into their own ~600-800MB blobs keeps each push under
+# the timeout. requirements.txt (pinned) drives versions; the already-installed
+# heavy deps are skipped by the final `-r` install.
+RUN pip install --no-cache-dir --upgrade pip setuptools==69.5.1 wheel==0.43.0
+RUN pip install --no-cache-dir paddlepaddle==2.6.2 numpy==1.26.4
+RUN pip install --no-cache-dir \
+      opencv-python==4.6.0.66 opencv-contrib-python==4.6.0.66 \
+      opencv-python-headless==4.11.0.86 scikit-image==0.25.2 scipy==1.15.3
+RUN pip install --no-cache-dir -r requirements.txt
 
 # NOTE: models are loaded LAZILY on first /ocr request (on a real node), not
 # baked in at build — instantiating PaddleOCR (model load + a warmup inference)
