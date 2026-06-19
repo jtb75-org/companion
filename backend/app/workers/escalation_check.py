@@ -44,6 +44,15 @@ async def run_escalation_check():
                         f"Escalation check failed for user {user_id}"
                     )
 
+            # Per-user failures are isolated and reported via `failed`, but a
+            # TOTAL failure means a systemic problem (DB/broker down) and zero
+            # safety escalations went out this cycle. Raise so the run surfaces
+            # as a failed Job instead of a silent clean exit.
+            if user_ids and failed == len(user_ids):
+                raise RuntimeError(
+                    f"Escalation check: all {failed} user(s) failed"
+                )
+
             logger.info(
                 f"Escalation check complete: "
                 f"{len(user_ids)} users checked, "

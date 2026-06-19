@@ -7,6 +7,7 @@ independently, counts failures, and never raises on a single-user error.
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import delete
 
 from app.db import session as db_module
@@ -88,5 +89,22 @@ async def test_one_bad_user_does_not_block_others(monkeypatch):
     assert result["total_escalated"] >= 2
     assert result["failed"] >= 1
     assert result["users_checked"] >= 3
+
+    await _cleanup()
+
+
+async def test_total_failure_raises(monkeypatch):
+    """A systemic failure (every user fails) must raise, not exit clean."""
+    await _seed_users()
+
+    async def _always_fail(db, user_id):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(
+        "app.workers.escalation_check.check_escalations", _always_fail
+    )
+
+    with pytest.raises(RuntimeError):
+        await run_escalation_check()
 
     await _cleanup()
