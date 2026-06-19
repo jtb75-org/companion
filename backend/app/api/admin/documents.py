@@ -140,6 +140,18 @@ async def list_documents(
     }
 
 
+async def _decrypt_ocr_shadow(db: AsyncSession, doc: Document) -> dict | None:
+    """Return the OCR shadow A/B comparison with shadow_text decrypted."""
+    shadow = (doc.source_metadata or {}).get("ocr_shadow")
+    if not isinstance(shadow, dict):
+        return None
+    out = dict(shadow)
+    out["shadow_text"] = await decrypt_value(
+        db, doc.user_id, shadow.get("shadow_text")
+    )
+    return out
+
+
 @router.get("/{document_id}")
 async def get_document_detail(
     document_id: uuid.UUID,
@@ -186,10 +198,14 @@ async def get_document_detail(
         "extracted_fields": await decrypt_row_field(db, doc, "extracted_fields"),
         "routing_destination": doc.routing_destination.value if doc.routing_destination else None,
         "page_count": doc.page_count,
-        "ocr_text": (doc.source_metadata or {}).get("ocr_text"),
+        # ocr_text + ocr_shadow.shadow_text are encrypted PHI at rest.
+        "ocr_text": await decrypt_value(
+            db, doc.user_id, (doc.source_metadata or {}).get("ocr_text")
+        ),
+        "ocr_shadow": await _decrypt_ocr_shadow(db, doc),
         "source_metadata": {
             k: v for k, v in (doc.source_metadata or {}).items()
-            if k != "ocr_text"
+            if k not in ("ocr_text", "ocr_shadow")
         },
         "created_at": doc.received_at.isoformat() if doc.received_at else None,
         "processed_at": doc.processed_at.isoformat() if doc.processed_at else None,
