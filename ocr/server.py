@@ -14,16 +14,27 @@ Contract (must match backend/app/pipeline/ocr/paddleocr_provider.py):
 
     GET /health -> 200 {"status": "ok"}   (no model load — readiness probe)
 
-The PaddleOCR model is loaded lazily on the first /ocr request and cached for
-the process lifetime. /health stays cheap so readiness never blocks on the
-model. In the shipped image the models are already on disk (pre-downloaded at
-build time), so the first-request cost is load-into-memory, not a network pull.
+The PaddleOCR model is built once and cached for the process lifetime. The
+build is kicked off in a background thread at startup (warm-up) and is also
+guarded so the first /ocr request can trigger it if warm-up hasn't finished.
+The models are downloaded from PaddleOCR's CDN on first build (~16MB); they are
+NOT baked into the image (instantiating PaddleOCR at build time segfaults in
+kaniko). Egress to the model CDN is therefore required until the models are
+pre-baked — track this alongside the egress NetworkPolicy.
+
+CRITICAL: every blocking call (PaddleOCR build + inference + PDF rasterization)
+is dispatched to a worker thread via ``asyncio.to_thread``, and warm-up runs in
+its own thread, so the event loop — and therefore /health — never blocks. A
+synchronous ~30-60s model load on the loop would starve the liveness probe and
+get the pod SIGTERM'd mid-load (it never finishes); offloading prevents that.
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
+import threading
 import time
 from threading import Lock
 
@@ -50,25 +61,39 @@ _PDF_MIMES = {"application/pdf"}
 _IMAGE_MIMES = {"image/jpeg", "image/jpg", "image/png", "image/heic", "image/heif"}
 
 # Lazy singleton — PaddleOCR is heavy and (with use_gpu=False) thread-unsafe
-# enough that we serialize calls behind a lock. One worker, one engine.
+# enough that we serialize inference behind a lock. One worker, one engine.
+# _build_lock guards construction (warm-up thread vs. first request racing);
+# _ocr_lock guards inference.
 _ocr_engine = None
 _ocr_lock = Lock()
+_build_lock = Lock()
 
 
 def _get_engine():
-    """Lazily build (or return) the cached PaddleOCR engine.
+    """Build (or return) the cached PaddleOCR engine. Blocking; thread-safe.
 
     CPU-only. Angle classification on (rotated phone photos of documents are
-    common). lang='en' matches the Document AI processor's scope.
+    common). lang='en' matches the Document AI processor's scope. Double-checked
+    locking so the startup warm-up thread and a first request can't both build.
     """
     global _ocr_engine
     if _ocr_engine is None:
-        from paddleocr import PaddleOCR
+        with _build_lock:
+            if _ocr_engine is None:
+                from paddleocr import PaddleOCR
 
-        log.info("Loading PaddleOCR engine (CPU)...")
-        _ocr_engine = PaddleOCR(use_angle_cls=True, lang="en", use_gpu=False, show_log=False)
-        log.info("PaddleOCR engine ready.")
+                log.info("Loading PaddleOCR engine (CPU)...")
+                _ocr_engine = PaddleOCR(
+                    use_angle_cls=True, lang="en", use_gpu=False, show_log=False
+                )
+                log.info("PaddleOCR engine ready.")
     return _ocr_engine
+
+
+def _ocr_image_bytes(body: bytes) -> str:
+    """Decode raw image bytes and OCR them. Blocking — call via to_thread."""
+    img = Image.open(io.BytesIO(body))
+    return _ocr_image(img)
 
 
 def _ocr_image(img: Image.Image) -> str:
@@ -115,6 +140,17 @@ def _extract_pdf(data: bytes) -> str:
     return "\n\n".join(pages)
 
 
+@app.on_event("startup")
+async def _warm_up() -> None:
+    """Build the engine in a background thread so the first real request is warm.
+
+    Runs off the event loop (its own thread) so the ~30-60s model load never
+    blocks /health. If warm-up is still running when a request arrives,
+    _get_engine's lock simply makes the request wait for the same build.
+    """
+    threading.Thread(target=_get_engine, name="ocr-warmup", daemon=True).start()
+
+
 @app.get("/health")
 async def health() -> JSONResponse:
     # Intentionally does NOT touch the model — used as the readiness probe.
@@ -131,11 +167,12 @@ async def ocr(request: Request) -> JSONResponse:
 
     start = time.monotonic()
     try:
+        # Offload ALL blocking work (model build + inference + PDF raster) to a
+        # worker thread so the event loop — and /health — stay responsive.
         if mime in _PDF_MIMES:
-            text = _extract_pdf(body)
+            text = await asyncio.to_thread(_extract_pdf, body)
         elif mime in _IMAGE_MIMES or mime.startswith("image/"):
-            img = Image.open(io.BytesIO(body))
-            text = _ocr_image(img)
+            text = await asyncio.to_thread(_ocr_image_bytes, body)
         else:
             return JSONResponse(
                 {"error": f"unsupported content-type: {mime!r}"}, status_code=500
