@@ -1,12 +1,16 @@
 # Companion (D.D.) — project notes for future sessions
 
-## Active initiative: self-hosted migration
+## Active initiative: self-hosted migration (largely COMPLETE)
 
-Migrating from GCP/Firebase to a self-hosted K8s cluster with bare-metal
-Ollama on Mac Studios.
+Migrated from GCP/Firebase to a self-hosted K8s cluster with bare-metal
+Ollama on Mac Studios. The cluster is LIVE and Companion is DEPLOYED and
+functionally wired (see Current state). Remaining: OCR localization,
+pre-real-PHI security gates, Firebase prod-auth finish, mobile builds.
 
-**Primary reference:** [`docs/migration-plan.md`](docs/migration-plan.md) —
-~870 lines, Phase -1 through Phase 12, updated 2026-04-19.
+**Primary reference:** [`docs/migration-plan.md`](docs/migration-plan.md)
+(Phase -1 → 12). NOTE: the plan and this file's older history predate
+execution — the auto-memory (`MEMORY.md` + linked notes) and `RESUME.md`
+hold the live, current state and are the source of truth on resume.
 
 **Related repos:**
 - `~/repo/companion-gitops` (github.com/jtb75-org/companion-gitops) —
@@ -22,54 +26,68 @@ Ollama on Mac Studios.
 prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
 `AGENTS.md`.
 
-## Current state (2026-04-19)
+## Current state (2026-06-19)
 
-- **Hardware:** 3× Minisforum AI X1-255 barebones + 3× 64GB DDR5-5600
-  SODIMM kits + 6× 1TB NVMe ordered. 5-7 day ETA. Plan is pre-execution.
-- **Macs (inference tier):** Ollama running bare-metal on both:
-  - `studio-max` (M4 Max, 64GB) — 192.168.0.94
-  - `studio-ultra` (M3 Ultra, 96GB) — 192.168.0.104
-  - LaunchDaemon at `/Library/LaunchDaemons/com.ollama.server.plist`
-    (user `joe`, bound `0.0.0.0:11434`, KV cache q8_0, flash attention on)
-  - SSH as user `joe` with passwordless sudo.
-  - Models NOT yet pulled.
-- **Old OrbStack K3s cluster** on Macs still runs existing workloads
-  (traefik, cloudflared, argocd, zot, sonarr/radarr/nzbget, mail-relay).
-  Will be fully decommissioned after new cluster proves out.
-- **`argocd-apps`** has Phase 0 commits (`cnpg-operator.yaml`,
-  `minio.yaml`, `ollama-endpoints.yaml` + their `infra/` dirs) that
-  target the OLD cluster. Flagged in the plan as deprecated —
-  manifests mostly port forward to the new cluster; main changes are
-  `nfs-client` → `longhorn` on MinIO PVC and re-sealing all Secrets.
+- **Cluster is LIVE**: 5-node k3s (`mini01-04` + `tower01`). Platform fully
+  deployed via ArgoCD (`~/repo/argocd-apps` root-app): cnpg-operator, minio,
+  sealed-secrets (controller in ns `infra`), cert-manager, longhorn, traefik,
+  cloudflared, zot, openbao (+ unsealer), authentik. (The "hardware ordered /
+  pre-execution" framing in this file's older history is obsolete.)
+- **Companion is DEPLOYED + functionally wired** (ns `companion`, ArgoCD app
+  Synced/Healthy). What's localized vs kept:
+  - **DB** → CNPG `paradedb/paradedb:17` (bundles pgvector). migrate Job =
+    Sync hook; paradedb needs `postgresUID/GID 999`.
+  - **Storage** GCS → **MinIO** (S3); bucket `companion-documents`, scoped key.
+  - **Embeddings** → **nomic-embed-text** (768-dim, no schema change) via the
+    shared **LiteLLM gateway** (`llm.ng20.org` / studio-ultra `:4000`), which
+    HA-balances across both Macs. Scoped virtual key.
+  - **Generation KEPT on Gemini/Vertex** (`COMPANION_LLM_PROVIDER=gemini`,
+    project `companion-prod-491606`, Vertex re-enabled + SA `aiplatform.user`).
+    Quality/safety reason; localizing to Ollama is deferred behind the switch.
+  - **Field encryption** → local **AES-256-GCM per-tenant envelope**
+    (`app/services/field_crypto.py`): per-user DEK wrapped by a KEK in
+    **OpenBao Transit** (`companion-kek`); fields `f2:` with user_id AAD. Profile
+    phone/dob/address + RAG chunk_text encrypted. Field-level key capability +
+    CI tripwire (no SSN/bank/MRN stored).
+  - **Auth** → Firebase **prod** (web login works; admin = joe.buhr@gmail.com).
+    **Signup is invite-only** (`complete-profile` gated). OAuth consent screen
+    still needs publishing for non-test users.
+  - **Workers** → all wired as internal endpoints + CronJobs (morning-checkin,
+    medication-reminders, escalation-check, away-monitor, retention, ttl-purge,
+    account-deletion). `/api/internal/*` blocked at the edge.
+- **Macs (inference tier):** Ollama bare-metal — `studio-max` (M4 Max, 64GB,
+  192.168.0.94) + `studio-ultra` (M3 Ultra, 96GB, 192.168.0.104), `0.0.0.0:11434`.
+  Models pulled (qwen2.5:14b/72b, qwen3-coder, nomic-embed-text on both).
+  **LiteLLM gateway** runs on studio-ultra `:4000` (hand-edited
+  `~/.config/litellm/config.yaml`, launchd). SSH as `joe`, passwordless sudo.
 
-## Next steps on resume
+## Next steps / remaining work
 
-1. **Decide D1 + D2** (LLM + embedding model). Recommended: Qwen 2.5 32B
-   on studio-ultra, bge-m3 on studio-max. Once decided, kick off
-   `ollama pull` on each Mac so models are warm before hardware arrives.
-2. **Pre-hardware checklist** — back up Cloudflare Tunnel token, mail-relay
-   plaintext secret, Sonarr/Radarr/nzbget configs, optionally Zot data.
-   Plan §Phase -1 describes the rebuild sequence.
-3. **Commit the plan revision** — `docs/migration-plan.md` is currently
-   uncommitted on `main`.
-4. **When hardware arrives:** execute Phase -1 → Phase 0 per plan.
+1. **Pre-real-PHI gates** (before onboarding real members): enable the OpenBao
+   **audit device** (declarative — add `audit "file"` to
+   `argocd-apps/applications/openbao.yaml` + restart); enable **OpenBao TLS**
+   (listener is `tls_disable=1`); **vault the encryption keys** off-cluster
+   (`~/companion-key-backup/` → 1Password); encrypt `source_metadata.ocr_text`.
+2. **Firebase finish:** publish the OAuth consent screen; build/sign mobile
+   binaries + register the Android release SHA-1.
+3. **OCR** DocumentAI/Vision → **PaddleOCR** (deferred; the one remaining
+   GCP-dependent pipeline stage).
+4. Owner one-offs: revoke any bootstrap OpenBao token; key rotation automation.
 
-## Open decisions (plan §4)
+## Open decisions (mostly resolved)
 
-| # | What | Recommendation |
+| # | What | Decision |
 |---|---|---|
-| D1 | Primary LLM | Qwen 2.5 32B Instruct |
-| D2 | Embedding model | bge-m3 (1024-dim) |
-| D3 | Push notifications | APNs-direct + WebSocket hybrid |
-| D4 | OCR engine | PaddleOCR first, VLM fallback |
-| D10 | Offsite backup destination | Backblaze B2 or similar |
-
-All others closed — see plan §6.
+| D1 | Primary LLM | Generation kept on **Gemini/Vertex** for now (quality/safety); Ollama qwen2.5 deferred behind the provider switch |
+| D2 | Embedding model | **nomic-embed-text** (768-dim, no migration) via LiteLLM — NOT bge-m3 |
+| D4 | OCR engine | PaddleOCR (DEFERRED — still on GCP DocumentAI/Vision) |
+| KMS | Field encryption | Local AES-256-GCM envelope, **KEK in OpenBao Transit** |
 
 ## Architecture reminders
 
-- **Tiers:** Macs = Ollama-only bare metal. Minisforums = 3-node K3s
-  cluster for everything else.
+- **Tiers:** Macs = bare-metal inference (Ollama on both + the LiteLLM
+  gateway on studio-ultra). Minisforums = 5-node k3s cluster for everything
+  else.
 - **Storage:** Longhorn 3-replica with per-node anti-affinity. NAS
   demoted to bulk media + offsite backup — not in Companion's critical
   path.
