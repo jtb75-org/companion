@@ -15,8 +15,8 @@ import uuid
 import pytest
 
 from app.config import settings
-from app.services import field_crypto
 from app.models.user_encryption_key import UserEncryptionKey
+from app.services import field_crypto
 
 
 def _gen_key() -> str:
@@ -110,7 +110,8 @@ async def test_decrypt_f2_without_dek_row_fails():
     uid = uuid.uuid4()
     # A well-formed f2 blob but no DEK row present for this user.
     with pytest.raises(RuntimeError):
-        await field_crypto.decrypt_for_user(db, uid, "f2:" + base64.b64encode(os.urandom(40)).decode())
+        blob = base64.b64encode(os.urandom(40)).decode()
+        await field_crypto.decrypt_for_user(db, uid, "f2:" + blob)
 
 
 async def test_tampered_f2_fails():
