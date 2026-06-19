@@ -14,6 +14,7 @@ SENSITIVE_KEYS = [
     "content",
     "text",
     "ocr_text",
+    "shadow_text",
     "document_text",
 ]
 
