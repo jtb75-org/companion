@@ -18,6 +18,7 @@ from app.models.document import Document
 from app.models.enums import DocumentStatus
 from app.models.pipeline_metrics import PipelineMetric
 from app.models.user import User
+from app.services.field_crypto import decrypt_row_field, decrypt_value
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ async def list_documents(
             Document.status,
             Document.classification,
             Document.urgency_level,
+            Document.user_id,
             Document.card_summary,
             Document.received_at,
             Document.processed_at,
@@ -114,7 +116,9 @@ async def list_documents(
                 if row.urgency_level
                 else None
             ),
-            "card_summary": row.card_summary,
+            "card_summary": await decrypt_value(
+                db, row.user_id, row.card_summary
+            ),
             "created_at": (
                 row.received_at.isoformat()
                 if row.received_at
@@ -177,9 +181,9 @@ async def get_document_detail(
         "classification": doc.classification.value if doc.classification else None,
         "urgency_level": doc.urgency_level.value if doc.urgency_level else None,
         "confidence_score": float(doc.confidence_score) if doc.confidence_score else None,
-        "card_summary": doc.card_summary,
-        "spoken_summary": doc.spoken_summary,
-        "extracted_fields": doc.extracted_fields,
+        "card_summary": await decrypt_row_field(db, doc, "card_summary"),
+        "spoken_summary": await decrypt_row_field(db, doc, "spoken_summary"),
+        "extracted_fields": await decrypt_row_field(db, doc, "extracted_fields"),
         "routing_destination": doc.routing_destination.value if doc.routing_destination else None,
         "page_count": doc.page_count,
         "ocr_text": (doc.source_metadata or {}).get("ocr_text"),

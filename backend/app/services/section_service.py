@@ -14,6 +14,7 @@ from app.models.enums import (
 )
 from app.models.medication import Medication, MedicationConfirmation
 from app.models.todo import Todo
+from app.services.field_crypto import decrypt_row_field
 
 
 async def get_home_section(db: AsyncSession, user_id: UUID) -> dict:
@@ -284,12 +285,17 @@ async def get_today_section(db: AsyncSession, user_id: UUID) -> dict:
     )
     for doc in docs_result.scalars().all():
         urgency = 0 if doc.urgency_level == UrgencyLevel.URGENT else 1
+        detail = (
+            await decrypt_row_field(db, doc, "card_summary")
+            or await decrypt_row_field(db, doc, "spoken_summary")
+            or ""
+        )
         items.append({
             "type": "document",
             "urgency": urgency,
             "id": str(doc.id),
             "title": f"Document: {doc.classification or 'unclassified'}",
-            "detail": doc.card_summary or doc.spoken_summary or "",
+            "detail": detail,
         })
 
     # Sort by urgency (lower number = more urgent)

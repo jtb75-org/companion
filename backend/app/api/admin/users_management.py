@@ -38,29 +38,29 @@ async def list_companion_users(
     db: AsyncSession = Depends(get_db),
 ):
     """List all companion users with full details."""
+    from app.services.field_crypto import decrypt_row_field
+
     result = await db.execute(select(User).order_by(User.first_name, User.last_name))
     users = result.scalars().all()
-    return {
-        "users": [
-            {
-                "id": str(u.id),
-                "email": u.email,
-                "first_name": u.first_name,
-                "last_name": u.last_name,
-                "phone": u.phone,
-                "preferred_name": u.preferred_name,
-                "display_name": u.display_name,
-                "account_status": u.account_status,
-                "care_model": u.care_model,
-                "deactivated_at": u.deactivated_at.isoformat() if u.deactivated_at else None,
-                "deletion_scheduled_at": (
-                    u.deletion_scheduled_at.isoformat() if u.deletion_scheduled_at else None
-                ),
-                "created_at": u.created_at.isoformat() if u.created_at else None,
-            }
-            for u in users
-        ]
-    }
+    out = []
+    for u in users:
+        out.append({
+            "id": str(u.id),
+            "email": u.email,
+            "first_name": u.first_name,
+            "last_name": u.last_name,
+            "phone": await decrypt_row_field(db, u, "phone"),
+            "preferred_name": u.preferred_name,
+            "display_name": u.display_name,
+            "account_status": u.account_status,
+            "care_model": u.care_model,
+            "deactivated_at": u.deactivated_at.isoformat() if u.deactivated_at else None,
+            "deletion_scheduled_at": (
+                u.deletion_scheduled_at.isoformat() if u.deletion_scheduled_at else None
+            ),
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        })
+    return {"users": out}
 
 
 @router.post("/admin/companion-users", status_code=status.HTTP_201_CREATED)
@@ -80,7 +80,6 @@ async def create_companion_user(
         email=data["email"],
         first_name=first,
         last_name=last,
-        phone=data.get("phone"),
         preferred_name=data.get("preferred_name", first),
         display_name=f"{first} {last}".strip() or data["email"],
         primary_language="en",
@@ -89,7 +88,11 @@ async def create_companion_user(
         warmth_level="warm",
     )
     db.add(user)
-    await db.flush()
+    await db.flush()  # assigns user.id for the per-tenant DEK binding
+    if data.get("phone"):
+        from app.services.field_crypto import set_user_profile_pii
+        await set_user_profile_pii(db, user, phone=data["phone"])
+        await db.flush()
     return {"id": str(user.id), "created": True}
 
 
@@ -105,9 +108,14 @@ async def update_companion_user(
     if not user:
         raise HTTPException(404, "User not found")
 
-    for field in ["first_name", "last_name", "phone", "preferred_name", "email"]:
+    for field in ["first_name", "last_name", "preferred_name", "email"]:
         if field in data:
             setattr(user, field, data[field])
+
+    if "phone" in data:
+        # phone is encrypted at rest (per-tenant envelope).
+        from app.services.field_crypto import set_user_profile_pii
+        await set_user_profile_pii(db, user, phone=data["phone"])
 
     if "first_name" in data or "last_name" in data:
         first = data.get("first_name", user.first_name) or ""

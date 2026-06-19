@@ -11,6 +11,7 @@ from app.models.enums import PaymentStatus
 from app.models.medication import Medication, MedicationConfirmation
 from app.models.todo import Todo
 from app.models.trusted_contact import TrustedContact
+from app.services.field_crypto import decrypt_row_field
 
 
 async def list_contacts(
@@ -303,7 +304,10 @@ async def get_dashboard_summary(db: AsyncSession, user_id: UUID) -> dict:
             "review_status": r.review_status,
             "recommended_action": r.recommended_action,
             "source_description": r.source_description,
-            "card_summary": doc.card_summary if doc else None,
+            "card_summary": (
+                await decrypt_row_field(db, doc, "card_summary")
+                if doc else None
+            ),
             "classification": (
                 getattr(
                     doc.classification, "value",

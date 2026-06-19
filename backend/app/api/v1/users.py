@@ -54,8 +54,19 @@ async def list_memories(
     db: AsyncSession = Depends(get_db),
 ):
     """List functional memories."""
+    from app.services.field_crypto import decrypt_row_field
+
     memories = await memory_service.list_memories(db, user.id)
-    return {"memories": memories, "total": len(memories)}
+    items = []
+    for m in memories:
+        items.append({
+            "id": str(m.id),
+            "category": m.category,
+            "key": m.key,
+            "value": await decrypt_row_field(db, m, "value"),
+            "source": m.source,
+        })
+    return {"memories": items, "total": len(items)}
 
 
 @router.delete("/memory/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)

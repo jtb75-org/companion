@@ -24,6 +24,32 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
+
+async def _serialize_document(db: AsyncSession, doc) -> dict:
+    """Serialize a Document, decrypting the per-tenant encrypted fields.
+
+    Without this, FastAPI would serialize the raw ORM object and leak the
+    tagged ciphertext (and emit ``extracted_fields`` as a string).
+    """
+    from app.services.field_crypto import decrypt_row_field
+
+    return {
+        "id": doc.id,
+        "source_channel": doc.source_channel,
+        "classification": doc.classification,
+        "confidence_score": doc.confidence_score,
+        "urgency_level": doc.urgency_level,
+        "extracted_fields": await decrypt_row_field(db, doc, "extracted_fields"),
+        "spoken_summary": await decrypt_row_field(db, doc, "spoken_summary"),
+        "card_summary": await decrypt_row_field(db, doc, "card_summary"),
+        "routing_destination": doc.routing_destination,
+        "page_count": doc.page_count,
+        "status": doc.status,
+        "received_at": doc.received_at,
+        "processed_at": doc.processed_at,
+        "acknowledged_at": doc.acknowledged_at,
+    }
+
 ALLOWED_SCAN_TYPES = {
     "image/jpeg": "jpg",
     "image/png": "png",
@@ -146,7 +172,8 @@ async def list_documents(
     docs = await document_service.list_documents(
         db, user.id, status=document_status, classification=classification, urgency=urgency
     )
-    return {"documents": docs, "total": len(docs)}
+    serialized = [await _serialize_document(db, d) for d in docs]
+    return {"documents": serialized, "total": len(serialized)}
 
 
 @router.get("/{document_id}/status")
@@ -181,7 +208,7 @@ async def get_document(
     doc = await document_service.get_document(db, user.id, document_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
-    return doc
+    return await _serialize_document(db, doc)
 
 
 @router.patch("/{document_id}")
@@ -197,7 +224,7 @@ async def update_document(
     )
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
-    return doc
+    return await _serialize_document(db, doc)
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -19,6 +19,7 @@ from app.models.trusted_contact import TrustedContact
 from app.models.user import User
 from app.schemas.invitation import AdminPlatformInvite, AdminPlatformInviteResponse
 from app.services import assignment_service, invitation_service
+from app.services.field_crypto import decrypt_row_field, set_user_profile_pii
 
 _editor = require_admin_role("editor")
 
@@ -144,7 +145,7 @@ async def list_all_people(
             "email": email,
             "first_name": u.first_name,
             "last_name": u.last_name,
-            "phone": u.phone,
+            "phone": await decrypt_row_field(db, u, "phone"),
             "preferred_name": u.preferred_name,
             "display_name": u.display_name,
             "is_user": True,
@@ -237,7 +238,6 @@ async def create_person(
             email=email,
             first_name=first_name,
             last_name=last_name,
-            phone=phone,
             preferred_name=data.get("preferred_name", first_name),
             display_name=f"{first_name} {last_name}".strip() or email,
             primary_language="en",
@@ -247,7 +247,10 @@ async def create_person(
             care_model=care_model,
         )
         db.add(user)
-        await db.flush()
+        await db.flush()  # assigns user.id for the per-tenant DEK binding
+        if phone:
+            await set_user_profile_pii(db, user, phone=phone)
+            await db.flush()
         user_id = str(user.id)
 
     # Create admin record if requested
