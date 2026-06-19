@@ -47,6 +47,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from app.config import settings
+from app.services import openbao_transit
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +197,45 @@ def _user_aad(user_id) -> bytes:
     return str(user_id).encode("utf-8")
 
 
+# A DEK wrapped via OpenBao Transit is stored as the utf-8 bytes of Transit's
+# ``vault:vN:...`` ciphertext token. We tag the wrapping in ``kek_id`` as
+# ``transit:<key>`` and detect Transit-wrapped blobs by this ``vault:`` prefix
+# (the local AES-GCM path produces raw nonce||ct bytes, which never start with
+# the ASCII ``vault:``).
+_TRANSIT_TOKEN_PREFIX = "vault:"
+_TRANSIT_KEK_ID_PREFIX = "transit:"
+
+
+def _is_transit_blob(wrapped_blob: bytes) -> bool:
+    """True if ``wrapped_blob`` is an OpenBao Transit ``vault:vN:...`` token."""
+    try:
+        return wrapped_blob.decode("utf-8").startswith(_TRANSIT_TOKEN_PREFIX)
+    except UnicodeDecodeError:
+        return False  # raw AES-GCM bytes -> local path
+
+
 def _wrap_dek(dek: bytes, user_id) -> tuple[bytes, str]:
+    """Wrap a fresh DEK. Uses OpenBao Transit when configured, else local KEK.
+
+    Note: ``user_id`` is not bound as AAD on the Transit path — Transit does not
+    expose per-request AAD via this minimal client, and the DEK is opaque random
+    bytes whose cross-user reuse is already prevented by the *field*-level AAD
+    binding (``encrypt_for_user`` binds ``user_id`` into every ``f2:`` value).
+    Confidentiality of the KEK is what moves to OpenBao here.
+    """
+    if openbao_transit.is_configured():
+        try:
+            token = openbao_transit.get_client().encrypt(
+                base64.b64encode(dek).decode("ascii")
+            )
+        except openbao_transit.OpenBaoTransitError as exc:
+            # Fail closed: configured but unreachable -> never fall back local.
+            raise RuntimeError(
+                "OpenBao Transit is configured but DEK wrap failed; refusing "
+                "to fall back to a local KEK"
+            ) from exc
+        return token.encode("utf-8"), f"{_TRANSIT_KEK_ID_PREFIX}{settings.openbao_transit_key}"
+
     kek_id, kek = _keyring().primary_key()
     nonce = os.urandom(_NONCE_BYTES)
     wrapped = AESGCM(kek).encrypt(nonce, dek, _user_aad(user_id))
@@ -207,6 +246,27 @@ def _unwrap_dek(wrapped_blob: bytes, kek_id: str, user_id) -> bytes:
     cached = _dek_cache_get(wrapped_blob)
     if cached is not None:
         return cached
+
+    if _is_transit_blob(wrapped_blob):
+        if not openbao_transit.is_configured():
+            # A Transit-wrapped DEK but OpenBao not configured: cannot unwrap.
+            raise RuntimeError(
+                "DEK is OpenBao-Transit-wrapped but COMPANION_OPENBAO_ADDR is "
+                "unset; cannot unwrap (set OpenBao to decrypt this tenant)"
+            )
+        try:
+            plaintext_b64 = openbao_transit.get_client().decrypt(
+                wrapped_blob.decode("utf-8")
+            )
+            dek = base64.b64decode(plaintext_b64)
+        except openbao_transit.OpenBaoTransitError as exc:
+            raise RuntimeError(
+                "OpenBao Transit is configured but DEK unwrap failed; refusing "
+                "to fall back to a local KEK"
+            ) from exc
+        _dek_cache_put(wrapped_blob, dek)
+        return dek
+
     kek = _keyring().get(kek_id)
     nonce, ct = wrapped_blob[:_NONCE_BYTES], wrapped_blob[_NONCE_BYTES:]
     try:
@@ -246,6 +306,9 @@ async def _get_or_create_dek(db, user_id) -> bytes:
 
 
 def _can_encrypt() -> bool:
+    # OpenBao Transit provides the KEK remotely; no local keyring needed.
+    if openbao_transit.is_configured():
+        return True
     ring = _keyring()
     return ring.primary is not None and ring.primary in ring.keys
 
