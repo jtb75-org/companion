@@ -285,9 +285,13 @@ async def update_person(
     if not user:
         raise HTTPException(404, "User not found")
 
-    for field in ["first_name", "last_name", "phone", "preferred_name", "care_model"]:
+    for field in ["first_name", "last_name", "preferred_name", "care_model"]:
         if field in data:
             setattr(user, field, data[field])
+    if "phone" in data:
+        # phone is encrypted at rest (per-tenant envelope); route through the
+        # crypto helper rather than writing raw plaintext.
+        await set_user_profile_pii(db, user, phone=data["phone"])
     if "first_name" in data or "last_name" in data:
         first = data.get("first_name", user.first_name) or ""
         last = data.get("last_name", user.last_name) or ""

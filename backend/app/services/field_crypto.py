@@ -41,6 +41,7 @@ import json
 import logging
 import os
 import threading
+from collections import OrderedDict
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -165,8 +166,29 @@ def reset_keyring_cache() -> None:
 # only have been produced from the configured KEK, and we re-verify the AAD on
 # unwrap. We deliberately do NOT key this by user_id alone (that would let a
 # stale entry survive a DEK rotation / re-wrap).
+#
+# Bounded LRU so the process-global cache can't grow without limit (one entry
+# per active user's wrapped DEK). Eviction never affects correctness — an
+# evicted DEK is simply re-unwrapped from its (cheap) AES-GCM blob on next use.
+_DEK_CACHE_MAX = 2048
 _dek_lock = threading.Lock()
-_dek_cache: dict[bytes, bytes] = {}
+_dek_cache: OrderedDict[bytes, bytes] = OrderedDict()
+
+
+def _dek_cache_get(wrapped_blob: bytes) -> bytes | None:
+    with _dek_lock:
+        dek = _dek_cache.get(wrapped_blob)
+        if dek is not None:
+            _dek_cache.move_to_end(wrapped_blob)
+        return dek
+
+
+def _dek_cache_put(wrapped_blob: bytes, dek: bytes) -> None:
+    with _dek_lock:
+        _dek_cache[wrapped_blob] = dek
+        _dek_cache.move_to_end(wrapped_blob)
+        while len(_dek_cache) > _DEK_CACHE_MAX:
+            _dek_cache.popitem(last=False)
 
 
 def _user_aad(user_id) -> bytes:
@@ -182,8 +204,7 @@ def _wrap_dek(dek: bytes, user_id) -> tuple[bytes, str]:
 
 
 def _unwrap_dek(wrapped_blob: bytes, kek_id: str, user_id) -> bytes:
-    with _dek_lock:
-        cached = _dek_cache.get(wrapped_blob)
+    cached = _dek_cache_get(wrapped_blob)
     if cached is not None:
         return cached
     kek = _keyring().get(kek_id)
@@ -194,8 +215,7 @@ def _unwrap_dek(wrapped_blob: bytes, kek_id: str, user_id) -> bytes:
         raise RuntimeError(
             "failed to unwrap user DEK (wrong KEK or tampered row)"
         ) from exc
-    with _dek_lock:
-        _dek_cache[wrapped_blob] = dek
+    _dek_cache_put(wrapped_blob, dek)
     return dek
 
 
@@ -221,8 +241,7 @@ async def _get_or_create_dek(db, user_id) -> bytes:
     # Flush so a concurrent/get within the same session sees it; the caller's
     # transaction commits it.
     await db.flush()
-    with _dek_lock:
-        _dek_cache[wrapped] = dek
+    _dek_cache_put(wrapped, dek)
     return dek
 
 

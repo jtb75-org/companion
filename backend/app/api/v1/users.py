@@ -24,14 +24,59 @@ from app.services.account_lifecycle_service import (
     reactivate_account,
     request_deletion,
 )
+from app.services.field_crypto import (
+    get_user_address,
+    get_user_date_of_birth,
+    get_user_phone,
+    set_user_profile_pii,
+)
 
 router = APIRouter(prefix="/me", tags=["Users"])
 
+# Profile attributes that are encrypted at rest (per-tenant envelope). These
+# must never be written via a raw setattr nor serialized straight off the ORM
+# row — encryption/decryption is routed through field_crypto helpers.
+_ENCRYPTED_PROFILE_ATTRS = ("date_of_birth", "phone", "address")
+
+
+async def _serialize_user(db: AsyncSession, user: User) -> dict:
+    """Serialize the current user, decrypting the per-tenant encrypted fields.
+
+    Returning the raw ORM row would leak tagged ciphertext (``f2:``) for the
+    encrypted profile columns. Mirrors profile.py::get_my_profile.
+    """
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "preferred_name": user.preferred_name,
+        "display_name": user.display_name,
+        "nickname": user.nickname,
+        "phone": await get_user_phone(db, user),
+        "date_of_birth": await get_user_date_of_birth(db, user),
+        "address": await get_user_address(db, user),
+        "primary_language": user.primary_language,
+        "voice_id": user.voice_id,
+        "pace_setting": user.pace_setting,
+        "warmth_level": user.warmth_level,
+        "quiet_start": user.quiet_start.isoformat() if user.quiet_start else None,
+        "quiet_end": user.quiet_end.isoformat() if user.quiet_end else None,
+        "checkin_time": user.checkin_time.isoformat() if user.checkin_time else None,
+        "away_mode": user.away_mode,
+        "account_status": user.account_status,
+        "care_model": user.care_model,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+    }
+
 
 @router.get("")
-async def get_profile(user: User = Depends(get_current_user)):
+async def get_profile(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Return current user profile."""
-    return user
+    return await _serialize_user(db, user)
 
 
 @router.patch("")
@@ -42,10 +87,20 @@ async def update_profile(
 ):
     """Update profile/preferences."""
     updates = data.model_dump(exclude_unset=True)
+    # Encrypted PHI fields must NOT be written via the generic setattr loop —
+    # that would store raw plaintext into the now-encrypted columns and corrupt
+    # the read path. Route them through set_user_profile_pii instead.
+    pii_kwargs = {
+        attr: updates.pop(attr)
+        for attr in _ENCRYPTED_PROFILE_ATTRS
+        if attr in updates
+    }
     for key, value in updates.items():
         setattr(user, key, value)
+    if pii_kwargs:
+        await set_user_profile_pii(db, user, **pii_kwargs)
     await db.flush()
-    return user
+    return await _serialize_user(db, user)
 
 
 @router.get("/memory")

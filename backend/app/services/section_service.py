@@ -17,6 +17,31 @@ from app.models.todo import Todo
 from app.services.field_crypto import decrypt_row_field
 
 
+async def _serialize_document(db: AsyncSession, doc: Document) -> dict:
+    """Serialize a Document, decrypting the per-tenant encrypted fields.
+
+    Returning a raw Document ORM row would leak the tagged ciphertext (``f2:``)
+    for ``extracted_fields``/``spoken_summary``/``card_summary``. Mirrors
+    documents.py::_serialize_document and get_today_section.
+    """
+    return {
+        "id": str(doc.id),
+        "source_channel": doc.source_channel,
+        "classification": doc.classification,
+        "confidence_score": doc.confidence_score,
+        "urgency_level": doc.urgency_level,
+        "extracted_fields": await decrypt_row_field(db, doc, "extracted_fields"),
+        "spoken_summary": await decrypt_row_field(db, doc, "spoken_summary"),
+        "card_summary": await decrypt_row_field(db, doc, "card_summary"),
+        "routing_destination": doc.routing_destination,
+        "page_count": doc.page_count,
+        "status": doc.status,
+        "received_at": doc.received_at,
+        "processed_at": doc.processed_at,
+        "acknowledged_at": doc.acknowledged_at,
+    }
+
+
 async def get_home_section(db: AsyncSession, user_id: UUID) -> dict:
     """Overview of all sections for the home screen."""
     today = date.today()
@@ -29,7 +54,9 @@ async def get_home_section(db: AsyncSession, user_id: UUID) -> dict:
         .order_by(Document.received_at.desc())
         .limit(5)
     )
-    recent_documents = list(docs_result.scalars().all())
+    recent_documents = [
+        await _serialize_document(db, d) for d in docs_result.scalars().all()
+    ]
 
     # Active todos
     todos_result = await db.execute(

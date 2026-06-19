@@ -233,6 +233,31 @@ async def test_bad_key_length_raises(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# DEK cache is a bounded LRU
+# --------------------------------------------------------------------------
+
+
+async def test_dek_cache_is_bounded(monkeypatch):
+    """The process-global DEK cache never exceeds its cap, and eviction does
+    not break decryption (DEKs are simply re-unwrapped on demand)."""
+    monkeypatch.setattr(field_crypto, "_DEK_CACHE_MAX", 4)
+    field_crypto._dek_cache.clear()
+    db = FakeDB()
+    pairs = []
+    for _ in range(20):
+        uid = uuid.uuid4()
+        ct = await field_crypto.encrypt_for_user(db, uid, "phi")
+        pairs.append((uid, ct))
+
+    assert len(field_crypto._dek_cache) <= 4
+
+    # Every value still decrypts correctly despite cache eviction.
+    for uid, ct in pairs:
+        assert await field_crypto.decrypt_for_user(db, uid, ct) == "phi"
+    assert len(field_crypto._dek_cache) <= 4
+
+
+# --------------------------------------------------------------------------
 # decrypt_row_field helper
 # --------------------------------------------------------------------------
 

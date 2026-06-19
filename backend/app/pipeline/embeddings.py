@@ -63,20 +63,27 @@ async def embed_document(
         )
     )
 
-    # Get embeddings from local Ollama (nomic-embed-text)
+    # Get embeddings from local Ollama (nomic-embed-text). The embedding is
+    # computed from PLAINTEXT chunk text; only the stored column is encrypted.
     texts = [c["chunk_text"] for c in chunks]
     embeddings = await embed_documents(texts)
+
+    # chunk_text holds the same extracted PHI as the document's
+    # extracted_fields, so it is encrypted per-user at rest (envelope). The
+    # embedding vector stays plaintext (it is not reversible to source text).
+    from app.services.field_crypto import encrypt_for_user
 
     # Insert chunk rows
     for chunk_data, embedding in zip(
         chunks, embeddings, strict=True
     ):
+        plaintext = chunk_data["chunk_text"]
         chunk = DocumentChunk(
             document_id=document_id,
             user_id=user_id,
             chunk_index=chunk_data["chunk_index"],
-            chunk_text=chunk_data["chunk_text"],
-            token_count=len(chunk_data["chunk_text"]) // 4,
+            chunk_text=await encrypt_for_user(db, user_id, plaintext),
+            token_count=len(plaintext) // 4,
             source_field=chunk_data["source_field"],
             embedding=embedding,
         )
