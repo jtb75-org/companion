@@ -51,6 +51,23 @@ RUN pip install --no-cache-dir \
       opencv-python-headless==4.11.0.86 scikit-image==0.25.2 scipy==1.15.3
 RUN pip install --no-cache-dir -r requirements.txt
 
+# CRITICAL — undo system-library shadowing left by the wheels above.
+# opencv-python-headless 4.11 (and friends) are built on a gcc-13 manylinux and
+# their install drops NEWER libstdc++.so.6.0.33 / libbsd.so.0.12.2 into
+# /usr/lib AND repoints the system symlinks at them. Those gcc-13 libs require
+# GLIBC_2.38, but this base is glibc 2.36 (bookworm), so every native import
+# (pymupdf._extra, cv2, paddle) then dies at runtime with
+#   "version `GLIBC_2.38' not found (required by libstdc++.so.6)".
+# opencv loads its OWN copies from <pkg>.libs/ via RPATH, so the system copies
+# are pure breakage: delete the intruders and let ldconfig fall back to the
+# dpkg-owned bookworm-stock libs (libstdc++.so.6.0.30 / libbsd.so.0.11.7).
+# Verified end-to-end on a real node: fitz+paddle+cv2+paddleocr import and a
+# live OCR inference all succeed once these are removed. (Filenames are fixed by
+# the pins above; bump them here if those pins change.)
+RUN rm -f /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33 \
+          /usr/lib/x86_64-linux-gnu/libbsd.so.0.12.2 \
+ && ldconfig
+
 # NOTE: models are loaded LAZILY on first /ocr request (on a real node), not
 # baked in at build — instantiating PaddleOCR (model load + a warmup inference)
 # segfaults inside kaniko. First request is slower; /health stays cheap so the
