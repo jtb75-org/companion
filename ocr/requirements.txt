@@ -1,5 +1,9 @@
 # PaddleOCR HTTP service deps. Pinned for reproducible kaniko builds.
 # paddlepaddle is the CPU wheel (no GPU on the K3s Minisforum nodes).
+# python:3.12-slim ships no setuptools, and py3.12 removed stdlib distutils;
+# paddle imports both. setuptools <74 still vendors the distutils shim.
+setuptools==69.5.1
+wheel==0.43.0
 paddleocr==2.7.3
 paddlepaddle==2.6.2  # 2.6.1 has no py3.12 wheel; 2.6.2 is lowest available
 fastapi==0.111.0
