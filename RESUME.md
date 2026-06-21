@@ -47,6 +47,38 @@ See [[ocr-paddleocr-shadow]].
 - PRs merged: #22/#23/#24 (build/push fixes), **#25** (targeted trixie-lib rm),
   **#26** (generic `clean_libs.py` + `asyncio.to_thread` warm-up).
 
+### Benchmark (2026-06-20) + ⚠️ DocumentAI primary is DEAD
+No real shadow records exist (DB has 0 docs), so ran a synthetic head-to-head:
+DocumentAI vs PaddleOCR on 5 D.D. doc types × clean/scan, scored vs known
+ground truth, both providers driven directly from an api pod.
+
+| metric | clean | scan (degraded) |
+|---|---|---|
+| DocumentAI acc | 0.963 | **0.937** |
+| PaddleOCR acc | **0.998** | 0.767 |
+| latency (DocAI / Paddle) | 824 / **598** ms | 720 / **397** ms |
+
+- **Clean: parity** (DocAI's 0.963 is one columnar-bill outlier; else ~0.999).
+- **Degraded scans: DocAI more robust** (+0.17); Paddle falls off under heavy
+  noise/rotation/blur. (The "scan" degradation was harsh — worst-case floor.)
+- **Paddle ~2× faster, local, free, no PHI egress.**
+- **Cutover read:** Paddle is good enough for normal-quality captures; close the
+  scan gap first with a deskew/denoise/upscale pre-process OR collect organic
+  shadow numbers on real traffic before flipping `COMPANION_OCR_PROVIDER`.
+
+**⚠️ DocumentAI "primary" is currently non-functional** (found during the
+benchmark) — two independent breaks:
+1. The pod SA `companion-backend@companion-prod-491606` lacked Document AI
+   permission → **granted `roles/documentai.apiUser`** (left in place).
+2. **No processor exists** — configured `documentai_processor_id=6785df08989fd9a6`
+   was deleted in the GCP teardown (0 processors in us/eu). First real document
+   would 404; never surfaced because DB has 0 docs.
+
+→ DocAI is NOT a free fallback right now. To keep it viable, create a Document
+OCR processor + update the config's processor ID. (Benchmark used a temp
+processor, since deleted — 0 remain.) This strengthens the case to cut over to
+PaddleOCR (after closing the scan-robustness gap).
+
 ### Build/runtime gotchas (cost many cycles)
 - Base `python:3.10-slim-bookworm` (glibc 2.36). The PaddleOCR pip layer
   **non-deterministically drops Debian-trixie (glibc 2.38/2.39) duplicates of
