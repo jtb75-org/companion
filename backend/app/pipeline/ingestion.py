@@ -8,15 +8,47 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.document import Document
+from app.models.enums import ConfigCategory
 from app.pipeline.ocr import OcrResult, get_ocr_provider
 from app.pipeline.schemas import NormalizedDocument
-from app.services import storage_service
+from app.services import config_service, storage_service
 from app.services.field_crypto import encrypt_for_user
 
 logger = logging.getLogger(__name__)
 
 # Cap on PHI text stored in source_metadata (matches the ocr_text cap).
 _OCR_TEXT_CAP = 5000
+
+# Admin-managed feature-flag keys that override the static env OCR providers.
+# The env settings (``COMPANION_OCR_PROVIDER`` / ``..._SHADOW_PROVIDER``) remain
+# the fallback when no active config row is present.
+_OCR_PRIMARY_FLAG = "ocr_primary_provider"
+_OCR_SHADOW_FLAG = "ocr_shadow_provider"
+
+
+async def _resolve_ocr_provider(
+    db: AsyncSession, key: str, default: str
+) -> str:
+    """Resolve an OCR provider name from the admin feature flag, else ``default``.
+
+    A flag value is ``{"provider": "<name>"}``. If no active config row exists
+    the static env ``default`` is used. An explicitly-set empty provider is
+    honoured (e.g. shadow disabled), so absence vs. empty are distinguished.
+    """
+    try:
+        row = await config_service.get_by_key(
+            db, ConfigCategory.FEATURE_FLAG, key
+        )
+    except Exception:
+        # Never let a config-read failure break ingestion — fall back to env.
+        logger.exception("OCR provider flag %s read failed; using env", key)
+        return default
+    if row is None:
+        return default
+    value = row.value
+    if isinstance(value, dict):
+        return str(value.get("provider") or "")
+    return str(value or "")
 
 
 async def _ocr_pages(
@@ -57,7 +89,9 @@ async def _run_shadow_ocr(
     caught and logged. Records the comparison (with the shadow text encrypted
     at rest) on ``doc.source_metadata['ocr_shadow']``.
     """
-    shadow_provider = settings.ocr_shadow_provider
+    shadow_provider = await _resolve_ocr_provider(
+        db, _OCR_SHADOW_FLAG, settings.ocr_shadow_provider
+    )
     if not shadow_provider or shadow_provider == primary_provider:
         return
     try:
@@ -122,7 +156,9 @@ async def process_camera_scan(
     if not raw_text and doc.raw_text_ref:
         # Check for multi-page scan
         page_refs = (doc.source_metadata or {}).get("page_refs", [])
-        primary_provider = settings.ocr_provider
+        primary_provider = await _resolve_ocr_provider(
+            db, _OCR_PRIMARY_FLAG, settings.ocr_provider
+        )
 
         try:
             # Download all page images once; reused by primary + shadow.

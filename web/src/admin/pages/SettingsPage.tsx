@@ -11,12 +11,24 @@ const defaults: DeletionSettings = {
   grace_period_days: 30,
 }
 
+// OCR engine feature flag. Decides whether document PHI is processed locally
+// (paddleocr) or sent off-cluster to Google (documentai). Gated to 'admin' role
+// server-side. Default mirrors the env fallback (documentai) when unset.
+const OCR_PROVIDERS = ['documentai', 'paddleocr'] as const
+type OcrProvider = (typeof OCR_PROVIDERS)[number]
+const OCR_DEFAULT: OcrProvider = 'documentai'
+
 export function SettingsPage() {
   const queryClient = useQueryClient()
   const [settings, setSettings] = useState<DeletionSettings>(defaults)
   const [configId, setConfigId] = useState<string | null>(null)
   const [saveStatus, setSaveStatus] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
+
+  const [ocrProvider, setOcrProvider] = useState<OcrProvider>(OCR_DEFAULT)
+  const [ocrConfigId, setOcrConfigId] = useState<string | null>(null)
+  const [ocrStatus, setOcrStatus] = useState<string | null>(null)
+  const [ocrDirty, setOcrDirty] = useState(false)
 
   useQuery({
     queryKey: ['config-deletion-settings'],
@@ -25,6 +37,15 @@ export function SettingsPage() {
         const data = await api<{ entries: { id: string; key: string; value: unknown; category: string }[] }>(
           '/admin/config'
         )
+        const ocrMatch = data.entries.find(
+          (e) => e.category.toLowerCase() === 'feature_flag' && e.key === 'ocr_primary_provider'
+        )
+        if (ocrMatch) {
+          setOcrConfigId(ocrMatch.id)
+          const p = (ocrMatch.value as { provider?: string }).provider
+          if (p === 'documentai' || p === 'paddleocr') setOcrProvider(p)
+        }
+
         const match = data.entries.find(
           (e) => e.category.toLowerCase() === 'deletion_settings' && e.key === 'grace_period_days'
         )
@@ -73,9 +94,86 @@ export function SettingsPage() {
     },
   })
 
+  const ocrMutation = useMutation({
+    mutationFn: async (provider: OcrProvider) => {
+      const payload = { provider }
+      if (ocrConfigId) {
+        await api(`/admin/config/${ocrConfigId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ value: payload, reason: 'OCR engine changed via admin settings' }),
+        })
+      } else {
+        await api('/admin/config', {
+          method: 'POST',
+          body: JSON.stringify({
+            category: 'feature_flag',
+            key: 'ocr_primary_provider',
+            value: payload,
+            description: 'Primary OCR engine for document ingestion',
+          }),
+        })
+      }
+    },
+    onSuccess: () => {
+      setOcrStatus('Saved successfully')
+      setOcrDirty(false)
+      queryClient.invalidateQueries({ queryKey: ['config-deletion-settings'] })
+      setTimeout(() => setOcrStatus(null), 3000)
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error && err.message ? err.message : 'Failed to save'
+      setOcrStatus(msg.includes('403') ? "Failed: requires 'admin' role" : 'Failed to save')
+      setTimeout(() => setOcrStatus(null), 4000)
+    },
+  })
+
   return (
     <div className="space-y-6">
       <h1 className="text-xl font-semibold text-gray-900">Settings</h1>
+
+      <Card title="OCR Engine" subtitle="Primary engine used to extract text from uploaded documents">
+        <div className="space-y-4">
+          <div className="flex items-center gap-4">
+            <label className="text-sm text-gray-700 w-48">Primary provider</label>
+            <select
+              value={ocrProvider}
+              onChange={(e) => {
+                setOcrProvider(e.target.value as OcrProvider)
+                setOcrDirty(true)
+              }}
+              className="w-56 rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-companion-blue-light focus:outline-none focus:ring-1 focus:ring-companion-blue-light"
+            >
+              {OCR_PROVIDERS.map((p) => (
+                <option key={p} value={p}>
+                  {p === 'paddleocr' ? 'PaddleOCR (self-hosted, local)' : 'Google Document AI (cloud)'}
+                </option>
+              ))}
+            </select>
+          </div>
+          {ocrProvider === 'documentai' && (
+            <p className="text-xs text-amber-600 font-medium">
+              Document AI sends document contents to Google for processing. Use PaddleOCR to keep all document data on-cluster.
+            </p>
+          )}
+          <p className="text-xs text-gray-500">
+            Changing the OCR engine requires the <strong>admin</strong> role. Takes effect for newly ingested documents.
+          </p>
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => ocrMutation.mutate(ocrProvider)}
+              disabled={ocrMutation.isPending || !ocrDirty}
+              className="px-4 py-2 bg-companion-blue text-white rounded-lg text-sm font-medium hover:bg-companion-blue-mid disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {ocrMutation.isPending ? 'Saving...' : 'Save OCR Engine'}
+            </button>
+            {ocrStatus && (
+              <p className={`text-sm ${ocrStatus.includes('Failed') ? 'text-red-600' : 'text-green-600'}`}>
+                {ocrStatus}
+              </p>
+            )}
+          </div>
+        </div>
+      </Card>
 
       <Card title="Account Deletion" subtitle="Configure the grace period before permanent deletion">
         <div className="space-y-4">
