@@ -55,6 +55,46 @@ def _guard_ocr_flag(admin: AdminUser, category: str | None, key: str, value: dic
         )
 
 
+# The dd_persona/system_prompt entry is a LIVE control over what D.D. says to
+# vulnerable members, so persona writes are gated to the top admin role (parity
+# with the OCR flag) and the free-text prompt is bounds-checked. There is no
+# automated reading-level scorer yet, so prose is guarded by a length cap + a
+# denylist of override-style instructions; containment otherwise relies on the
+# fixed Constitution + Emotional Awareness + Constraints bracketing the override
+# in build_system_prompt.
+_PERSONA_PROMPT_MAX = 4000
+_PERSONA_PROMPT_DENYLIST = (
+    "ignore the above",
+    "ignore previous",
+    "ignore all previous",
+    "ignore your instructions",
+    "disregard the above",
+    "disregard previous",
+    "disregard your instructions",
+    "override your instructions",
+    "you are not d.d",
+    "reveal your instructions",
+    "reveal the system prompt",
+)
+
+
+def _guard_persona(admin: AdminUser, category: str | None, value: dict) -> None:
+    """Elevate role + bounds-check writes to the D.D. persona config.
+
+    Applied on BOTH create and update so an admin cannot sidestep the §3.1
+    immutable bounds by POSTing a fresh row instead of PATCHing.
+    """
+    cat = getattr(category, "value", category)
+    if cat != ConfigCategory.DD_PERSONA.value:
+        return
+    if admin.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Editing the D.D. persona requires the 'admin' role.",
+        )
+    _validate_persona_bounds(value)
+
+
 @router.get("")
 async def list_config(
     admin: AdminUser = Depends(_viewer),
@@ -100,6 +140,7 @@ async def create_config(
 ):
     """Create a new configuration entry."""
     _guard_ocr_flag(admin, data.category, data.key, data.value)
+    _guard_persona(admin, data.category, data.value)
     entry = await config_service.create_config(db, {**data.model_dump(), "updated_by": admin.email})
     return entry
 
@@ -119,11 +160,10 @@ async def update_config(
             status_code=404, detail="Config entry not found"
         )
 
-    # Enforce immutable bounds for persona config. NOTE: get_config returns an
-    # ORM object, so read attributes (the prior ``.get(...)`` raised on any
-    # PATCH; covered by tests now).
-    if existing.category == "dd_persona":
-        _validate_persona_bounds(data.value)
+    # Elevate role + enforce immutable bounds for persona config. NOTE:
+    # get_config returns an ORM object, so read attributes (the prior
+    # ``.get(...)`` raised on any PATCH; covered by tests now).
+    _guard_persona(admin, existing.category, data.value)
 
     # Elevate role + validate provider for OCR engine flags.
     _guard_ocr_flag(admin, existing.category, existing.key, data.value)
@@ -191,6 +231,34 @@ def _validate_persona_bounds(value: dict) -> None:
                     f"(Guidelines Section 3.1)"
                 ),
             )
+
+    # Free-text persona override (dd_persona/system_prompt): bound length and
+    # reject override-style instructions. Containment otherwise relies on the
+    # fixed Constitution + Emotional Awareness + Constraints in the prompt.
+    prompt = value.get("prompt")
+    if prompt is not None:
+        if not isinstance(prompt, str):
+            raise HTTPException(
+                status_code=422, detail="persona prompt must be a string"
+            )
+        if len(prompt) > _PERSONA_PROMPT_MAX:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"persona prompt too long "
+                    f"(max {_PERSONA_PROMPT_MAX} characters)"
+                ),
+            )
+        lowered = prompt.lower()
+        for banned in _PERSONA_PROMPT_DENYLIST:
+            if banned in lowered:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "persona prompt may not contain override-style "
+                        f"instructions ({banned!r})"
+                    ),
+                )
 
 
 @router.get("/{config_id}/history")

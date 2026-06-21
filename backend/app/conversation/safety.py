@@ -43,6 +43,10 @@ _CANARY_PHRASES = [
     "DD_PERSONA",
     "system_prompt",
     "Tool use rules",
+    # Emotional Awareness block — instruction prose (NOT the member-facing
+    # exemplars, which are meant to be spoken), so it flags only leaked prompt.
+    "care for that feeling before anything else",
+    "Emotional priority",
 ]
 
 # Precompile for performance

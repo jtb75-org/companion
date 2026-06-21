@@ -7,12 +7,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.branding import BRAND_MID
-from app.conversation.persona import DD_PERSONA, DEFAULT_CONSTRAINTS
+from app.conversation.persona import (
+    DD_PERSONA,
+    DEFAULT_CONSTRAINTS,
+    EMOTIONAL_AWARENESS,
+)
 from app.models.appointment import Appointment
 from app.models.bill import Bill
+from app.models.enums import ConfigCategory
 from app.models.functional_memory import FunctionalMemory
 from app.models.medication import Medication
 from app.models.user import User
+from app.services import config_service
 from app.services.field_crypto import decrypt_row_field
 
 logger = logging.getLogger(__name__)
@@ -58,8 +64,11 @@ async def build_system_prompt(
     # 0. Constitution (immutable safety layer — always first)
     parts.append(_CONSTITUTION)
 
-    # 1. Persona (fixed)
-    parts.append(DD_PERSONA)
+    # 1. Persona (admin-overridable personality block ONLY). The Constitution
+    # above, the Emotional Awareness block, and the Response Rules below are
+    # ALWAYS fixed code — an admin override can only replace this one block and
+    # can never remove or weaken the surrounding safety layers.
+    parts.append(await _resolve_persona(db))
 
     # 2. User's functional memory
     memory_context = await _build_memory_context(db, user)
@@ -75,6 +84,10 @@ async def build_system_prompt(
     parts.append(
         f"\n--- Session Context ---\n{session_context}"
     )
+
+    # Emotional awareness — constitutional behavior (Guidelines §3.5). Fixed
+    # code, NOT admin-tunable. Before Active Items so it outranks task steering.
+    parts.append(f"\n--- Emotional Awareness ---\n{EMOTIONAL_AWARENESS}")
 
     # 4. RAG document context
     if user_query:
@@ -99,6 +112,36 @@ async def build_system_prompt(
     )
 
     return "\n".join(parts)
+
+
+async def _resolve_persona(db: AsyncSession) -> str:
+    """Return the persona/personality block for the system prompt.
+
+    Reads the admin-managed ``dd_persona/system_prompt`` config and uses its
+    ``prompt`` text if present, active, and a non-empty string. Otherwise falls
+    back to the hardcoded ``DD_PERSONA``.
+
+    SAFETY: this override replaces ONLY the personality block. The Constitution,
+    the Emotional Awareness block, and the Response Rules are appended
+    separately by ``build_system_prompt`` from fixed code and are NOT affected
+    by this override. Any read error falls back to the default — the
+    conversation must never break because of a bad/missing config row.
+    """
+    try:
+        config = await config_service.get_by_key(
+            db, ConfigCategory.DD_PERSONA, "system_prompt"
+        )
+        if config is not None and config.is_active:
+            value = config.value or {}
+            prompt = value.get("prompt")
+            if isinstance(prompt, str) and prompt.strip():
+                return prompt
+    except Exception:
+        logger.warning(
+            "Failed to read dd_persona/system_prompt; using default persona",
+            exc_info=True,
+        )
+    return DD_PERSONA
 
 
 async def _build_memory_context(db: AsyncSession, user: User) -> str:
