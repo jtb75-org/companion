@@ -12,6 +12,11 @@ _PROVIDERS: dict[str, type[OcrProvider]] = {
 }
 
 
+def available_providers() -> list[str]:
+    """Names of the registered OCR providers (for validation / admin UI)."""
+    return sorted(_PROVIDERS)
+
+
 def get_ocr_provider(name: str) -> OcrProvider:
     """Construct the OCR provider registered under ``name``.
 

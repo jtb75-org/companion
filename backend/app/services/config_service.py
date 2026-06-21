@@ -28,12 +28,59 @@ async def get_config(
     return result.scalar_one_or_none()
 
 
+async def get_by_key(
+    db: AsyncSession, category: str, key: str
+) -> SystemConfig | None:
+    """Fetch a single active config entry by (category, key), or None.
+
+    Used by runtime consumers (e.g. the OCR pipeline) to read admin-managed
+    feature flags without knowing the row's UUID.
+    """
+    result = await db.execute(
+        select(SystemConfig).where(
+            SystemConfig.category == category,
+            SystemConfig.key == key,
+            SystemConfig.is_active.is_(True),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 async def create_config(
     db: AsyncSession, data: dict
 ) -> SystemConfig:
     config = SystemConfig(**data)
     db.add(config)
     await db.flush()
+
+    # Audit the creation too. For PHI-egress controls (e.g. the OCR engine flag)
+    # the FIRST set is the most important event to capture — without this the
+    # create path would leave the initial flip unrecorded (only updates were
+    # audited before). old_value is null since the entry did not exist.
+    audit_entry = ConfigAuditLog(
+        config_id=config.id,
+        category=config.category,
+        key=config.key,
+        old_value=None,
+        new_value=config.value,
+        changed_by=config.updated_by,
+    )
+    db.add(audit_entry)
+    await db.flush()
+
+    await event_publisher.publish(
+        "config.updated",
+        user_id=UUID(int=0),  # system event, no user context
+        payload=ConfigUpdatedPayload(
+            config_id=config.id,
+            category=getattr(config.category, "value", str(config.category)),
+            key=config.key,
+            old_value=None,
+            new_value={"value": config.value},
+            changed_by=config.updated_by,
+        ),
+    )
+
     return config
 
 
