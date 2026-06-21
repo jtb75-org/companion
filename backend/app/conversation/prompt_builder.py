@@ -7,7 +7,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.branding import BRAND_MID
-from app.conversation.persona import DD_PERSONA, DEFAULT_CONSTRAINTS
+from app.conversation.persona import (
+    DD_PERSONA,
+    DEFAULT_CONSTRAINTS,
+    EMOTIONAL_AWARENESS,
+)
 from app.models.appointment import Appointment
 from app.models.bill import Bill
 from app.models.functional_memory import FunctionalMemory
@@ -75,6 +79,10 @@ async def build_system_prompt(
     parts.append(
         f"\n--- Session Context ---\n{session_context}"
     )
+
+    # Emotional awareness — constitutional behavior (Guidelines §3.5). Fixed
+    # code, NOT admin-tunable. Before Active Items so it outranks task steering.
+    parts.append(f"\n--- Emotional Awareness ---\n{EMOTIONAL_AWARENESS}")
 
     # 4. RAG document context
     if user_query:
