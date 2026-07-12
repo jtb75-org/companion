@@ -56,13 +56,12 @@ class ChatMessage(Base):
         ForeignKey("chat_sessions.id", ondelete="CASCADE"),
         nullable=False,
     )
-    # Denormalized from chat_sessions.user_id for per-user RLS (WS1 Phase 2b);
-    # kept consistent by the enforce_same_user trigger. Nullable during the
-    # transition; NOT NULL is tightened in Phase 2e.
-    user_id: Mapped[uuid.UUID | None] = mapped_column(
+    # Denormalized from chat_sessions.user_id for per-user RLS; kept consistent
+    # by the enforce_same_user trigger. NOT NULL as of Phase 2e (migration 027).
+    user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=True,
+        nullable=False,
     )
     role: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
