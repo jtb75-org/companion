@@ -53,6 +53,10 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
         run: |
+          # The checkout is owned by a different UID than this container's user,
+          # so git refuses to operate ("dubious ownership") and every git call
+          # silently fails → base unknown → OCR always builds. Trust the workspace.
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           # Base = the commit main was at before this push. Fall back to
           # building OCR (safe) if it's unavailable (first push / force-push /
           # not fetched) rather than silently skipping.
