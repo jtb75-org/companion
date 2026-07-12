@@ -135,8 +135,8 @@ PaddleOCR (after closing the scan-robustness gap).
   register Android release SHA-1.
 - Owner one-offs: revoke bootstrap OpenBao token; key rotation automation.
 
-> NOTE: DB currently has **1 user**: admin `joe.buhr@gmail.com`. See
-> [[prod-access-model]].
+> NOTE: DB currently has **1 member user** (`smoketest@mydailydignity.com`,
+> active) + **1 admin** (`joe.buhr@gmail.com`). See [[prod-access-model]].
 
 ## Handy context
 - Macs (Ollama bare-metal): `studio-max` 192.168.0.94 (M4 Max 64GB),

@@ -72,9 +72,10 @@ prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
   Models pulled (qwen2.5:14b/72b, qwen3-coder, nomic-embed-text on both).
   **LiteLLM gateway** runs on studio-ultra `:4000` (hand-edited
   `~/.config/litellm/config.yaml`, launchd). SSH as `joe`, passwordless sudo.
-- **Prod DB:** currently has **1 user**: admin `joe.buhr@gmail.com`. For DB ops,
-  refer to **the CNPG primary** generically; instance names roll and should not
-  be hardcoded as permanent.
+- **Prod DB:** currently has **1 member user** (`smoketest@mydailydignity.com`,
+  active) + **1 admin** (`joe.buhr@gmail.com`). For DB ops, refer to **the CNPG
+  primary** generically; instance names roll and should not be hardcoded as
+  permanent.
 
 ## Next steps / remaining work
 
