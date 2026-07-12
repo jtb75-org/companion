@@ -72,6 +72,7 @@ async def confirm_dose(
 
     confirmation = MedicationConfirmation(
         medication_id=medication_id,
+        user_id=user_id,
         scheduled_at=datetime.utcnow(),
         confirmed_at=datetime.utcnow(),
         missed=False,

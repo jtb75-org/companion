@@ -230,6 +230,7 @@ async def start_conversation(
         db.add(
             ChatMessage(
                 chat_session_id=db_session.id,
+                user_id=db_session.user_id,
                 role="assistant",
                 content=greeting,
             )
@@ -373,11 +374,13 @@ async def send_message(
         if db_session:
             db.add(ChatMessage(
                 chat_session_id=db_session.id,
+                user_id=db_session.user_id,
                 role="user",
                 content=user_text,
             ))
             db.add(ChatMessage(
                 chat_session_id=db_session.id,
+                user_id=db_session.user_id,
                 role="assistant",
                 content=response_text,
             ))
@@ -494,11 +497,13 @@ async def send_message_stream(
                 if db_sess:
                     db.add(ChatMessage(
                         chat_session_id=db_sess.id,
+                        user_id=db_sess.user_id,
                         role="user",
                         content=data.text,
                     ))
                     db.add(ChatMessage(
                         chat_session_id=db_sess.id,
+                        user_id=db_sess.user_id,
                         role="assistant",
                         content=full_response,
                     ))

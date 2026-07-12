@@ -48,6 +48,14 @@ class MedicationConfirmation(Base):
         ForeignKey("medications.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Denormalized from medications.user_id for per-user RLS (WS1 Phase 2b);
+    # kept consistent by the enforce_same_user trigger. Nullable during the
+    # transition; NOT NULL is tightened in Phase 2e.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     scheduled_at: Mapped[datetime] = mapped_column(nullable=False)
     confirmed_at: Mapped[datetime | None] = mapped_column(nullable=True)
     missed: Mapped[bool] = mapped_column(
