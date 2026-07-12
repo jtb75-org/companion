@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -101,7 +102,11 @@ class EventPublisher:
                 event_name=event_name,
                 user_id=str(user_id),
             )
-            message_id = future.result(timeout=3)
+            # future.result() is a SYNCHRONOUS blocking call — off-load it so it
+            # never freezes the event loop (this runs on the live conversation
+            # turn for caregiver.alert.triggered, and a dead/absent topic would
+            # otherwise stall every request sharing the loop for up to `timeout`).
+            message_id = await asyncio.to_thread(future.result, timeout=3)
             logger.info(f"Event published: {event_name} user={user_id} msg={message_id}")
             return message_id
         except Exception:
