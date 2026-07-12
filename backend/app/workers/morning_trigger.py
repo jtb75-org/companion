@@ -9,6 +9,7 @@ from datetime import datetime, time
 
 from sqlalchemy import select
 
+from app.db.context import set_user_context
 from app.db.session import async_session_factory
 from app.models.user import User
 from app.notifications.briefing import generate_morning_briefing
@@ -24,6 +25,10 @@ async def run_morning_trigger_for_user(user_id):
     """Trigger morning check-in for a specific user."""
     async with async_session_factory() as db:
         try:
+            # Tenant context for this user's per-user session (WS1 Phase 2).
+            # No-op until RLS policies land; then it scopes every query below
+            # (incl. the users lookup) to this member. Transaction-local.
+            await set_user_context(db, user_id)
             user = await db.get(User, user_id)
             if not user:
                 return {"error": "User not found"}

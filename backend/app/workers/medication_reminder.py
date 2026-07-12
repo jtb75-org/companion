@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.db.context import set_user_context
 from app.db.session import async_session_factory
 from app.events.publisher import event_publisher
 from app.events.schemas import MedicationMissedPayload
@@ -27,6 +28,9 @@ async def run_medication_reminder_for_user(user_id):
     """Send medication reminders for a specific user (ignoring time)."""
     async with async_session_factory() as db:
         try:
+            # Tenant context for this user's per-user session (WS1 Phase 2).
+            # No-op until RLS policies land. Transaction-local.
+            await set_user_context(db, user_id)
             result = await db.execute(
                 select(Medication)
                 .where(
