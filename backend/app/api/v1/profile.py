@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.firebase import verify_firebase_token
 from app.config import settings
 from app.db import get_db
+from app.db.context import set_login_email_context, set_user_context
 from app.models.audit import AccountAuditLog
 from app.models.enums import AccountStatus
 from app.models.trusted_contact import TrustedContact
@@ -34,11 +35,19 @@ async def get_my_profile(
     if not email:
         raise HTTPException(401, "No email")
 
+    # RLS bootstrap: this endpoint doesn't use get_current_user, so set the
+    # login-email GUC so the users policy admits the by-email lookup (Phase 2).
+    await set_login_email_context(db, email)
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
     if not user:
         return {"exists": False, "profile_complete": False}
+
+    # Now the user id is known, set the tenant GUC so the encrypted-phone DEK
+    # row (user_encryption_keys is under per-user RLS) is visible; without it
+    # get_user_phone would fail closed as "no DEK row".
+    await set_user_context(db, user.id)
 
     from app.services.field_crypto import get_user_phone
     return {
@@ -73,11 +82,19 @@ async def get_my_caregivers(
     if not email:
         raise HTTPException(401, "No email")
 
+    # RLS bootstrap: this endpoint doesn't use get_current_user, so set the
+    # login-email GUC so the users policy admits the by-email lookup (Phase 2).
+    await set_login_email_context(db, email)
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
     if not user:
         return {"caregivers": []}
+
+    # Set the tenant GUC now that the member id is known: this route reads the
+    # member's own trusted_contacts (and will need it once trusted_contacts RLS
+    # lands next), so scope the session to this member.
+    await set_user_context(db, user.id)
 
     contacts_result = await db.execute(
         select(TrustedContact).where(TrustedContact.user_id == user.id)
@@ -124,6 +141,9 @@ async def complete_profile(
     if not email:
         raise HTTPException(401, "No email")
 
+    # RLS bootstrap: this endpoint doesn't use get_current_user, so set the
+    # login-email GUC so the users policy admits the by-email lookup (Phase 2).
+    await set_login_email_context(db, email)
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
@@ -139,6 +159,11 @@ async def complete_profile(
             status_code=403,
             detail="No invitation found for this account.",
         )
+
+    # Now that the invited stub is resolved, set the tenant GUC to its id so the
+    # activation UPDATE + the encrypted-phone DEK create pass WITH CHECK under
+    # RLS (this is the onboarding write path; it never runs get_current_user).
+    await set_user_context(db, user.id)
 
     first_name = data.get("first_name", "")
     last_name = data.get("last_name", "")

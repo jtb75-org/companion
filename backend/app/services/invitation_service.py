@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.session import maintenance_session
 from app.models.enums import AccountStatus, InvitationStatus
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
@@ -21,24 +22,32 @@ def generate_invitation_token() -> str:
 async def get_or_create_stub_user(
     db: AsyncSession, email: str, name: str
 ) -> tuple[User, bool]:
-    """Find existing user or create a stub with account_status='invited'.
+    """Find or create a stub user (account_status='invited') for ``email``.
 
-    Returns (user, created) where created is True if a new stub was made.
+    Creating/reading another person's account by email is inherently
+    cross-tenant, so this runs on the maintenance (BYPASSRLS) session: under
+    per-user RLS a member's own session can neither see nor INSERT another
+    user's row (WITH CHECK would reject the stub whose id != the inviter's GUC).
+    ``db`` is kept for signature compatibility but not used for the user row.
+    Returns (user, created); the returned user is detached (loaded scalars are
+    safe — callers use existence / .id only).
     """
-    result = await db.execute(select(User).where(User.email == email))
-    user = result.scalar_one_or_none()
-    if user:
-        return user, False
+    async with maintenance_session() as mdb:
+        result = await mdb.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+        if user:
+            return user, False
 
-    user = User(
-        email=email,
-        preferred_name=name,
-        display_name=name,
-        account_status=AccountStatus.INVITED,
-    )
-    db.add(user)
-    await db.flush()
-    return user, True
+        user = User(
+            email=email,
+            preferred_name=name,
+            display_name=name,
+            account_status=AccountStatus.INVITED,
+        )
+        mdb.add(user)
+        await mdb.flush()
+        await mdb.commit()
+        return user, True
 
 
 async def create_member_invitation(
@@ -150,13 +159,19 @@ async def accept_invitation(
     contact.is_active = True
     contact.invitation_token = None  # Consume the token
 
-    # Activate the stub user if needed
-    result = await db.execute(
-        select(User).where(User.email == accepting_email)
-    )
-    user = result.scalar_one_or_none()
-    if user and user.account_status == AccountStatus.INVITED:
-        user.account_status = AccountStatus.ACTIVE
+    # Activate the accepting caregiver's stub account. Cross-tenant (the
+    # caregiver has no member GUC on this session), so run it on the maintenance
+    # (BYPASSRLS) session — under users RLS the by-email read + INVITED->ACTIVE
+    # write would otherwise fail-close.
+    async with maintenance_session() as mdb:
+        u = (
+            await mdb.execute(
+                select(User).where(User.email == accepting_email)
+            )
+        ).scalar_one_or_none()
+        if u and u.account_status == AccountStatus.INVITED:
+            u.account_status = AccountStatus.ACTIVE
+            await mdb.commit()
 
     await db.flush()
 

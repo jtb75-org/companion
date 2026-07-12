@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AdminUser, require_admin_role
-from app.db import get_db
+from app.db.session import get_maintenance_db
 from app.models.enums import AccessTier, RelationshipType
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
@@ -20,7 +20,7 @@ router = APIRouter(tags=["Admin - Contacts"])
 @router.get("/admin/contacts")
 async def list_all_contacts(
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """List all trusted contacts across all users."""
     result = await db.execute(
@@ -54,7 +54,7 @@ async def list_all_contacts(
 @router.get("/admin/users")
 async def list_all_users(
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """List all users (for the user picker when assigning contacts)."""
     result = await db.execute(select(User).order_by(User.preferred_name))
@@ -75,7 +75,7 @@ async def list_all_users(
 async def create_contact(
     data: dict,  # Simple dict for now
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Add a trusted contact for a user."""
     # Validate user exists
@@ -100,7 +100,7 @@ async def create_contact(
 async def delete_contact(
     contact_id: uuid.UUID,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Remove a trusted contact."""
     contact = await db.get(TrustedContact, contact_id)

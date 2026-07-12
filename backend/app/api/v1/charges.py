@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.firebase import verify_firebase_token
 from app.config import settings
-from app.db import get_db
+from app.db.session import get_maintenance_db
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
 
@@ -15,7 +15,7 @@ router = APIRouter(tags=["Auth"])
 
 @router.get("/api/v1/auth/my-charges")
 async def get_my_charges(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
     authorization: str | None = Header(None, alias="Authorization"),
 ):
     """Get users (charges) assigned to the current user.

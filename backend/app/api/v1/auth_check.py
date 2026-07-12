@@ -8,6 +8,7 @@ from app.auth.authorize import authorize_by_email
 from app.auth.firebase import verify_firebase_token
 from app.config import settings
 from app.db import get_db
+from app.db.context import set_login_email_context
 from app.models.user import User as UserModel
 
 router = APIRouter(tags=["Auth"])
@@ -72,6 +73,10 @@ async def check_auth(
     # signup is invite-only, so complete-profile would 403). Only an existing
     # member account with missing names should be routed to the completion
     # screen.
+    # RLS bootstrap: set the login-email GUC so the users policy admits this
+    # by-email lookup (this route doesn't use get_current_user). Without it a
+    # real member fail-closes to no rows and is misrouted as having no account.
+    await set_login_email_context(db, email)
     user_result = await db.execute(
         select(UserModel).where(UserModel.email == email)
     )
