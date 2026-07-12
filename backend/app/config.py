@@ -7,6 +7,13 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://companion:companion_dev@localhost:5432/companion"
     database_echo: bool = False
+    # Separate connection as the BYPASSRLS `companion_maintenance` role, used ONLY
+    # by internal/worker cross-user operations (discovery scans that RLS would
+    # fail-close) — see app/db/session.get_maintenance_session_factory (WS1
+    # Phase 2c). Empty = not configured; using it while unset raises. Deliberately
+    # a distinct role/connection so the normal `companion_app` runtime can never
+    # escalate to a bypass role.
+    maintenance_database_url: str = ""
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
