@@ -213,16 +213,24 @@ async def handle_exploitation_detection(
         user_message[:100],
     )
 
-    # Notify caregiver (safety tier — no member opt-out)
+    # Notify caregivers (safety tier — no member opt-out). Publish a
+    # caregiver.alert.triggered event per active contact, exactly like the
+    # escalation and away-mode alert paths (escalation.py / away_monitor.py).
+    #
+    # This runs inside the member's conversation request (member GUC set), so we
+    # deliberately do NOT push to a caregiver's device directly from here: the
+    # caregiver's device_tokens belong to a DIFFERENT user and are invisible
+    # under the member's RLS context. Delivery is the alert consumer's job (it
+    # can resolve the caregiver identity + use the right session). The previous
+    # code referenced a nonexistent TrustedContact.caregiver_user_id and never
+    # fired.
     if db is not None:
         try:
             from sqlalchemy import select
 
-            # Find caregivers for this user
+            from app.events.publisher import event_publisher
+            from app.events.schemas import CaregiverAlertTriggeredPayload
             from app.models.trusted_contact import TrustedContact
-            from app.services.push_notification_service import (
-                send_push,
-            )
 
             result = await db.execute(
                 select(TrustedContact).where(
@@ -232,25 +240,18 @@ async def handle_exploitation_detection(
             )
             contacts = result.scalars().all()
             for contact in contacts:
-                if contact.caregiver_user_id:
-                    await send_push(
-                        db,
-                        contact.caregiver_user_id,
-                        title="Safety Alert",
-                        body=(
-                            f"Possible financial exploitation "
-                            f"indicator detected for "
-                            f"{contact.contact_name}."
-                        ),
-                        data={
-                            "type": "exploitation_alert",
-                            "indicators": indicator_str,
-                        },
-                    )
-            await db.flush()
+                await event_publisher.publish(
+                    "caregiver.alert.triggered",
+                    user_id=user_id,
+                    payload=CaregiverAlertTriggeredPayload(
+                        trusted_contact_id=contact.id,
+                        alert_type="exploitation_indicator",
+                        context={"indicators": indicator_str},
+                    ),
+                )
         except Exception:
             logger.exception(
-                "Failed to send exploitation alert "
+                "Failed to emit exploitation alert "
                 "for user %s",
                 user_id,
             )
