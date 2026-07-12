@@ -1,4 +1,5 @@
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -59,3 +60,24 @@ def get_maintenance_session_factory() -> async_sessionmaker[AsyncSession]:
             _maintenance_engine, class_=AsyncSession, expire_on_commit=False
         )
     return _maintenance_session_factory
+
+
+@asynccontextmanager
+async def maintenance_session() -> AsyncIterator[AsyncSession]:
+    """A session for a worker's cross-user DISCOVERY read (WS1 Phase 2c).
+
+    When `maintenance_database_url` is configured (prod), this is the BYPASSRLS
+    `companion_maintenance` connection so the discovery scan isn't fail-closed by
+    per-user RLS. When it is NOT configured (dev/test, or prod before the role is
+    wired), it falls back to the normal session — safe there because no RLS
+    policies exist, so the discovery works either way. Keep the body to the
+    discovery query ONLY (kali): do per-user mutations in a `companion_app`
+    session with the tenant GUC set, never here under bypass.
+    """
+    factory = (
+        get_maintenance_session_factory()
+        if settings.maintenance_database_url
+        else async_session_factory
+    )
+    async with factory() as session:
+        yield session
