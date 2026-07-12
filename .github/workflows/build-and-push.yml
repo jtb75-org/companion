@@ -32,12 +32,35 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need the parent commit to diff which paths changed (path-gating below).
+          fetch-depth: 2
 
       - name: Short SHA
         id: sha
         run: |
           short=$(echo "${GITHUB_SHA}" | cut -c1-7)
           echo "short=${short}" >> "$GITHUB_OUTPUT"
+
+      - name: Detect changed paths
+        id: changes
+        # The OCR image is large and rarely changes, but rebuilding + pushing it
+        # on every push is slow and repeatedly 502s the zot push (the whole
+        # workflow then fails and blocks the gitops bump). Only build/push OCR
+        # when ocr/ actually changed; otherwise keep the existing OCR tag.
+        run: |
+          if git rev-parse HEAD^ >/dev/null 2>&1; then
+            base="HEAD^"
+          else
+            base=$(git hash-object -t tree /dev/null)  # first commit: empty tree
+          fi
+          if git diff --quiet "$base" HEAD -- ocr/; then
+            echo "ocr=false" >> "$GITHUB_OUTPUT"
+            echo "ocr/ unchanged → skipping OCR build."
+          else
+            echo "ocr=true" >> "$GITHUB_OUTPUT"
+            echo "ocr/ changed → building OCR."
+          fi
 
       - name: Configure registry auth (kaniko)
         env:
@@ -59,12 +82,15 @@ jobs:
             --destination="${REGISTRY}/companion-backend:${{ steps.sha.outputs.short }}" \
             --destination="${REGISTRY}/companion-backend:main-latest" \
             --build-arg="BUILD_COMMIT=${{ steps.sha.outputs.short }}" \
+            --push-retry=3 \
             --snapshot-mode=redo
 
       - name: Kaniko build + push — ocr
-        # Self-hosted PaddleOCR service (replaces Document AI; runs in shadow
-        # first). Single-stage Dockerfile, context is the ocr/ dir. Build is
-        # slower than backend/web because it pre-downloads the OCR models.
+        # Self-hosted PaddleOCR service (replaces Document AI). Single-stage
+        # Dockerfile, context is the ocr/ dir. The large model layers make the
+        # push to zot flaky (502) — only build when ocr/ changed, and retry the
+        # push. When skipped, the existing companion-ocr tag is kept in gitops.
+        if: steps.changes.outputs.ocr == 'true'
         run: |
           /opt/kaniko/executor \
             --context="${GITHUB_WORKSPACE}/ocr" \
@@ -72,6 +98,7 @@ jobs:
             --destination="${REGISTRY}/companion-ocr:${{ steps.sha.outputs.short }}" \
             --destination="${REGISTRY}/companion-ocr:main-latest" \
             --build-arg="BUILD_COMMIT=${{ steps.sha.outputs.short }}" \
+            --push-retry=5 \
             --snapshot-mode=redo
 
       - name: Build web bundle (outside Docker)
@@ -104,6 +131,7 @@ jobs:
             --destination="${REGISTRY}/companion-web:${{ steps.sha.outputs.short }}" \
             --destination="${REGISTRY}/companion-web:main-latest" \
             --build-arg="BUILD_COMMIT=${{ steps.sha.outputs.short }}" \
+            --push-retry=3 \
             --snapshot-mode=redo
 
       - name: Checkout companion-gitops
@@ -118,9 +146,19 @@ jobs:
         working-directory: companion-gitops/overlays/onprem
         env:
           NEW_TAG: ${{ steps.sha.outputs.short }}
+          OCR_BUILT: ${{ steps.changes.outputs.ocr }}
         run: |
+          # Only bump companion-ocr when it was actually rebuilt this run;
+          # otherwise its ${NEW_TAG} image doesn't exist in zot. backend + web
+          # build every run.
+          imgs="companion-backend companion-web"
+          if [ "${OCR_BUILT}" = "true" ]; then
+            imgs="${imgs} companion-ocr"
+          else
+            echo "OCR unchanged — leaving companion-ocr tag as-is."
+          fi
           # Quote so all-digit short SHAs don't parse as YAML integers.
-          for img in companion-backend companion-web companion-ocr; do
+          for img in ${imgs}; do
             sed -i "/name: ${REGISTRY}\/${img}$/,/newTag:/ s|newTag: .*|newTag: \"${NEW_TAG}\"|" kustomization.yaml
           done
           grep -A2 "name: ${REGISTRY}/companion-" kustomization.yaml || true
