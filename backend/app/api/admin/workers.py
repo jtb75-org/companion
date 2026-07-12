@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AdminUser, require_admin_role
-from app.db import get_db
+from app.db.session import get_maintenance_db
 from app.models.document import Document
 from app.models.enums import DocumentStatus
 
@@ -91,7 +91,7 @@ async def trigger_medication_reminders(
 @router.post("/reprocess-documents")
 async def reprocess_stuck_documents(
     admin: AdminUser = Depends(_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Reprocess documents stuck in RECEIVED/PROCESSING."""
     from app.pipeline.orchestrator import process_document

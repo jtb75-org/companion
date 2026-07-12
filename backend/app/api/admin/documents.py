@@ -13,7 +13,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AdminUser, require_admin_role
-from app.db import get_db
+from app.db.session import get_maintenance_db
 from app.models.document import Document
 from app.models.enums import DocumentStatus
 from app.models.pipeline_metrics import PipelineMetric
@@ -36,7 +36,7 @@ async def list_documents(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """List all documents with pagination."""
     base = (
@@ -156,7 +156,7 @@ async def _decrypt_ocr_shadow(db: AsyncSession, doc: Document) -> dict | None:
 async def get_document_detail(
     document_id: uuid.UUID,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Get full document details including OCR text, extracted fields, and pipeline stages."""
     doc = await db.get(Document, document_id)
@@ -217,7 +217,7 @@ async def get_document_detail(
 async def cancel_document(
     document_id: uuid.UUID,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Cancel a document by setting its status to FAILED."""
     doc = await db.get(Document, document_id)
@@ -239,7 +239,7 @@ async def cancel_document(
 async def resubmit_document(
     document_id: uuid.UUID,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Reset a document to RECEIVED and re-trigger the pipeline."""
     from app.events.publisher import event_publisher

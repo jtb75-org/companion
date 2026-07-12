@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AdminUser, require_admin_role
-from app.db import get_db
+from app.db.session import get_maintenance_db
 from app.models.document import Document
 from app.models.user import User
 
@@ -19,7 +19,7 @@ _viewer = require_admin_role("viewer")
 @router.get("/engagement")
 async def engagement_metrics(
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """User engagement metrics."""
     now = datetime.utcnow()
@@ -51,7 +51,7 @@ async def engagement_metrics(
 @router.get("/onboarding")
 async def onboarding_metrics(
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Onboarding funnel metrics."""
     # Total users
@@ -88,7 +88,7 @@ async def onboarding_metrics(
 @router.get("/retention")
 async def retention_metrics(
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """User retention by account status."""
     statuses = await db.execute(
@@ -113,7 +113,7 @@ async def retention_metrics(
 @router.get("/checkin")
 async def checkin_metrics(
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Member summary metrics."""
     from app.models.medication import Medication
@@ -139,7 +139,7 @@ async def checkin_metrics(
 @router.get("/documents")
 async def document_metrics(
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Document processing metrics."""
     total_result = await db.execute(

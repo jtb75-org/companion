@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AdminUser, require_admin_role
-from app.db import get_db
+from app.db.session import get_maintenance_db
 from app.models.document import Document
 from app.models.enums import DocumentStatus
 from app.models.pipeline_metrics import PipelineMetric
@@ -21,7 +21,7 @@ _viewer = require_admin_role("viewer")
 @router.get("/health")
 async def pipeline_health(
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Overall pipeline health status with per-stage metrics."""
     now = datetime.utcnow()
@@ -92,7 +92,7 @@ async def pipeline_health(
 @router.get("/metrics")
 async def pipeline_metrics(
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Pipeline processing metrics (last 24h)."""
     cutoff = datetime.utcnow() - timedelta(hours=24)
@@ -127,7 +127,7 @@ async def pipeline_metrics(
 @router.get("/failures")
 async def pipeline_failures(
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Recent pipeline failures."""
     rows = await db.execute(
@@ -152,7 +152,7 @@ async def pipeline_failures(
 async def document_stages(
     document_id: uuid.UUID,
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Pipeline stage details for a specific document."""
     rows = await db.execute(
