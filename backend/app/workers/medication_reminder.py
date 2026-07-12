@@ -74,6 +74,7 @@ async def run_medication_reminder_for_user(user_id):
 
                     confirmation = MedicationConfirmation(
                         medication_id=med.id,
+                        user_id=med.user_id,
                         scheduled_at=scheduled_dt,
                     )
                     db.add(confirmation)
@@ -163,6 +164,7 @@ async def run_medication_reminder():
                     # Create pending confirmation
                     confirmation = MedicationConfirmation(
                         medication_id=med.id,
+                        user_id=med.user_id,
                         scheduled_at=scheduled_dt,
                     )
                     db.add(confirmation)
