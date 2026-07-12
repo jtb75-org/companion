@@ -23,6 +23,40 @@ except WS4 (AAD widening).
 
 ---
 
+## Phase 0 spike — RESULTS (2026-07-12) ✅
+
+Ran against an ephemeral **`paradedb/paradedb:17-v0.23.1`** (prod image),
+pgvector **0.8.1**, isolated from the cluster. Harness mirrors `document_chunks`
+(user_id, `vector(768)`, global HNSW cosine index) with an adversarial two-tenant
+corpus (3000 chunks each; tenant B near the query, tenant A far).
+
+**RLS works exactly as designed — GO for WS1.**
+- App connected as `companion_app` (`rolsuper=f`, `rolbypassrls=f`) — the
+  non-owner/NOBYPASSRLS guarantee holds.
+- GUC unset → **0 rows** (fail-closed). User A: sees own 3000, **0** of B's;
+  cross-tenant `UPDATE` → 0 rows; cross-tenant `INSERT` → **rejected by WITH
+  CHECK**. Per-user isolation is enforced at the DB.
+
+**pgvector HNSW post-filter under-return — CONFIRMED, and it affects the current
+code.**
+| query (ask 10), user A = "far" tenant | rows returned |
+|---|---|
+| RLS-only, no user_id filter | **0** |
+| explicit `WHERE user_id = A` (retrieval.py shape) | **0** |
+| `hnsw.ef_search = 1000` | **0** |
+| **`hnsw.iterative_scan = relaxed_order`** | **10** ✅ |
+| (contrast) user B = "near" tenant, RLS-only | 10 |
+
+→ The `user_id` pre-filter does **not** save recall under HNSW (the filter runs
+*after* the ANN scan). **`retrieval.py` has a latent production under-return
+bug today**, independent of RLS. Fix = `hnsw.iterative_scan` (Phase 3). This is
+worth a **standalone fix now** in `retrieval.py`, ahead of the rest of the plan.
+
+Harness preserved at `scratchpad/spike/` (`01_setup.sql`, `02_test.sql`,
+`run.sh`) — the basis for the WS1 CI negative-test + WS3 recall test.
+
+---
+
 ## 1. The gaps → workstreams (ranked by value)
 
 ### WS1 — Postgres Row-Level Security (per-user isolation) — **headline**
@@ -89,21 +123,45 @@ superuser/owner, RLS would silently evaporate.
 Order: **role exists → migrate (tables+policies) → grant → app deploy.** Out of
 order gives confusing "permission denied" vs "zero rows" depending on the layer.
 
-**pgvector + RLS — Companion-critical gotcha.** Companion uses pgvector for RAG
-retrieval. **RLS filters rows AFTER the ANN index scan**: a `LIMIT 10` HNSW/IVF
-search finds 10 nearest candidates, THEN RLS drops the ones not owned by the
-current user → **silent under-return** (ask for 10 chunks, get 3).
+**pgvector + RLS — Companion-critical gotcha. MEASURED in the Phase 0 spike
+(2026-07-12) — see §Phase 0 results.** Companion uses a **global HNSW** cosine
+index (`ix_document_chunks_embedding_hnsw`). **The filter — whether RLS or an
+explicit `user_id` predicate — is applied AFTER the HNSW ANN scan** (confirmed by
+`EXPLAIN`: `Index Scan using …_hnsw … Filter: (user_id = …)`). If the current
+user's chunks are not in the query's globally-nearest cluster, the top-K
+candidates are all *other* users' rows and the filter drops them → **silent
+under-return, down to zero**.
 
-Good news: the current RAG query **already pre-filters** —
-`backend/app/conversation/retrieval.py:29-40` has `WHERE dc.user_id = :user_id`
-*before* `ORDER BY dc.embedding <=> :query_vec`, so today's query is not exposed
-to the under-return mode. **The mitigation is therefore: KEEP (never remove) the
-explicit `user_id` pre-filter — do not let RLS become the *only* guard on the
-vector path** — and add a regression test (`EXPLAIN` shows the pre-filter; recall
-holds under a multi-tenant corpus). The under-return warning applies to any NEW
-vector query that relies on RLS alone; those must over-fetch (`LIMIT k·N` +
-app-trim) or pre-filter. RLS stays as the fail-closed backstop; the pre-filter
-preserves recall.
+**This overturns the earlier "the pre-filter protects us" assumption.** The spike
+showed `retrieval.py`'s exact `WHERE user_id = A … LIMIT 10` returns **0 rows**
+for a user whose vectors are far from the query cluster — a **latent
+silent-under-return bug that exists in production TODAY**, independent of RLS.
+
+**Fix (measured):** set **`hnsw.iterative_scan = relaxed_order`** (available in
+our pgvector **0.8.1**) on the RAG retrieval path — it keeps walking the HNSW
+graph until `LIMIT` is satisfied *after* filtering. In the spike this restored a
+full 10/10. Raising `hnsw.ef_search` alone did **not** help (still 0 — the near
+cluster was entirely the other tenant). Keep the explicit `user_id` pre-filter
+too (defence-in-depth), but it is **not** sufficient on its own.
+
+Three implementation rules (kali, from adjacent experience):
+1. **RLS makes this MORE load-bearing, not redundant.** After WS1, the RLS policy
+   is *also* a post-ANN filter, so the vector query runs **two** post-scan
+   filters. `iterative_scan` becomes required, not optional. **Test the combined
+   path (RLS on + iterative_scan) as one case**, not two.
+2. **`iterative_scan` is a per-session GUC — set it `SET LOCAL` inside the same
+   UoW/transaction that sets `app.current_user_id`.** Otherwise pooled-connection
+   bleed leaves some requests with it and some without → intermittent
+   under-recall that is hell to reproduce. Same discipline + footgun as the RLS
+   GUCs.
+3. **`relaxed_order` may return the k results slightly out of exact distance
+   order** (the recall tradeoff). Fine for RAG (feeding a context window), unless
+   something downstream assumes strict nearest-first — **audit `retrieval.py`
+   post-processing** for dedup-by-first-hit, a "top result" shortcut, or a
+   threshold cutoff on `result[0]`. Set `hnsw.max_scan_tuples` to bound scan cost
+   on large corpora. (Use `strict_order` only if exact ordering is required.)
+
+Regression-test recall under a multi-tenant corpus, with RLS enabled.
 
 **Tenant tables to enumerate (Phase 1, exhaustive):** documents, pending_reviews,
 functional_memory, RAG chunks/embeddings, medications, bills, appointments,
@@ -233,7 +291,7 @@ off-cluster key vaulting, and the `companion-ocr` egress NetworkPolicy.
 
 | Phase | Work | Depends on |
 |---|---|---|
-| 0 | **Spike:** port `rls.py`+`context.py` against ONE tenant table + the pgvector RAG table under two users; confirm the ANN under-return + a mitigation (pair with kali) | — |
+| 0 | ✅ **DONE 2026-07-12:** RLS proven on paradedb17/pgvector0.8.1; HNSW post-filter under-return confirmed (incl. the current pre-filter query → 0 rows); fix = `hnsw.iterative_scan`. See §Phase 0 results. | — |
 | 1 | Verify runtime DB role; add NOSUPERUSER/NOBYPASSRLS non-owner `companion_app` (CNPG `managed.roles`) + grants step + deploy ordering | 0 |
 | 2 | RLS policies on all tenant tables + GUC UnitOfWork + unset-GUC guard + `rls` negative-test CI suite | 1 |
 | 3 | pgvector retrieval fix (over-fetch/pre-filter) + multi-tenant vector tests | 2 |
