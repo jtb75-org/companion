@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.firebase import verify_firebase_token
 from app.config import settings
 from app.db import get_db
+from app.db.context import set_user_context
 from app.models.trusted_contact import TrustedContact
 from app.services import caregiver_service
 
@@ -27,6 +28,7 @@ async def get_activity(
     """
     # Dev bypass
     if settings.dev_auth_bypass and not authorization:
+        await set_user_context(db, user_id)
         activity = await caregiver_service.get_caregiver_activity(db, user_id)
         return {"activity": activity}
 
@@ -56,5 +58,8 @@ async def get_activity(
             detail="Access denied",
         )
 
+    # Caregiver authorized → set tenant context to the member so RLS scopes the
+    # activity read (member-id-as-context, WS1 Phase 2).
+    await set_user_context(db, user_id)
     activity = await caregiver_service.get_caregiver_activity(db, user_id)
     return {"activity": activity}
