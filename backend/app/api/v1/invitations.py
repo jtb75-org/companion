@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import User, _extract_bearer_token, require_complete_profile
 from app.db import get_db
+from app.db.session import maintenance_session
 from app.integrations.email_service import (
     send_caregiver_invitation,
     send_invitation_accepted_notification,
@@ -66,9 +67,15 @@ async def accept_invitation(
     if contact is None:
         raise HTTPException(400, "Invalid, expired, or already-used invitation token")
 
-    # Notify the member that their caregiver accepted
-    result = await db.execute(select(UserModel).where(UserModel.id == contact.user_id))
-    member = result.scalar_one_or_none()
+    # Notify the member that their caregiver accepted. Reading the member's
+    # user row is cross-tenant (the caregiver has no member GUC on this
+    # session), so run it on the maintenance (BYPASSRLS) session — under users
+    # RLS the by-id lookup would otherwise fail-close and blank the name.
+    async with maintenance_session() as mdb:
+        result = await mdb.execute(
+            select(UserModel).where(UserModel.id == contact.user_id)
+        )
+        member = result.scalar_one_or_none()
     if member:
         await send_invitation_accepted_notification(
             to_email=member.email,
@@ -114,9 +121,14 @@ async def validate_invitation_token(
     if contact is None:
         raise HTTPException(404, "Invalid or expired invitation")
 
-    # Look up the member name
-    result = await db.execute(select(UserModel).where(UserModel.id == contact.user_id))
-    member = result.scalar_one_or_none()
+    # Look up the member name. This is a public, unauthenticated endpoint with
+    # no member GUC, so read the member row on the maintenance (BYPASSRLS)
+    # session — under users RLS the by-id lookup would otherwise fail-close.
+    async with maintenance_session() as mdb:
+        result = await mdb.execute(
+            select(UserModel).where(UserModel.id == contact.user_id)
+        )
+        member = result.scalar_one_or_none()
 
     return {
         "valid": True,

@@ -16,6 +16,9 @@ from __future__ import annotations
 # NULLIF(..., '') + the `, true` (missing_ok) on current_setting is the whole
 # fail-closed trick: unset/empty GUC → NULL → predicate false.
 _USER_GUC = "NULLIF(current_setting('app.current_user_id', true), '')::uuid"
+# The bootstrap email GUC — set before the user_id is known (auth-by-email). Same
+# fail-closed idiom: unset/empty → NULL → `email = NULL` → false.
+_LOGIN_EMAIL_GUC = "NULLIF(current_setting('app.current_login_email', true), '')"
 
 
 def tenant_isolation_statements(table: str, *, user_col: str = "user_id") -> list[str]:
@@ -31,6 +34,35 @@ def tenant_isolation_statements(table: str, *, user_col: str = "user_id") -> lis
         f"CREATE POLICY {table}_isolation ON {table} "
         f"USING ({user_col} = {_USER_GUC}) "
         f"WITH CHECK ({user_col} = {_USER_GUC})",
+    ]
+
+
+def users_isolation_statements() -> list[str]:
+    """ENABLE + FORCE RLS + the `users`-table isolation policy.
+
+    `users` is special: it is keyed on ``id`` (not ``user_id``) and needs a
+    read-only bootstrap clause because auth resolves a member by email *before*
+    the user_id GUC exists. So a row is READABLE when its id matches the tenant
+    GUC OR its email matches the login-email GUC, but WRITES are fenced to the
+    tenant GUC only (``id = app.current_user_id``) — the email bootstrap must
+    never authorize a write. Cross-user reads/writes (admin, invitation stubs)
+    run under the BYPASSRLS ``companion_maintenance`` role.
+    """
+    return [
+        "ALTER TABLE users ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE users FORCE ROW LEVEL SECURITY",
+        "CREATE POLICY users_isolation ON users "
+        f"USING (id = {_USER_GUC} OR email = {_LOGIN_EMAIL_GUC}) "
+        f"WITH CHECK (id = {_USER_GUC})",
+    ]
+
+
+def drop_users_isolation_statements() -> list[str]:
+    """Reverse of ``users_isolation_statements`` (for migration downgrade)."""
+    return [
+        "DROP POLICY IF EXISTS users_isolation ON users",
+        "ALTER TABLE users NO FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE users DISABLE ROW LEVEL SECURITY",
     ]
 
 
