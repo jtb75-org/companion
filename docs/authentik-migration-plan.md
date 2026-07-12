@@ -54,14 +54,34 @@ Admin / staff (web only)  → standard hosted OIDC redirect → Authentik login 
 
 ## 3. Identity & provisioning (keep invite-only)
 
-- Today: `users.firebase_uid` ← Firebase. After: store the Authentik OIDC `sub`
-  (per-provider hash under `sub_mode=hashed_user_id`) as the external subject.
+- **There is NO `firebase_uid` column today** (niru). Companion resolves
+  members/admins/caregivers **by email** after Firebase token verification;
+  `models/user.py` has no external-subject column, and none exists in the schema.
+  So this migration must **add** one, not repopulate an existing field:
+  - New nullable **`users.external_subject_id`** (text, **UNIQUE**), holding the
+    Authentik OIDC subject. This column is also a **shared prerequisite of the
+    PHI plan's** bootstrap-safe `users` RLS policy — land it once, serve both.
+  - **Dual-run lookup rules:** during transition, resolve principal by
+    `external_subject_id` when present, else fall back to email match, then
+    backfill the subject on first Authentik login. After cutover, subject is
+    authoritative and the email fallback is removed.
+  - **Backfill/remap:** map the existing member (`smoketest@…`), the admin
+    (`joe.buhr@gmail.com` in `admin_users`), and any caregivers to their new
+    Authentik subjects on first login (email → subject). Trivial at today's
+    scale (1 member + 1 admin) but the rule must be explicit.
 - **Invite-only is preserved.** On invite/admin-create we (a) create the
   Authentik user via its API, (b) keep the existing `users` stub
-  (`account_status='invited'`). First login flips INVITED→ACTIVE. Provisioning
-  is gated on an existing stub — we do **not** enable HCC's `auto_provision`.
-- `admin_users` is unchanged; admin role resolves from our table keyed by the
-  verified subject/email.
+  (`account_status='invited'`). First login flips INVITED→ACTIVE and backfills
+  `external_subject_id`. Provisioning is gated on an existing stub — we do **not**
+  enable HCC's `auto_provision`.
+- **First-login lookup is bootstrap-sensitive (niru, cross-plan with PHI/RLS):**
+  before the subject is mapped to an internal `user_id`, provisioning finds the
+  stub by the **verified OIDC subject/email**. Under RLS this needs the
+  `app.current_external_subject` GUC + a `users` SELECT policy that matches on
+  `external_subject_id` (see PHI plan §"users bootstrap-safe policy"). Set that
+  GUC server-side ONLY from a verified token, never from input.
+- `admin_users` is unchanged as a table; admin role resolves from it. During
+  dual-run it keys by **email** (as today); after cutover, by the mapped subject.
 - **`sub_mode` is immutable** — pick it once at provider creation and never
   change it (changing re-keys every user). Decide before provisioning anyone real.
 - **Cross-path subject consistency (kali):** the member BFF path and the staff
@@ -126,17 +146,44 @@ stage names and provider config before committing to infra. **Pair with kali.**
   - mobile (detected via header/param) → return `{ token: <sid> }`; **same sid**,
     Bearer transport. `verify(require_issuer=False)` for the BFF-fetched
     in-cluster id_token; `require_issuer=True` for any browser bearer.
-- Replace `verify_firebase_token` in `dependencies.py` with the OIDC verifier;
-  keep `AdminUser` / `require_admin_role`, sourcing identity from the verified
-  subject/email.
-- Wire invites → Authentik user creation (Authentik API) + subject mapping onto
-  `users`. Password reset/recovery → Authentik recovery flow (replaces Firebase
-  reset). Add `pyjwt[crypto]`; remove `firebase-admin`.
+- **Replace `verify_firebase_token` at ALL call sites — it is NOT only in
+  `dependencies.py` (niru): ~10 backend locations** including
+  `api/v1/profile.py`, `auth_check.py`, `charges.py`, and
+  `caregiver/{dashboard,alerts,activity}`. Introduce a single principal-resolution
+  dependency (member/admin/caregiver) that all of them adopt, so the swap is one
+  seam, not ten. Keep `AdminUser` / `require_admin_role`, sourcing identity from
+  the verified subject (email fallback during dual-run).
+- **Caregiver principal is a distinct model, not just a token swap (niru):**
+  `get_current_caregiver` today expects Firebase **custom claims**
+  (`contact_id`/`user_id`/`tier`), and several caregiver endpoints bypass that dep
+  and authorize by decoded **email + `TrustedContact.contact_email` + query
+  `user_id`**. Authentik id_tokens won't carry those custom claims. Build a
+  **compatibility layer** that resolves caregiver identity + tier from our own
+  `TrustedContact`/tier tables keyed by the verified subject/email — and replace
+  the email-based charge/user selection — or those surfaces will still need
+  Firebase or silently lose tier checks. Enumerate all caregiver endpoints.
+- **CSRF is not just "set a cookie" (niru).** Port HCC's full double-submit
+  enforcement, or cookie sessions are CSRF-exposed / won't work:
+  - Backend: enforcement middleware on unsafe methods for cookie-auth requests
+    (Origin/Referer allowlist + `X-CSRF-Token` == `companion_csrf` cookie), like
+    HCC `main.py`. Bearer requests are exempt (not CSRF-able).
+  - CORS/config: add the CSRF header to allowed headers; set cookie
+    domain/secure/samesite.
+  - (Web wiring lives in Phase 3.) Add CSRF middleware + negative tests here.
+- Wire invites → Authentik user creation (Authentik API) + subject backfill onto
+  `users.external_subject_id`. Password reset/recovery → Authentik recovery flow
+  (replaces Firebase reset). Add `pyjwt[crypto]`; remove `firebase-admin` only
+  after ALL ~10 call sites are migrated.
 - **Safety-privacy-reviewer sign-off required** (auth + user-data path) before
   merge.
 
 ### Phase 3 — Web portals (admin / caregiver)
 - Swap Firebase JS SDK → our login form POSTing `/auth/login` (cookie session).
+- **CSRF frontend wiring (niru):** the web API client currently sends a Firebase
+  Bearer with no `credentials`. For cookie sessions it must switch to
+  `credentials: 'include'`, read the `companion_csrf` cookie, and echo it as
+  `X-CSRF-Token` on unsafe requests (HCC `frontend/src/api/client.ts` pattern).
+  Without this the Phase-2 CSRF middleware rejects every mutation.
 - Admin/staff sign-in wired to the hosted-redirect path (§4).
 
 ### Phase 4 — Mobile (React Native)
@@ -226,7 +273,10 @@ backend flag points at it.
 
 ## Appendix — files to port from HCC
 
-`backend/app/auth/oidc.py` (verifier), `authentik_flow.py` (~120 lines, directly
-liftable), `session.py` (Redis session — return sid as bearer for mobile),
-`deps.py` (bearer-or-session), `ratelimit.py` (login throttle), `api/auth.py`
-(login/logout). See also HCC `docs/security.md` for the consent/session posture.
+`backend/app/auth/oidc.py` (verifier), `backend/app/auth/authentik_flow.py`
+(~120 lines, directly liftable), `backend/app/auth/session.py` (Redis session —
+return sid as bearer for mobile), `backend/app/auth/deps.py` (bearer-or-session),
+`backend/app/auth/ratelimit.py` (login throttle), and **`backend/app/api/auth.py`**
+(login/logout — note: under `api/`, not `auth/`). CSRF enforcement lives in HCC
+`backend/app/main.py`; the web client CSRF echo in `frontend/src/api/client.ts`.
+See also HCC `docs/security.md` for the consent/session posture.
