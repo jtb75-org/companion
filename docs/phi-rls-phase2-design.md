@@ -40,13 +40,15 @@ same place (the RAG path is already patched, but keep them together).
 `account_lifecycle_service.py:267-289`) are **legitimately cross-user** and
 cannot run under a single member GUC. They need a dedicated principal.
 
-**Decision D1:** add a `companion_maintenance` CNPG managed role with **BYPASSRLS**
-(mirrors HCC's dedicated shred principal), used ONLY by the retention +
-account-deletion workers (a second sealed cred + those workers connect as it).
-Everything else stays on the non-bypass `companion_app`. Alternative: keep those
-ops on the owner `companion` (already bypasses via ownership) — simplest, but
-widens owner use. **Recommend: `companion_maintenance` BYPASSRLS** — least
-privilege, explicit, auditable.
+**Decision D1 — DECIDED:** `companion_maintenance` CNPG managed role, **BYPASSRLS
++ `inRoles: [companion_app]`**, used only by the retention + account-deletion
+workers. **Critical refinement (kali):** the bypass is reserved for the narrow
+**cross-user DISCOVERY** query (e.g. "which docs/users are due for purge" — a scan
+RLS would fail-close). For the actual per-user **mutations**, the job does
+`SET LOCAL ROLE companion_app` + `SET LOCAL app.current_user_id = <user>` so each
+user's purge runs **RLS-scoped exactly like the app**. A job that runs entirely
+under BYPASSRLS is "a loaded gun — one bad WHERE deletes across every user";
+reserve the bypass for the read, fence every write.
 
 ## Table-by-table policy matrix
 
@@ -64,11 +66,13 @@ are always the row owner. ✔ with per-iteration GUC.
 **No `user_id` column — need through-parent or denormalization (Decision D2):**
 - `chat_messages` (only `chat_session_id`) → parent `chat_sessions.user_id`
 - `medication_confirmations` (only `medication_id`) → parent `medications.user_id`
-- Options: (a) `USING (EXISTS (SELECT 1 FROM parent p WHERE p.id = fk AND
-  p.user_id = current_setting))` — no schema change, small per-row cost; or
-  (b) **denormalize a `user_id` column** (migration + backfill + set on write) —
-  uniform policy, faster, but more code. **Recommend (a) EXISTS** for these two
-  (low write volume; avoids a backfill migration), revisit if hot.
+- **DECIDED — denormalize `user_id`** onto both tables (kali: HCC put the tenant
+  key on EVERY scoped table, never EXISTS-joined). An EXISTS-through-parent policy
+  runs a correlated subquery **per row** and compounds under RLS — bad on a hot
+  path like `chat_messages`. Add `user_id` (migration + backfill), set it at
+  insert, and keep it honest with a **same-user trigger** (`child.user_id` must
+  equal parent's — the `enforce_same_user` pattern). Policy is then the flat
+  standard `user_id = current_setting`.
 
 **Different key column:** `caregiver_assignment_requests` policy keys on
 **`member_id`**, not `user_id`. Admin-override + caregiver-email-cleanup paths are
@@ -84,18 +88,23 @@ cross-user → they run under the bypass role / admin path.
 purges globally) and `deletion_audit_log` (user often already deleted; written
 cross-user in loops). Leave global; append-only hardening is WS3.
 
-**`users` — the bootstrap problem (Decision D3):** auth resolves the member by
-**email** (`dependencies.py:76`) *before* any `user_id`/GUC exists. A policy
-`id = current_setting` would return nothing → **all logins break**. Options:
-- (a) **Exempt `users` from RLS** for now — its sensitive profile fields
-  (phone/dob/address) are already field-encrypted; residual exposure is
-  email/name/status cross-user. Simplest; unblocks Phase 2.
-- (b) Bootstrap policy + a pre-GUC lookup path: set `app.current_external_subject`
-  from the verified token and a `users` SELECT policy matching it — but Companion
-  looks up by **email** today, not subject (that's the Authentik plan). Full fix
-  lands with the Authentik migration (`external_subject_id`).
-- **Recommend (a) now**, (b) when Authentik lands. (Cross-ref Authentik plan §3 +
-  the PHI plan's `users` bootstrap note.)
+**`users` — the bootstrap problem (Decision D3 — DECIDED: keep `users` under RLS
+now, via an email-GUC bootstrap policy).** Auth resolves the member by **email**
+(`dependencies.py:76`) *before* any `user_id`/GUC exists, so a bare
+`id = current_setting` policy breaks login. kali's mechanism (HCC keeps `users`
+under RLS the whole time — it's the cross-user identity index you least want
+unprotected):
+- Before the email lookup, `SET LOCAL app.current_login_email = <email>`.
+- `users` SELECT policy: `id = current_setting('app.current_user_id', true)::uuid
+  OR email = current_setting('app.current_login_email', true)`. Writes stay
+  self-only (`WITH CHECK id = current_user_id`).
+- Same for the admin email lookup (`admin_users`) and caregiver `trusted_contacts`
+  lookup — set the relevant lookup GUC before each bootstrap SELECT.
+- When Authentik lands, swap the `email` clause for
+  `external_subject_id = current_setting('app.current_external_subject')` — zero
+  structural change. (Exempting `users` was the alternative; rejected because one
+  app-authz bug = full email/name enumeration on exactly the worst table, and
+  "exempt now, fix later" tends to become permanent.)
 
 ## Loud unset-GUC guard (kali's regret, bake in from day one)
 
@@ -109,17 +118,25 @@ CAN cross-user; assert RLS + `iterative_scan` recall together.
 
 | Step | Work | Risk |
 |---|---|---|
-| 2a | GUC-setting in the 3 auth deps + the 4 per-user workers (`SET LOCAL`), + a request/worker context helper. **No policies.** Deploy; verify every path sets it (temporary log/metric). | none (no-op) |
-| 2b | `companion_maintenance` BYPASSRLS role (D1) + point retention/deletion workers at it | low |
-| 2c | Enable RLS + policies on **ONE** low-risk member table (e.g. `todos`) behind verification; confirm member-scoped + caregiver + worker paths still work | medium |
-| 2d | Roll out policies to the rest (standard + EXISTS + member_id); `users` per D3 | medium |
-| 2e | `rls` negative-test CI gate + unset-GUC guard | — |
+| 2a | `app/db/context.py` GUC helper + wire the 3 auth deps (`app.current_user_id`; `app.current_login_email` before the email lookup) + the 4 per-user workers (`SET LOCAL` per iteration). **No policies** → no-op. Deploy; verify every path sets it (temporary log/metric). | none (no-op) |
+| 2b | Denormalize `user_id` onto `chat_messages` + `medication_confirmations` (migration + backfill + set-on-write + same-user trigger) | low |
+| 2c | `companion_maintenance` BYPASSRLS+inRoles role; retention/deletion do scoped-bypass (discovery only) + `SET LOCAL ROLE companion_app` for mutations | low |
+| 2d | Enable RLS + policies on **ONE** low-risk member table (`todos`); verify member + caregiver + worker paths | medium |
+| 2e | Roll out policies to the rest (standard + `caregiver_assignment_requests` on `member_id` + `users` email-GUC bootstrap) | medium |
+| 2f | `rls` negative-test CI gate + unset-GUC guard | — |
 
-## Open decisions (for owner / kali)
-- **D1** maintenance principal: `companion_maintenance` BYPASSRLS (recommended) vs reuse owner.
-- **D2** chat_messages/medication_confirmations: EXISTS-through-parent (recommended) vs denormalize `user_id`.
-- **D3** `users`: exempt now + fix at Authentik (recommended) vs bootstrap-subject policy now.
-- Admin cross-user reads: confirmed mostly global tables; any genuine member-data admin read uses the bypass role.
+## Decisions (RESOLVED 2026-07-12, owner + kali)
+- **D1** maintenance principal: **`companion_maintenance` BYPASSRLS + inRoles
+  companion_app**; bypass only the cross-user discovery scan, `SET LOCAL ROLE
+  companion_app` + GUC for per-user mutations.
+- **D2** chat_messages / medication_confirmations: **denormalize `user_id`** +
+  same-user trigger; flat standard policy.
+- **D3** `users`: **keep under RLS now** via the email-GUC bootstrap policy;
+  swap email→subject clause when Authentik lands.
+- Workers: **`SET LOCAL` per iteration, inside the per-iteration transaction**
+  (never a plain `SET` — pooled-connection bleed).
+- Admin cross-user reads: mostly global tables; any genuine member-data admin
+  read uses the bypass role.
 
 ## Files to port / touch
 HCC `db/rls.py` (policy triplet builder — swap `account_id`→`user_id`), `db/context.py`
