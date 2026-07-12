@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
+from app.db.context import set_user_context
 from app.pipeline.orchestrator import process_document
 from app.services.push_notification_service import (
     notify_document_processed,
@@ -85,6 +86,14 @@ async def handle_document_received_push(
         "Pub/Sub: Starting pipeline for doc %s",
         document_id,
     )
+
+    # RLS tenant context for the whole pipeline transaction (WS1 Phase 2e). The
+    # pipeline writes documents / document_chunks / pending_reviews /
+    # questions_tracker / bills / appointments on THIS session up to the commit
+    # below; without the GUC those fail-closed once the tables go under RLS. This
+    # endpoint authenticates via the pipeline key (not get_current_user), so it
+    # must set the context itself. Transaction-local.
+    await set_user_context(db, user_id)
 
     try:
         result = await process_document(
