@@ -27,3 +27,35 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
+
+
+# ── Maintenance (cross-user) session — WS1 Phase 2c ────────────────────────────
+# A SEPARATE connection as the BYPASSRLS `companion_maintenance` role, for the
+# internal/worker cross-user discovery scans that per-user RLS would fail-close.
+# Lazily built (no connection until first use) so it's inert until a worker needs
+# it and the credential exists. The scoped-bypass discipline (kali): use the
+# bypass ONLY for the cross-user read, then `SET LOCAL ROLE companion_app` +
+# set app.current_user_id for the per-user writes so mutations stay RLS-fenced.
+# `companion_app` is deliberately NOT a member of `companion_maintenance`, so the
+# normal runtime can never escalate to bypass.
+_maintenance_engine = None
+_maintenance_session_factory: async_sessionmaker[AsyncSession] | None = None
+
+
+def get_maintenance_session_factory() -> async_sessionmaker[AsyncSession]:
+    """Session factory bound to the companion_maintenance (BYPASSRLS) role."""
+    global _maintenance_engine, _maintenance_session_factory
+    if _maintenance_session_factory is None:
+        url = settings.maintenance_database_url
+        if not url:
+            raise RuntimeError(
+                "COMPANION_MAINTENANCE_DATABASE_URL is not configured — required "
+                "for cross-user worker discovery under RLS (WS1 Phase 2c)."
+            )
+        _maintenance_engine = create_async_engine(
+            url, pool_size=5, max_overflow=5, pool_pre_ping=True
+        )
+        _maintenance_session_factory = async_sessionmaker(
+            _maintenance_engine, class_=AsyncSession, expire_on_commit=False
+        )
+    return _maintenance_session_factory
