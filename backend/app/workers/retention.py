@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import async_session_factory
+from app.db.session import maintenance_session
 from app.models.audit import AccountAuditLog, DeletionAuditLog
 from app.models.document import Document
 from app.models.enums import (
@@ -38,8 +38,17 @@ SIGNUP_REFUSED_EVENT = "signup_refused"
 
 
 async def run_retention_worker():
-    """Execute the full retention enforcement cycle."""
-    async with async_session_factory() as db:
+    """Execute the full retention enforcement cycle.
+
+    Retention is an inherently CROSS-USER maintenance sweep — it selects and
+    mutates documents by classification/date across all members and purges
+    signup-refused audit rows — so the whole cycle runs under the maintenance
+    (BYPASSRLS) session (WS1 Phase 2c). Unlike the per-user workers there is no
+    per-member scoping step; the operation legitimately spans everyone. Falls
+    back to the normal session where the maintenance role is unconfigured
+    (dev/test, no RLS).
+    """
+    async with maintenance_session() as db:
         try:
             junk_count = await _purge_junk(db)
             phase1_count = await _transition_full_to_important(db)
