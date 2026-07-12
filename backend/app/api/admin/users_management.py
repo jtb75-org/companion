@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AdminUser, require_admin_role
-from app.db import get_db
+from app.db.session import get_maintenance_db
 from app.integrations.email_service import (
     send_account_deactivated,
     send_account_deleted_to_caregiver,
@@ -35,7 +35,7 @@ router = APIRouter(tags=["Admin - Users"])
 @router.get("/admin/companion-users")
 async def list_companion_users(
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """List all companion users with full details."""
     from app.services.field_crypto import decrypt_row_field
@@ -67,7 +67,7 @@ async def list_companion_users(
 async def create_companion_user(
     data: dict,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Create a new companion user."""
     result = await db.execute(select(User).where(User.email == data.get("email")))
@@ -101,7 +101,7 @@ async def update_companion_user(
     user_id: uuid.UUID,
     data: dict,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Update a companion user."""
     user = await db.get(User, user_id)
@@ -141,7 +141,7 @@ async def _get_caregiver_contacts(db: AsyncSession, user_id: uuid.UUID):
 async def admin_deactivate_user(
     user_id: uuid.UUID,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Admin deactivates a user account."""
     try:
@@ -161,7 +161,7 @@ async def admin_deactivate_user(
 async def admin_reactivate_user(
     user_id: uuid.UUID,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Admin reactivates a user account."""
     try:
@@ -177,7 +177,7 @@ async def admin_reactivate_user(
 async def admin_request_deletion(
     user_id: uuid.UUID,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Admin requests account deletion with 30-day grace period."""
     try:
@@ -203,7 +203,7 @@ async def admin_request_deletion(
 async def admin_cancel_deletion(
     user_id: uuid.UUID,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Admin cancels pending deletion."""
     try:
@@ -219,7 +219,7 @@ async def admin_cancel_deletion(
 async def delete_companion_user(
     user_id: uuid.UUID,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Permanently delete a user. Requires pending_deletion status or forces immediate deletion."""
     user = await db.get(User, user_id)

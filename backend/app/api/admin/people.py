@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AdminUser, require_admin_role
-from app.db import get_db
+from app.db.session import get_maintenance_db
 from app.integrations.email_service import (
     send_assignment_request_notification,
     send_caregiver_invitation,
@@ -29,7 +29,7 @@ router = APIRouter(tags=["Admin - People"])
 @router.get("/admin/people")
 async def list_all_people(
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """List all people in the system with their consolidated roles."""
 
@@ -212,7 +212,7 @@ async def list_all_people(
 async def create_person(
     data: dict,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Create a new person — optionally as user, admin, and/or caregiver."""
     email = data.get("email")
@@ -278,7 +278,7 @@ async def update_person(
     user_id: uuid.UUID,
     data: dict,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Update a person's details and roles."""
     user = await db.get(User, user_id)
@@ -324,7 +324,7 @@ async def update_person(
 async def invite_to_platform(
     data: AdminPlatformInvite,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Invite someone to the platform (Part 1 — no member assignment)."""
     if not data.email:
@@ -353,7 +353,7 @@ async def add_caregiver_assignment(
     caregiver_id: uuid.UUID,
     data: dict,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Assign this person as a caregiver for a member.
 
@@ -425,7 +425,7 @@ async def add_caregiver_assignment(
 async def admin_approve_assignment(
     request_id: uuid.UUID,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Admin approves a pending caregiver assignment request."""
     try:
@@ -439,7 +439,7 @@ async def admin_approve_assignment(
 async def remove_caregiver_assignment(
     contact_id: uuid.UUID,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Remove a caregiver assignment or pending assignment request."""
     contact = await db.get(TrustedContact, contact_id)
@@ -463,7 +463,7 @@ async def send_alert_to_member(
     user_id: uuid.UUID,
     body: dict,
     admin: AdminUser = Depends(_editor),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Send a push notification to a member."""
     from app.services.push_notification_service import send_push

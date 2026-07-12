@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AdminUser, require_admin_role
-from app.db import get_db
+from app.db.session import get_maintenance_db
 from app.notifications.escalation import get_open_escalations
 
 _viewer = require_admin_role("viewer")
@@ -15,7 +15,7 @@ router = APIRouter(tags=["Admin - Escalations"])
 @router.get("/admin/escalations")
 async def list_escalations(
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Open questions approaching or past thresholds."""
     items = await get_open_escalations(db)
@@ -30,7 +30,7 @@ async def list_escalations(
 @router.get("/admin/escalations/history")
 async def escalation_history(
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Escalation history."""
     # TODO: query historical escalations with date range
@@ -40,7 +40,7 @@ async def escalation_history(
 @router.get("/admin/escalations/stats")
 async def escalation_stats(
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Escalation statistics."""
     items = await get_open_escalations(db)

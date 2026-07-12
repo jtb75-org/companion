@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth.dependencies import AdminUser, require_admin_role
-from app.db import get_db
+from app.db.session import get_maintenance_db
 from app.models.chat_session import ChatSession
 from app.models.user import User
 
@@ -28,7 +28,7 @@ async def list_conversations(
     date_from: date | None = None,
     date_to: date | None = None,
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """List chat sessions with pagination."""
     query = (
@@ -101,7 +101,7 @@ async def export_conversations(
     date_from: date | None = None,
     date_to: date | None = None,
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Export chat sessions as JSON."""
     query = (
@@ -161,7 +161,7 @@ async def export_conversations(
 async def get_conversation(
     session_id: str,
     admin: AdminUser = Depends(_viewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_maintenance_db),
 ):
     """Get full conversation transcript."""
     result = await db.execute(

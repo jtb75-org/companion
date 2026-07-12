@@ -62,6 +62,31 @@ def get_maintenance_session_factory() -> async_sessionmaker[AsyncSession]:
     return _maintenance_session_factory
 
 
+async def get_maintenance_db() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency: a session on the maintenance (BYPASSRLS) connection.
+
+    For ADMIN endpoints that legitimately read/write across members (document
+    viewer, conversation viewer, metrics, escalations dashboard, push-to-user,
+    reprocess, hard-delete) — per-user RLS would fail-close them on the normal
+    companion_app connection, and admin is a privileged, cross-member surface by
+    design (gated by require_admin_role). Same commit/rollback shape as get_db.
+    Falls back to the normal session when the maintenance URL is unconfigured
+    (dev/test — no RLS there, so behavior is identical).
+    """
+    factory = (
+        get_maintenance_session_factory()
+        if settings.maintenance_database_url
+        else async_session_factory
+    )
+    async with factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
 @asynccontextmanager
 async def maintenance_session() -> AsyncIterator[AsyncSession]:
     """A session for a worker's cross-user DISCOVERY read (WS1 Phase 2c).
