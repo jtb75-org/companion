@@ -13,6 +13,7 @@ from app.config import settings
 # Database session dependency — imported from wherever the app defines it.
 # This is a placeholder import; adjust to match the actual session provider.
 from app.db import get_db
+from app.db.context import set_login_email_context, set_user_context
 from app.models.admin_user import AdminUser
 from app.models.enums import AccessTier
 from app.models.trusted_contact import TrustedContact
@@ -64,6 +65,7 @@ async def get_current_user(
         user = result.scalar_one_or_none()
         if user is None:
             raise HTTPException(status_code=404, detail="No mock user available in dev database")
+        await set_user_context(db, user.id)
         return user
 
     decoded = await _extract_bearer_token(authorization)
@@ -73,12 +75,17 @@ async def get_current_user(
     if not email:
         raise HTTPException(status_code=401, detail="Firebase token missing email claim")
 
+    # RLS bootstrap: the email lookup runs before the user_id is known, so set the
+    # login-email GUC first so the `users` policy admits this row (Phase 2).
+    await set_login_email_context(db, email)
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     if user.account_status in ("deactivated", "pending_deletion"):
         raise HTTPException(status_code=403, detail="Account is deactivated")
+    # Tenant context for the rest of the request (no-op until RLS policies land).
+    await set_user_context(db, user.id)
     return user
 
 
@@ -95,6 +102,7 @@ async def get_current_user_allow_inactive(
         user = result.scalar_one_or_none()
         if user is None:
             raise HTTPException(status_code=404, detail="No mock user available in dev database")
+        await set_user_context(db, user.id)
         return user
 
     decoded = await _extract_bearer_token(authorization)
@@ -102,10 +110,12 @@ async def get_current_user_allow_inactive(
     if not email:
         raise HTTPException(status_code=401, detail="Firebase token missing email claim")
 
+    await set_login_email_context(db, email)
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+    await set_user_context(db, user.id)
     return user
 
 
@@ -151,6 +161,7 @@ async def get_current_caregiver(
                 status_code=404,
                 detail="No mock caregiver in dev database",
             )
+        await set_user_context(db, contact.user_id)
         return CaregiverContext(
             contact=contact,
             user_id=contact.user_id,
@@ -176,6 +187,10 @@ async def get_current_caregiver(
     if not contact.is_active:
         raise HTTPException(status_code=403, detail="Trusted contact is not active")
 
+    # Caregiver = member-id-as-context: authz happened above (the contact row);
+    # RLS then scopes every downstream query to this member. No caregiver branch
+    # in the table policies is needed. (No-op until RLS policies land.)
+    await set_user_context(db, contact.user_id)
     return CaregiverContext(
         contact=contact,
         user_id=contact.user_id,
