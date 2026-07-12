@@ -140,12 +140,28 @@ silent-under-return bug that exists in production TODAY**, independent of RLS.
 **Fix (measured):** set **`hnsw.iterative_scan = relaxed_order`** (available in
 our pgvector **0.8.1**) on the RAG retrieval path — it keeps walking the HNSW
 graph until `LIMIT` is satisfied *after* filtering. In the spike this restored a
-full 10/10. Note: raising `hnsw.ef_search` alone did **not** help (still 0 — the
-near cluster was entirely the other tenant). Bound the extra scanning with
-`hnsw.max_scan_tuples`; `relaxed_order` may return results slightly out of exact
-distance order (fine for RAG; use `strict_order` if exact ordering matters).
-Keep the explicit `user_id` pre-filter too (defence-in-depth), but it is **not**
-sufficient on its own. Regression-test recall under a multi-tenant corpus.
+full 10/10. Raising `hnsw.ef_search` alone did **not** help (still 0 — the near
+cluster was entirely the other tenant). Keep the explicit `user_id` pre-filter
+too (defence-in-depth), but it is **not** sufficient on its own.
+
+Three implementation rules (kali, from adjacent experience):
+1. **RLS makes this MORE load-bearing, not redundant.** After WS1, the RLS policy
+   is *also* a post-ANN filter, so the vector query runs **two** post-scan
+   filters. `iterative_scan` becomes required, not optional. **Test the combined
+   path (RLS on + iterative_scan) as one case**, not two.
+2. **`iterative_scan` is a per-session GUC — set it `SET LOCAL` inside the same
+   UoW/transaction that sets `app.current_user_id`.** Otherwise pooled-connection
+   bleed leaves some requests with it and some without → intermittent
+   under-recall that is hell to reproduce. Same discipline + footgun as the RLS
+   GUCs.
+3. **`relaxed_order` may return the k results slightly out of exact distance
+   order** (the recall tradeoff). Fine for RAG (feeding a context window), unless
+   something downstream assumes strict nearest-first — **audit `retrieval.py`
+   post-processing** for dedup-by-first-hit, a "top result" shortcut, or a
+   threshold cutoff on `result[0]`. Set `hnsw.max_scan_tuples` to bound scan cost
+   on large corpora. (Use `strict_order` only if exact ordering is required.)
+
+Regression-test recall under a multi-tenant corpus, with RLS enabled.
 
 **Tenant tables to enumerate (Phase 1, exhaustive):** documents, pending_reviews,
 functional_memory, RAG chunks/embeddings, medications, bills, appointments,
