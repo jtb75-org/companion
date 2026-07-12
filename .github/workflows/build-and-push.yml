@@ -33,8 +33,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Need the parent commit to diff which paths changed (path-gating below).
-          fetch-depth: 2
+          # Full history so the diff base (github.event.before / HEAD^) always
+          # resolves on the self-hosted runner — a shallow clone left HEAD^
+          # unresolvable, tripping the empty-tree fallback so OCR always "changed".
+          fetch-depth: 0
 
       - name: Short SHA
         id: sha
@@ -48,18 +50,27 @@ jobs:
         # on every push is slow and repeatedly 502s the zot push (the whole
         # workflow then fails and blocks the gitops bump). Only build/push OCR
         # when ocr/ actually changed; otherwise keep the existing OCR tag.
+        env:
+          BEFORE: ${{ github.event.before }}
         run: |
-          if git rev-parse HEAD^ >/dev/null 2>&1; then
+          # Base = the commit main was at before this push. Fall back to
+          # building OCR (safe) if it's unavailable (first push / force-push /
+          # not fetched) rather than silently skipping.
+          if [ -n "${BEFORE}" ] && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            base="${BEFORE}"
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
             base="HEAD^"
           else
-            base=$(git hash-object -t tree /dev/null)  # first commit: empty tree
+            base=""
           fi
-          if git diff --quiet "$base" HEAD -- ocr/; then
+          echo "diff base: ${base:-<none>} → HEAD $(git rev-parse --short HEAD)"
+          if [ -n "${base}" ] && git diff --quiet "${base}" HEAD -- ocr/; then
             echo "ocr=false" >> "$GITHUB_OUTPUT"
             echo "ocr/ unchanged → skipping OCR build."
           else
             echo "ocr=true" >> "$GITHUB_OUTPUT"
-            echo "ocr/ changed → building OCR."
+            echo "ocr/ changed (or base unknown) → building OCR."
           fi
 
       - name: Configure registry auth (kaniko)
