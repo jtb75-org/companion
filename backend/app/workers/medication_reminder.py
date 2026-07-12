@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.db.context import set_user_context
-from app.db.session import async_session_factory
+from app.db.session import async_session_factory, maintenance_session
 from app.events.publisher import event_publisher
 from app.events.schemas import MedicationMissedPayload
 from app.models.medication import Medication, MedicationConfirmation
@@ -104,8 +104,18 @@ async def run_medication_reminder_for_user(user_id):
 
 
 async def run_medication_reminder():
-    """Check all medications and send reminders where due."""
-    async with async_session_factory() as db:
+    """Check all medications and send reminders where due.
+
+    An inherently CROSS-USER cron (sweeps every member's active medications and
+    the stale-confirmation "mark missed" pass), so it runs under the maintenance
+    (BYPASSRLS) session (WS1 Phase 2c). The per-med confirmation writes carry an
+    explicit user_id (= the med's owner) and are fenced by the enforce_same_user
+    trigger — child.user_id must equal the parent medication's user_id — so a bug
+    can't write a confirmation for the wrong member even under bypass. Falls back
+    to the normal session where the maintenance role is unconfigured (dev/test).
+    (The per-user run_medication_reminder_for_user path stays companion_app + GUC.)
+    """
+    async with maintenance_session() as db:
         try:
             now = datetime.utcnow()
 
