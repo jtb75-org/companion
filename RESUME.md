@@ -1,8 +1,8 @@
 # RESUME — Companion self-hosted migration
 
-Session handoff. Last updated **2026-06-20**. Source of truth for live state is
+Session handoff. Last updated **2026-07-11**. Source of truth for live state is
 this file + `MEMORY.md` (+ linked notes). `CLAUDE.md` "Current state" is also
-current as of 2026-06-19. The older 2026-06-18 history below the line is kept
+current as of 2026-07-11. The older 2026-06-18 history below the line is kept
 for context but is superseded.
 
 ## Status: DEPLOYED + functionally wired
@@ -26,6 +26,17 @@ for context but is superseded.
   Signup invite-only. OAuth consent screen still needs publishing.
 - **Workers** → all wired (internal endpoints + CronJobs); `/api/internal/*`
   blocked at the edge.
+- **Admin runtime controls shipped (#30/#31)**:
+  - OCR primary/shadow provider is runtime-configurable via `SystemConfig` and
+    the admin Settings OCR dropdown, not only env vars. `_guard_ocr_flag`
+    requires admin role + valid provider, and ingestion `_resolve_ocr_provider`
+    reads the flag before falling back to env.
+  - D.D. emotional-awareness guidance is now in the **live prompt**
+    (`EMOTIONAL_AWARENESS` appended in `prompt_builder.py`), implementing
+    `docs/dd-assistant-guidelines.md` §3.5. The admin Prompts UI is wired to
+    write `dd_persona/system_prompt`, bounded by `_guard_persona` (admin role,
+    length cap, override-phrase denylist) with safety canaries. Persona/safety
+    changes still require safety-privacy-reviewer sign-off.
 
 ## ✅ OCR migration — PaddleOCR deployed in SHADOW (2026-06-19/20)
 
@@ -40,14 +51,17 @@ See [[ocr-paddleocr-shadow]].
   (provider names, char counts, ms, similarity, + **encrypted** `shadow_text`).
   gitops: `COMPANION_OCR_PROVIDER=documentai`,
   `COMPANION_OCR_SHADOW_PROVIDER=paddleocr` (`f7d6feb`). Both API pods carry the
-  flag.
+  flag. Admin Settings can now override primary/shadow provider at runtime via
+  guarded `SystemConfig` feature flags.
 - **Verified live end-to-end**: shadow fires, records, `shadow_text` encrypted
   (`f2:` per-user envelope), decrypts via OpenBao. Clean rollback.
 - **Safety review: APPROVE-WITH-FOLLOWUPS.**
 - PRs merged: #22/#23/#24 (build/push fixes), **#25** (targeted trixie-lib rm),
-  **#26** (generic `clean_libs.py` + `asyncio.to_thread` warm-up).
+  **#26** (generic `clean_libs.py` + `asyncio.to_thread` warm-up), **#30**
+  (admin OCR provider feature flag), **#31** (live emotional-awareness prompt +
+  wired admin Prompts UI).
 
-### Benchmark (2026-06-20) + ⚠️ DocumentAI primary is DEAD
+### Benchmark (2026-06-20) + 🚫 Rollout blocker: DocumentAI primary is DEAD
 No real shadow records exist (DB has 0 docs), so ran a synthetic head-to-head:
 DocumentAI vs PaddleOCR on 5 D.D. doc types × clean/scan, scored vs known
 ground truth, both providers driven directly from an api pod.
@@ -66,8 +80,10 @@ ground truth, both providers driven directly from an api pod.
   scan gap first with a deskew/denoise/upscale pre-process OR collect organic
   shadow numbers on real traffic before flipping `COMPANION_OCR_PROVIDER`.
 
-**⚠️ DocumentAI "primary" is currently non-functional** (found during the
-benchmark) — two independent breaks:
+**🚫 Rollout blocker:** gitops still sets the primary OCR provider to
+`documentai`, but DocumentAI primary is currently non-functional (found during
+the benchmark). As of 2026-07-11, a real user scanning a document would hit the
+primary path and 404 because no processor exists. Two independent breaks:
 1. The pod SA `companion-backend@companion-prod-491606` lacked Document AI
    permission → **granted `roles/documentai.apiUser`** (left in place).
 2. **No processor exists** — configured `documentai_processor_id=6785df08989fd9a6`
@@ -105,9 +121,9 @@ PaddleOCR (after closing the scan-robustness gap).
 3. Encrypt `source_metadata.ocr_text` (process_camera_scan path).
 
 **Tracked follow-ups (non-blocking):**
-- **CI builder broken:** `atlas/builder:latest` node needs GLIBC_2.38 → the
-  "Build web bundle (outside Docker)" step fails → blocks gitops auto-bump for
-  ALL images. OCR tags bumped by hand meanwhile. Fix the builder image.
+- **CI image builds are green:** `build-and-push.yml` last 5 runs all succeeded
+  in ~9-11 min, and the workflow auto-bumps gitops image tags after pushes to
+  `main` (last checked 2026-07-11).
 - Cosmetic: in-container `curl` still broken by the overlay (Docker HEALTHCHECK
   only; k8s uses httpGet) — fix libldap reinstall or drop the HEALTHCHECK.
 - Hardening (safety followups): `logging_config.py` PII regex under-redacts
@@ -119,14 +135,16 @@ PaddleOCR (after closing the scan-robustness gap).
   register Android release SHA-1.
 - Owner one-offs: revoke bootstrap OpenBao token; key rotation automation.
 
-> NOTE: DB currently has **0 users** (joe.buhr@gmail.com account was deleted;
-> re-seed when needed). See [[prod-access-model]].
+> NOTE: DB currently has **1 member user** (`smoketest@mydailydignity.com`,
+> active) + **1 admin** (`joe.buhr@gmail.com`). See [[prod-access-model]].
 
 ## Handy context
 - Macs (Ollama bare-metal): `studio-max` 192.168.0.94 (M4 Max 64GB),
   `studio-ultra` 192.168.0.104 (M3 Ultra 96GB), `0.0.0.0:11434`. LiteLLM
   gateway on studio-ultra `:4000` (launchd). Models pulled on both.
 - Registry `zot.lan.ng20.org`; runner `jtb75-arc`; sealed-secrets ns `infra`.
+- Database ops should refer to **the CNPG primary** generically; instance names
+  roll during failover/maintenance and should not be treated as permanent.
 - Repos: `~/repo/companion-gitops` (Companion's ArgoCD repo),
   `~/repo/argocd-apps` (cluster gitops source of truth).
 - Plan: `docs/migration-plan.md`. `.env` (gitignored): `CF_TOKEN`,
