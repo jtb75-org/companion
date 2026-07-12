@@ -10,7 +10,7 @@ from datetime import datetime, time
 from sqlalchemy import select
 
 from app.db.context import set_user_context
-from app.db.session import async_session_factory
+from app.db.session import async_session_factory, maintenance_session
 from app.models.user import User
 from app.notifications.briefing import generate_morning_briefing
 from app.notifications.morning_checkin import assemble_morning_checkin
@@ -66,61 +66,45 @@ async def run_morning_trigger_for_user(user_id):
 
 
 async def run_morning_trigger(force: bool = False):
-    """Check all users and trigger morning check-ins where due."""
-    async with async_session_factory() as db:
+    """Check all users and trigger morning check-ins where due.
+
+    Discovery (which users are active, and their check-in time) is a cross-user
+    read → runs under the maintenance session (bypass under RLS). Each due user's
+    check-in runs RLS-scoped in run_morning_trigger_for_user (its own
+    companion_app session with app.current_user_id set). Per-user failures are
+    isolated so one bad user can't abort the whole cycle. (WS1 Phase 2c)
+    """
+    now = datetime.utcnow()
+    current_hour = now.hour
+    current_minute = now.minute
+
+    # Cross-user discovery; detach the fields we filter on before the session closes.
+    async with maintenance_session() as mdb:
+        result = await mdb.execute(
+            select(User).where(User.account_status == "active")
+        )
+        candidates = [
+            (u.id, u.checkin_time, u.away_mode) for u in result.scalars().all()
+        ]
+
+    triggered = 0
+    for user_id, checkin_time, away_mode in candidates:
+        ct = checkin_time or time(9, 0)
+        if not force:
+            if ct.hour != current_hour:
+                continue
+            if abs(ct.minute - current_minute) > 5:
+                continue
+        if away_mode:
+            continue
         try:
-            now = datetime.utcnow()
-            current_hour = now.hour
-            current_minute = now.minute
-
-            # Find active users
-            result = await db.execute(
-                select(User).where(User.account_status == "active")
-            )
-            users = result.scalars().all()
-
-            triggered = 0
-            for user in users:
-                checkin_time = user.checkin_time or time(9, 0)
-
-                # Skip if not the right time (unless forced)
-                if not force:
-                    if checkin_time.hour != current_hour:
-                        continue
-                    if abs(checkin_time.minute - current_minute) > 5:
-                        continue
-
-                # Skip if in away mode
-                if user.away_mode:
-                    continue
-
-                # Assemble check-in data
-                name = user.nickname or user.preferred_name
-                checkin_data = await assemble_morning_checkin(
-                    db, user.id, name
-                )
-                
-                # Generate LLM briefing
-                briefing = await generate_morning_briefing(
-                    db, user.id, checkin_data
-                )
-
-                # Send push notification directly
-                await notify_morning_briefing(
-                    db, user.id, briefing
-                )
-                triggered += 1
-
-            await db.commit()
-            logger.info(
-                f"Morning trigger: {triggered}/{len(users)} "
-                f"check-ins fired at {current_hour}:{current_minute:02d}"
-            )
-            return {
-                "total_users": len(users),
-                "triggered": triggered,
-            }
+            await run_morning_trigger_for_user(user_id)
+            triggered += 1
         except Exception:
-            await db.rollback()
-            logger.exception("Morning trigger failed")
-            raise
+            logger.exception("Morning trigger failed for user %s", user_id)
+
+    logger.info(
+        f"Morning trigger: {triggered}/{len(candidates)} "
+        f"check-ins fired at {current_hour}:{current_minute:02d}"
+    )
+    return {"total_users": len(candidates), "triggered": triggered}
