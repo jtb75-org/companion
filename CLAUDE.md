@@ -5,8 +5,8 @@
 Migrated from GCP/Firebase to a self-hosted K8s cluster with bare-metal
 Ollama on Mac Studios. The cluster is LIVE and Companion is DEPLOYED and
 functionally wired (see Current state). OCR localization done (PaddleOCR
-deployed in shadow). Remaining: pre-real-PHI security gates, Firebase
-prod-auth finish, mobile builds.
+primary; DocumentAI retired as primary). Remaining: pre-real-PHI security
+gates, Firebase prod-auth finish, mobile builds.
 
 **Primary reference:** [`docs/migration-plan.md`](docs/migration-plan.md)
 (Phase -1 → 12). NOTE: the plan and this file's older history predate
@@ -27,7 +27,7 @@ hold the live, current state and are the source of truth on resume.
 prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
 `AGENTS.md`.
 
-## Current state (2026-07-11)
+## Current state (2026-07-12)
 
 - **Cluster is LIVE**: 5-node k3s (`mini01-04` + `tower01`). Platform fully
   deployed via ArgoCD (`~/repo/argocd-apps` root-app): cnpg-operator, minio,
@@ -56,6 +56,11 @@ prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
   - **Workers** → all wired as internal endpoints + CronJobs (morning-checkin,
     medication-reminders, escalation-check, away-monitor, retention, ttl-purge,
     account-deletion). `/api/internal/*` blocked at the edge.
+  - **OCR** → **PaddleOCR primary** as of 2026-07-12 (gitops PR #15);
+    DocumentAI is retired as primary and shadow OCR is disabled. Safety review
+    was APPROVE-WITH-FOLLOWUPS; remaining real-PHI OCR follow-ups are egress
+    NetworkPolicy and confidence-tier recalibration. `source_metadata.ocr_text`
+    is encrypted in `process_camera_scan` via `encrypt_for_user`.
   - **Admin runtime controls (#30/#31)**:
     - OCR primary/shadow provider is configurable through `SystemConfig` and the
       admin Settings OCR dropdown, not only env vars. `_guard_ocr_flag` requires
@@ -83,19 +88,16 @@ prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
    **audit device** (declarative — add `audit "file"` to
    `argocd-apps/applications/openbao.yaml` + restart); enable **OpenBao TLS**
    (listener is `tls_disable=1`); **vault the encryption keys** off-cluster
-   (`~/companion-key-backup/` → 1Password); encrypt `source_metadata.ocr_text`;
-   add an **egress NetworkPolicy** on `companion-ocr` (it pulls models from
-   `paddleocr.bj.bcebos.com` on first run — bake models into the image or allow
-   only that CDN + DNS).
+   (`~/companion-key-backup/` → 1Password); add an **egress NetworkPolicy** on
+   `companion-ocr` (it pulls models from `paddleocr.bj.bcebos.com` on first run
+   — bake models into the image or allow only that CDN + DNS); recalibrate OCR
+   confidence tiers now that PaddleOCR is primary.
 2. **Firebase finish:** publish the OAuth consent screen; build/sign mobile
    binaries + register the Android release SHA-1.
-3. **OCR rollout blocker:** PaddleOCR is DEPLOYED and running in **shadow**
-   behind DocumentAI (A/B), and admin Settings can override the provider at
-   runtime. Gitops still sets primary OCR to `documentai`, but DocumentAI
-   primary is currently dead because no processor exists; as of 2026-07-11, a
-   real user scanning a document would 404 on the primary path. Decide whether
-   to create a Document OCR processor + update config, or flip primary to
-   `paddleocr` after the remaining scan-robustness/shadow-eval work.
+3. **OCR primary flip resolved:** PaddleOCR is primary as of 2026-07-12,
+   DocumentAI is retired as primary, and shadow is disabled. DocumentAI remains
+   non-functional as a fallback until a Document OCR processor is created and
+   config is updated.
 4. **CI image builds:** `build-and-push.yml` last 5 runs all succeeded in
    ~9-11 min and auto-bumps gitops image tags after pushes to `main` (last
    checked 2026-07-11).
@@ -107,7 +109,7 @@ prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
 |---|---|---|
 | D1 | Primary LLM | Generation kept on **Gemini/Vertex** for now (quality/safety); Ollama qwen2.5 deferred behind the provider switch |
 | D2 | Embedding model | **nomic-embed-text** (768-dim, no migration) via LiteLLM — NOT bge-m3 |
-| D4 | OCR engine | **PaddleOCR** — DEPLOYED, running in shadow behind DocumentAI; primary still `documentai` in gitops, but DocAI is a rollout blocker until a processor exists or primary flips |
+| D4 | OCR engine | **PaddleOCR** — primary as of 2026-07-12; DocumentAI retired as primary, shadow disabled |
 | KMS | Field encryption | Local AES-256-GCM envelope, **KEK in OpenBao Transit** |
 
 ## Architecture reminders

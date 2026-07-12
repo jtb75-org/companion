@@ -1,8 +1,8 @@
 # RESUME — Companion self-hosted migration
 
-Session handoff. Last updated **2026-07-11**. Source of truth for live state is
+Session handoff. Last updated **2026-07-12**. Source of truth for live state is
 this file + `MEMORY.md` (+ linked notes). `CLAUDE.md` "Current state" is also
-current as of 2026-07-11. The older 2026-06-18 history below the line is kept
+current as of 2026-07-12. The older 2026-06-18 history below the line is kept
 for context but is superseded.
 
 ## Status: DEPLOYED + functionally wired
@@ -38,33 +38,34 @@ for context but is superseded.
     length cap, override-phrase denylist) with safety canaries. Persona/safety
     changes still require safety-privacy-reviewer sign-off.
 
-## ✅ OCR migration — PaddleOCR deployed in SHADOW (2026-06-19/20)
+## ✅ OCR migration — PaddleOCR PRIMARY (resolved 2026-07-12)
 
-Self-hosted **PaddleOCR** DEPLOYED and **running in SHADOW** behind primary
-Google **DocumentAI** (A/B comparison; primary pipeline unchanged).
-See [[ocr-paddleocr-shadow]].
+Self-hosted **PaddleOCR** is DEPLOYED and now the **primary OCR provider**.
+DocumentAI is retired as primary; shadow OCR is disabled. See
+[[ocr-paddleocr-shadow]].
 
 - Image `companion-ocr` (`ocr/` in companion repo), latest tag `6f01e70`,
   ns `companion`. Pod stable, warm (~74ms inference), backend-reachable.
 - Wiring: backend `app/pipeline/ocr/` provider abstraction; `_run_shadow_ocr`
   in `ingestion.py` is best-effort, records `source_metadata["ocr_shadow"]`
   (provider names, char counts, ms, similarity, + **encrypted** `shadow_text`).
-  gitops: `COMPANION_OCR_PROVIDER=documentai`,
-  `COMPANION_OCR_SHADOW_PROVIDER=paddleocr` (`f7d6feb`). Both API pods carry the
-  flag. Admin Settings can now override primary/shadow provider at runtime via
-  guarded `SystemConfig` feature flags.
-- **Verified live end-to-end**: shadow fires, records, `shadow_text` encrypted
-  (`f2:` per-user envelope), decrypts via OpenBao. Clean rollback.
-- **Safety review: APPROVE-WITH-FOLLOWUPS.**
+  gitops PR #15 flipped `COMPANION_OCR_PROVIDER=paddleocr` and disabled shadow
+  on 2026-07-12. Admin Settings can override primary/shadow provider at runtime
+  via guarded `SystemConfig` feature flags.
+- **Verified live end-to-end**: primary PaddleOCR is active. Earlier shadow
+  testing recorded `shadow_text` encrypted (`f2:` per-user envelope) and
+  decryptable via OpenBao.
+- **Safety review: APPROVE-WITH-FOLLOWUPS.** Remaining real-PHI OCR follow-ups:
+  egress NetworkPolicy and confidence-tier recalibration.
 - PRs merged: #22/#23/#24 (build/push fixes), **#25** (targeted trixie-lib rm),
   **#26** (generic `clean_libs.py` + `asyncio.to_thread` warm-up), **#30**
   (admin OCR provider feature flag), **#31** (live emotional-awareness prompt +
   wired admin Prompts UI).
 
-### Benchmark (2026-06-20) + 🚫 Rollout blocker: DocumentAI primary is DEAD
-No real shadow records exist (DB has 0 docs), so ran a synthetic head-to-head:
-DocumentAI vs PaddleOCR on 5 D.D. doc types × clean/scan, scored vs known
-ground truth, both providers driven directly from an api pod.
+### Benchmark (2026-06-20) + resolved DocumentAI primary blocker
+No real shadow records existed at benchmark time, so ran a synthetic
+head-to-head: DocumentAI vs PaddleOCR on 5 D.D. doc types × clean/scan, scored
+vs known ground truth, both providers driven directly from an api pod.
 
 | metric | clean | scan (degraded) |
 |---|---|---|
@@ -76,24 +77,21 @@ ground truth, both providers driven directly from an api pod.
 - **Degraded scans: DocAI more robust** (+0.17); Paddle falls off under heavy
   noise/rotation/blur. (The "scan" degradation was harsh — worst-case floor.)
 - **Paddle ~2× faster, local, free, no PHI egress.**
-- **Cutover read:** Paddle is good enough for normal-quality captures; close the
-  scan gap first with a deskew/denoise/upscale pre-process OR collect organic
-  shadow numbers on real traffic before flipping `COMPANION_OCR_PROVIDER`.
+- **Cutover read:** Paddle is good enough for normal-quality captures; continue
+  confidence-tier recalibration for lower-quality scans.
 
-**🚫 Rollout blocker:** gitops still sets the primary OCR provider to
-`documentai`, but DocumentAI primary is currently non-functional (found during
-the benchmark). As of 2026-07-11, a real user scanning a document would hit the
-primary path and 404 because no processor exists. Two independent breaks:
+**Resolved 2026-07-12:** primary OCR flipped to `paddleocr`; shadow disabled;
+DocumentAI retired as primary. The old DocumentAI primary path was
+non-functional (found during the benchmark). Two independent breaks:
 1. The pod SA `companion-backend@companion-prod-491606` lacked Document AI
    permission → **granted `roles/documentai.apiUser`** (left in place).
 2. **No processor exists** — configured `documentai_processor_id=6785df08989fd9a6`
-   was deleted in the GCP teardown (0 processors in us/eu). First real document
-   would 404; never surfaced because DB has 0 docs.
+   was deleted in the GCP teardown (0 processors in us/eu). Real document scans
+   would have 404'd on the old primary path.
 
-→ DocAI is NOT a free fallback right now. To keep it viable, create a Document
+→ DocAI is NOT a free fallback right now. To revive it later, create a Document
 OCR processor + update the config's processor ID. (Benchmark used a temp
-processor, since deleted — 0 remain.) This strengthens the case to cut over to
-PaddleOCR (after closing the scan-robustness gap).
+processor, since deleted — 0 remain.)
 
 ### Build/runtime gotchas (cost many cycles)
 - Base `python:3.10-slim-bookworm` (glibc 2.36). The PaddleOCR pip layer
@@ -118,7 +116,10 @@ PaddleOCR (after closing the scan-robustness gap).
 2. OpenBao **audit device** (declarative) + **TLS** (listener is
    `tls_disable=1`); **vault the encryption keys** off-cluster
    (`~/companion-key-backup/` → 1Password, then shred).
-3. Encrypt `source_metadata.ocr_text` (process_camera_scan path).
+3. Recalibrate OCR confidence tiers now that PaddleOCR is primary.
+
+Done: `source_metadata.ocr_text` is encrypted in `process_camera_scan`
+(`encrypt_for_user` in `backend/app/pipeline/ingestion.py`).
 
 **Tracked follow-ups (non-blocking):**
 - **CI image builds are green:** `build-and-push.yml` last 5 runs all succeeded
