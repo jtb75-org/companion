@@ -44,6 +44,11 @@ async def get_my_profile(
     if not user:
         return {"exists": False, "profile_complete": False}
 
+    # Now the user id is known, set the tenant GUC so the encrypted-phone DEK
+    # row (user_encryption_keys is under per-user RLS) is visible; without it
+    # get_user_phone would fail closed as "no DEK row".
+    await set_user_context(db, user.id)
+
     from app.services.field_crypto import get_user_phone
     return {
         "exists": True,
@@ -85,6 +90,11 @@ async def get_my_caregivers(
 
     if not user:
         return {"caregivers": []}
+
+    # Set the tenant GUC now that the member id is known: this route reads the
+    # member's own trusted_contacts (and will need it once trusted_contacts RLS
+    # lands next), so scope the session to this member.
+    await set_user_context(db, user.id)
 
     contacts_result = await db.execute(
         select(TrustedContact).where(TrustedContact.user_id == user.id)
