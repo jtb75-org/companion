@@ -27,7 +27,7 @@ hold the live, current state and are the source of truth on resume.
 prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
 `AGENTS.md`.
 
-## Current state (2026-06-19)
+## Current state (2026-07-11)
 
 - **Cluster is LIVE**: 5-node k3s (`mini01-04` + `tower01`). Platform fully
   deployed via ArgoCD (`~/repo/argocd-apps` root-app): cnpg-operator, minio,
@@ -56,11 +56,25 @@ prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
   - **Workers** → all wired as internal endpoints + CronJobs (morning-checkin,
     medication-reminders, escalation-check, away-monitor, retention, ttl-purge,
     account-deletion). `/api/internal/*` blocked at the edge.
+  - **Admin runtime controls (#30/#31)**:
+    - OCR primary/shadow provider is configurable through `SystemConfig` and the
+      admin Settings OCR dropdown, not only env vars. `_guard_ocr_flag` requires
+      admin role + provider validation; ingestion `_resolve_ocr_provider` reads
+      the flag before falling back to env.
+    - D.D. emotional-awareness guidance is now in the **live prompt**
+      (`EMOTIONAL_AWARENESS` appended in `prompt_builder.py`), implementing
+      `docs/dd-assistant-guidelines.md` §3.5. The admin Prompts UI writes
+      `dd_persona/system_prompt`, bounded by `_guard_persona` (admin role,
+      length cap, override-phrase denylist) with safety canaries. Persona/safety
+      changes require safety-privacy-reviewer sign-off.
 - **Macs (inference tier):** Ollama bare-metal — `studio-max` (M4 Max, 64GB,
   192.168.0.94) + `studio-ultra` (M3 Ultra, 96GB, 192.168.0.104), `0.0.0.0:11434`.
   Models pulled (qwen2.5:14b/72b, qwen3-coder, nomic-embed-text on both).
   **LiteLLM gateway** runs on studio-ultra `:4000` (hand-edited
   `~/.config/litellm/config.yaml`, launchd). SSH as `joe`, passwordless sudo.
+- **Prod DB:** currently has **1 user**: admin `joe.buhr@gmail.com`. For DB ops,
+  refer to **the CNPG primary** generically; instance names roll and should not
+  be hardcoded as permanent.
 
 ## Next steps / remaining work
 
@@ -74,12 +88,17 @@ prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
    only that CDN + DNS).
 2. **Firebase finish:** publish the OAuth consent screen; build/sign mobile
    binaries + register the Android release SHA-1.
-3. **OCR shadow → cutover:** PaddleOCR is DEPLOYED and running in **shadow**
-   behind DocumentAI (A/B). Remaining: evaluate shadow comparison records, then
-   flip `COMPANION_OCR_PROVIDER` to `paddleocr` to retire the GCP dependency.
-   Also: **CI builder broken** (`atlas/builder:latest` node needs GLIBC_2.38 →
-   web-bundle step fails → blocks gitops auto-bump; OCR tags bumped by hand).
-4. Owner one-offs: revoke any bootstrap OpenBao token; key rotation automation.
+3. **OCR rollout blocker:** PaddleOCR is DEPLOYED and running in **shadow**
+   behind DocumentAI (A/B), and admin Settings can override the provider at
+   runtime. Gitops still sets primary OCR to `documentai`, but DocumentAI
+   primary is currently dead because no processor exists; as of 2026-07-11, a
+   real user scanning a document would 404 on the primary path. Decide whether
+   to create a Document OCR processor + update config, or flip primary to
+   `paddleocr` after the remaining scan-robustness/shadow-eval work.
+4. **CI image builds:** `build-and-push.yml` last 5 runs all succeeded in
+   ~9-11 min and auto-bumps gitops image tags after pushes to `main` (last
+   checked 2026-07-11).
+5. Owner one-offs: revoke any bootstrap OpenBao token; key rotation automation.
 
 ## Open decisions (mostly resolved)
 
@@ -87,7 +106,7 @@ prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
 |---|---|---|
 | D1 | Primary LLM | Generation kept on **Gemini/Vertex** for now (quality/safety); Ollama qwen2.5 deferred behind the provider switch |
 | D2 | Embedding model | **nomic-embed-text** (768-dim, no migration) via LiteLLM — NOT bge-m3 |
-| D4 | OCR engine | **PaddleOCR** — DEPLOYED, running in shadow behind DocumentAI; cut over after shadow eval |
+| D4 | OCR engine | **PaddleOCR** — DEPLOYED, running in shadow behind DocumentAI; primary still `documentai` in gitops, but DocAI is a rollout blocker until a processor exists or primary flips |
 | KMS | Field encryption | Local AES-256-GCM envelope, **KEK in OpenBao Transit** |
 
 ## Architecture reminders
