@@ -24,8 +24,9 @@ missing," not an error. So the rollout is strictly:
 | Member session | their own `user.id` | `auth/dependencies.py:82` (`get_current_user`, both `db` + user in scope) |
 | Caregiver | the **authorized member** id (`contact.user_id`) | `dependencies.py:179` + dashboard/activity authz (`caregiver_service` already scopes `where user_id == member`) — **app-authz first, then RLS scopes to that member. No caregiver branch in policies.** |
 | Admin (member data) | n/a — admins read cross-user | admins mostly read **global** tables; genuine cross-user reads need bypass (below) |
-| Worker (per-user loops) | each `user_id` in the loop | `SET LOCAL` per iteration in morning-checkin / medication-reminders / escalation-check / away-monitor (all already loop per user) |
-| Worker (cross-user) | — | `retention`, `execute_deletion` span all users → **bypass role** (below) |
+| Worker **discovery** (ALL workers) | — (bypass) | **Correction:** every worker first scans cross-user (`select all active users/meds` — morning/med/escalation/away too, not just retention/deletion). Under RLS these fail-close → the discovery scan runs under the **maintenance bypass role** (2c). |
+| Worker **per-user work** | each `user_id` | per-user-session workers (`run_morning_trigger_for_user`, `run_medication_reminder_for_user`) set the GUC in their per-user function (done, 2a-ii). Inline-loop workers (`escalation_check`, `away_monitor`, `run_medication_reminder` main) set the GUC **per iteration** after the bypass discovery — done in 2c with the role. |
+| Cross-user mutations | — | `retention`, `execute_deletion` legitimately write across users → scoped-bypass (D1): bypass the discovery read, `SET LOCAL ROLE companion_app` + GUC per user for writes. |
 
 `SET LOCAL` (transaction-local) in the same transaction as the query — the
 `get_db` request txn, or the worker's per-iteration txn. Never a session-wide
@@ -118,9 +119,9 @@ CAN cross-user; assert RLS + `iterative_scan` recall together.
 
 | Step | Work | Risk |
 |---|---|---|
-| 2a | `app/db/context.py` GUC helper + wire the 3 auth deps (`app.current_user_id`; `app.current_login_email` before the email lookup) + the 4 per-user workers (`SET LOCAL` per iteration). **No policies** → no-op. Deploy; verify every path sets it (temporary log/metric). | none (no-op) |
+| 2a | `app/db/context.py` GUC helper + wire the 3 auth deps (`app.current_user_id`; `app.current_login_email` before the email lookup) + the **2 per-user-session** workers (`run_*_for_user` set the GUC). **No policies** → no-op. Deploy; verify every path sets it (temporary log/metric). | none (no-op) |
 | 2b | Denormalize `user_id` onto `chat_messages` + `medication_confirmations` (migration + backfill + set-on-write + same-user trigger) | low |
-| 2c | `companion_maintenance` BYPASSRLS+inRoles role; retention/deletion do scoped-bypass (discovery only) + `SET LOCAL ROLE companion_app` for mutations | low |
+| 2c | `companion_maintenance` BYPASSRLS+inRoles role. **ALL workers**: run the cross-user discovery scan under bypass, then per-user work via `SET LOCAL ROLE companion_app` + GUC — covers the inline-loop workers (`escalation_check`, `away_monitor`, `run_medication_reminder` main) and the scoped-bypass cross-user writes (`retention`, `execute_deletion`). Needs a maintenance engine/connection in the api pod. | low-med |
 | 2d | Enable RLS + policies on **ONE** low-risk member table (`todos`); verify member + caregiver + worker paths | medium |
 | 2e | Roll out policies to the rest (standard + `caregiver_assignment_requests` on `member_id` + `users` email-GUC bootstrap) | medium |
 | 2f | `rls` negative-test CI gate + unset-GUC guard | — |
