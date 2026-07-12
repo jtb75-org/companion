@@ -27,10 +27,11 @@ except WS4 (AAD widening).
 
 ### WS1 — Postgres Row-Level Security (per-user isolation) — **headline**
 
-Today Companion has **zero RLS**. Per-member isolation rests entirely on ~21
-hand-written `where(user_id == …)` filters across the services. Miss one and it
-is a cross-member PHI leak. RLS makes isolation **fail-closed at the database**,
-so the DB enforces it even when app code forgets.
+Today Companion has **zero RLS**. Per-member isolation rests entirely on
+hand-written `where(user_id == …)` filters across the services — a spot-count
+finds **~110 user_id-filter lines across ~35 files (~63 in `services/` alone)**.
+Miss one and it is a cross-member PHI leak. RLS makes isolation **fail-closed at
+the database**, so the DB enforces it even when app code forgets.
 
 **Policy shape (per-user analog of HCC `db/rls.py`):**
 ```sql
@@ -42,6 +43,34 @@ CREATE POLICY <t>_isolation ON <t>
 ```
 The `, true` (missing_ok) + `NULLIF(…, '')` is the whole fail-closed trick: GUC
 unset/empty → NULL → predicate false → **zero rows and zero writes**.
+
+**The standard policy only applies to tables with a direct `user_id`.** Several
+Companion PHI/operational tables do NOT have one and need an EXISTS-through-parent
+policy (or a denormalized `user_id` column) instead — do not apply the standard
+shape blindly. Known examples (verify exhaustively in Phase 1):
+- `chat_messages` → only `chat_session_id` (join to the session's `user_id`)
+- `medication_confirmations` → only `medication_id`
+- `pipeline_metrics` → only `document_id`
+- `caregiver_assignment_requests` → `member_id` / `caregiver_email`, not `user_id`
+
+EXISTS-through-parent example:
+```sql
+CREATE POLICY chat_messages_isolation ON chat_messages USING (
+  EXISTS (SELECT 1 FROM chat_sessions s
+          WHERE s.id = chat_messages.chat_session_id
+            AND s.user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid));
+```
+Same-user triggers cover FK *integrity* but do **not** define SELECT/UPDATE
+visibility for child tables — that is the policy's job. **Phase 1 deliverable: a
+table-by-table policy matrix** (direct-user_id vs through-parent vs
+schema-change-needed vs global/self) before writing any policy.
+
+**Caregiver access is a distinct axis.** Caregivers legitimately read a member's
+data across the user boundary (three-tier model). A pure `user_id = current
+setting` policy would block them. The matrix must decide caregiver visibility per
+table — e.g. an additional policy branch allowing rows whose `user_id` is in the
+caller's active caregiver-authorized set, or a separate caregiver DB principal.
+This intersects the Authentik plan's caregiver-principal work.
 
 **The one thing to get right (kali):** RLS is only a guarantee because **the app
 connects as a NOBYPASSRLS, non-owner role**. `FORCE` makes RLS apply even to the
@@ -63,17 +92,35 @@ order gives confusing "permission denied" vs "zero rows" depending on the layer.
 **pgvector + RLS — Companion-critical gotcha.** Companion uses pgvector for RAG
 retrieval. **RLS filters rows AFTER the ANN index scan**: a `LIMIT 10` HNSW/IVF
 search finds 10 nearest candidates, THEN RLS drops the ones not owned by the
-current user → **silent under-return** (ask for 10 chunks, get 3). Mitigation
-(pick one, then test): over-fetch (`LIMIT k·N` then app-trim), a per-user
-pre-filter in the query, or a per-tenant vector index. **Must** be tested with a
-multi-tenant vector corpus — this is the one place per-user RLS + ANN interact
-badly.
+current user → **silent under-return** (ask for 10 chunks, get 3).
+
+Good news: the current RAG query **already pre-filters** —
+`backend/app/conversation/retrieval.py:29-40` has `WHERE dc.user_id = :user_id`
+*before* `ORDER BY dc.embedding <=> :query_vec`, so today's query is not exposed
+to the under-return mode. **The mitigation is therefore: KEEP (never remove) the
+explicit `user_id` pre-filter — do not let RLS become the *only* guard on the
+vector path** — and add a regression test (`EXPLAIN` shows the pre-filter; recall
+holds under a multi-tenant corpus). The under-return warning applies to any NEW
+vector query that relies on RLS alone; those must over-fetch (`LIMIT k·N` +
+app-trim) or pre-filter. RLS stays as the fail-closed backstop; the pre-filter
+preserves recall.
 
 **Tenant tables to enumerate (Phase 1, exhaustive):** documents, pending_reviews,
 functional_memory, RAG chunks/embeddings, medications, bills, appointments,
 todos, trusted_contacts, conversation sessions/messages, notification/schedule
-rows, the audit tables (WS3), `user_encryption_keys`, etc. The `users` row itself
-gets a self-only policy (like HCC's `users_self_*`).
+rows, the audit tables (WS3), `user_encryption_keys`, etc.
+
+**`users` needs a bootstrap-safe policy — critical cross-plan dependency with the
+Authentik plan.** A naive self-only `users` policy (`id = current_user_id`)
+**breaks first login**: during Authentik provisioning we must look the stub up by
+the verified OIDC **subject** *before* `app.current_user_id` is known. Port HCC's
+solution — a third GUC `app.current_external_subject`, set server-side ONLY from a
+verified token, and a `users` SELECT policy that also matches
+`external_subject_id = current_setting('app.current_external_subject')` (HCC
+`db/rls.py` users_self_or_member + `db/context.py`). Companion has no
+`external_subject_id` column today (see Authentik plan §3) — this column is a
+shared prerequisite of both plans. Writes stay self-only (the bootstrap sets
+`app.current_user_id` to the new id first).
 
 **Same-user FK integrity:** where tenant tables reference each other, add
 `enforce_same_user` triggers (HCC `enforce_same_account` analog) — RLS alone does
@@ -103,13 +150,28 @@ Per kali: **app-level envelope is THE control; disk/volume encryption is
 defense-in-depth only** (it does not cover a compromised app/MinIO, a
 misconfigured bucket, backups/snapshots, or a storage-access insider).
 
-**Fix:** envelope-encrypt bytes **before** upload (AES-256-GCM under the per-user
-DEK), store `nonce||ct` as the blob; keep the wrapped-DEK reference + a keyed
-content fingerprint on the `documents` row; decrypt on the BFF-mediated download
-path (`GET /documents/{id}/content`, `Cache-Control: no-store`, no presigned
-URLs). Migrate any existing blobs (currently just the smoke-test corpus, if any).
-**Audit every read site** that pulls blob bytes directly — they must go through
-decrypt.
+**Fix — pick ONE key model. Chosen: reuse Companion's existing per-user DEK**
+(consistent with `field_crypto`; NOT HCC's per-blob-DEK model, which would need a
+new `wrapped_dek` column and a second key scheme). The user's DEK already lives in
+`user_encryption_keys` and is resolved via `user_id`, so blobs need **no** wrapped
+key stored alongside them:
+- Encrypt bytes **before** upload: `nonce || AESGCM(user_DEK).encrypt(nonce, data,
+  aad=user_id|documents.<blob-kind>)`; store that blob in MinIO. (The AAD reuses
+  the WS4 `user_id|table.column` scheme.)
+- Applies to **every** blob kind: the primary upload (`documents.py:122`), all
+  `page_refs` pages, and `raw_text_ref`. Enumerate the blob-column set in the
+  workstream.
+- **Schema:** add a nullable `content_fingerprint` (keyed HMAC over plaintext) to
+  `documents` for integrity/dedup — this is the *only* new column; no per-blob
+  wrapped-DEK column (that was the inconsistency). Add an `encryption_scheme`
+  marker so mixed plaintext/ciphertext blobs are distinguishable during migration.
+- **Decrypt** on the BFF-mediated download path (`GET /documents/{id}/content`,
+  `Cache-Control: no-store`, no presigned URLs).
+- **Migration:** re-encrypt existing plaintext blobs (currently just the
+  smoke-test corpus) under the owner's DEK; gate reads on `encryption_scheme` so
+  old and new coexist during rollout.
+- **Audit every read site** that pulls blob bytes directly — all must route
+  through decrypt.
 
 ### WS3 — Append-only / tamper-evident audit — **recommend**
 
@@ -192,6 +254,13 @@ off-cluster key vaulting, and the `companion-ocr` egress NetworkPolicy.
 - **AAD widening is a ciphertext-format migration** — needs dual-read, else old
   values won't decrypt.
 - **Maintenance jobs** that bypass RLS re-open the hole they're meant to close.
+- **`external_subject_id` on `users` is a shared prerequisite** with the Authentik
+  plan (§3 there): the bootstrap-safe `users` policy needs it. Sequence the two
+  plans together — do not land RLS on `users` before that column + GUC exist.
+- **Caregiver cross-user reads break under a naive per-user policy.** The
+  three-tier caregiver model legitimately reads a member's data; RLS must add an
+  explicit caregiver-authorized branch (or a separate caregiver DB principal), or
+  every caregiver surface returns zero rows. Design in the Phase-1 matrix.
 
 ---
 
