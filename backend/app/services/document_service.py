@@ -1,11 +1,12 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.events.publisher import event_publisher
 from app.events.schemas import DocumentReceivedPayload
 from app.models.document import Document
+from app.models.pending_review import PendingReview
 
 
 async def list_documents(
@@ -56,6 +57,16 @@ async def delete_document(
     document = await get_document(db, user_id, document_id)
     if document is None:
         return False
+    # Remove any pending reviews for this document too, so deleting it also
+    # takes it out of the member's review queue. The FK is ON DELETE SET NULL,
+    # which would otherwise leave a document-less review card stuck pending
+    # (this is what made "Remove this one" appear not to work for duplicates).
+    await db.execute(
+        delete(PendingReview).where(
+            PendingReview.document_id == document_id,
+            PendingReview.user_id == user_id,
+        )
+    )
     await db.delete(document)
     await db.flush()
     return True
