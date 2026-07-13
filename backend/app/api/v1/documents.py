@@ -1,5 +1,6 @@
 """App API — Document routes."""
 
+import hashlib
 import logging
 import uuid
 
@@ -12,10 +13,12 @@ from fastapi import (
     UploadFile,
     status,
 )
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import User, require_complete_profile
 from app.db import get_db
+from app.models.document import Document
 from app.models.enums import DocumentStatus, SourceChannel
 from app.schemas.document import DocumentStatusUpdate
 from app.services import document_service, storage_service
@@ -111,6 +114,41 @@ async def scan_document(
             )
         pages_data.append((data, content_type))
 
+    # Exact-duplicate check: hash the page bytes and, if this member already has
+    # a document with the same fingerprint (and it didn't fail), return that one
+    # instead of creating a second copy — the "I thought it glitched, tap again"
+    # double-submit. RLS scopes the lookup to this member; the FAILED exclusion
+    # lets a genuine retry of a failed upload through.
+    fingerprint = hashlib.sha256()
+    for data, _ in pages_data:
+        fingerprint.update(data)
+    content_fingerprint = fingerprint.hexdigest()
+
+    existing = (
+        await db.execute(
+            select(Document)
+            .where(
+                Document.user_id == user.id,
+                Document.content_fingerprint == content_fingerprint,
+                Document.status != DocumentStatus.FAILED,
+            )
+            .order_by(Document.received_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        logger.info(
+            "Duplicate upload for user %s -> existing doc %s",
+            user.id,
+            existing.id,
+        )
+        return {
+            "document_id": existing.id,
+            "status": "duplicate",
+            "duplicate": True,
+            "page_count": existing.page_count,
+        }
+
     # Upload all pages to object storage (MinIO)
     doc_id = uuid.uuid4()
     page_refs: list[str] = []
@@ -141,6 +179,7 @@ async def scan_document(
             "status": DocumentStatus.RECEIVED,
             "raw_text_ref": first_gcs_uri,
             "page_count": page_count,
+            "content_fingerprint": content_fingerprint,
             "source_metadata": {
                 "original_filename": upload_files[0].filename,
                 "content_type": pages_data[0][1],
@@ -156,6 +195,7 @@ async def scan_document(
     return {
         "document_id": doc.id,
         "status": "processing",
+        "duplicate": False,
         "page_count": page_count,
     }
 

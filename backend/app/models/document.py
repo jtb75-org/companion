@@ -56,6 +56,10 @@ class Document(Base):
     processed_at: Mapped[datetime | None] = mapped_column(nullable=True)
     acknowledged_at: Mapped[datetime | None] = mapped_column(nullable=True)
     page_count: Mapped[int | None] = mapped_column(nullable=True, server_default="1")
+    # SHA-256 (hex) of the uploaded page bytes, for exact-duplicate detection at
+    # upload (a member re-submitting the same file — the "I thought it glitched"
+    # double-tap). Not a secret (one-way hash); scoped per-user by RLS.
+    content_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     retention_phase: Mapped[RetentionPhase] = mapped_column(
         nullable=False, default=RetentionPhase.FULL
     )
