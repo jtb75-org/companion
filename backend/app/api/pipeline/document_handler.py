@@ -101,6 +101,12 @@ async def handle_document_received_push(
         )
         await db.commit()
 
+        # The commit above ended the transaction, which cleared the
+        # transaction-local tenant GUC. notify_document_processed reads (and
+        # prunes) the member's device_tokens — an RLS tenant table — so re-set
+        # the context for this second transaction or the token lookup
+        # fail-closes to zero and the push is silently dropped.
+        await set_user_context(db, user_id)
         summary = (
             result.summarization.card_summary or ""
         )
