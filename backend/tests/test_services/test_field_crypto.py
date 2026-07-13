@@ -211,6 +211,20 @@ async def test_untagged_fails_closed_in_prod(monkeypatch):
         await field_crypto.decrypt_for_user(FakeDB(), uuid.uuid4(), "raw-untagged")
 
 
+async def test_empty_is_not_untagged_ciphertext(monkeypatch):
+    """An empty value carries no ciphertext — it must pass through (return "")
+    in prod, NOT trip the untagged-ciphertext guard. Absent optional fields
+    (e.g. a document with no OCR text) legitimately decrypt "" on read."""
+    monkeypatch.setattr(settings, "environment", "production")
+    db, uid = FakeDB(), uuid.uuid4()
+    assert await field_crypto.decrypt_for_user(db, uid, "") == ""
+    # decrypt_value: None -> None, "" -> "".
+    assert await field_crypto.decrypt_value(db, uid, None) is None
+    assert await field_crypto.decrypt_value(db, uid, "") == ""
+    # An empty JSON field -> None, not a json.loads("") crash.
+    assert await field_crypto.decrypt_json_for_user(db, uid, "") is None
+
+
 async def test_dev_marker_roundtrip(monkeypatch):
     monkeypatch.setattr(settings, "field_encryption_key", "")
     monkeypatch.setattr(settings, "field_keyring", "")

@@ -351,6 +351,12 @@ async def decrypt_for_user(db, user_id, ciphertext: str) -> str:
     single-key path; ``enc:`` -> dev marker; ``fl1:`` -> field-level key;
     untagged -> fail closed in prod.
     """
+    # An empty value carries no ciphertext to leak — return it as-is. Callers
+    # legitimately pass "" for absent optional fields (e.g. a document with no
+    # OCR text), and the untagged-ciphertext guard below must not trip on it.
+    if not ciphertext:
+        return ciphertext
+
     if ciphertext.startswith(_DEV_PREFIX):
         return ciphertext[len(_DEV_PREFIX) :]
 
@@ -418,7 +424,7 @@ async def encrypt_json_for_user(db, user_id, value) -> str:
 
 
 async def decrypt_json_for_user(db, user_id, ciphertext):
-    if ciphertext is None:
+    if not ciphertext:  # None or "" — an absent JSON field has no object.
         return None
     return json.loads(await decrypt_for_user(db, user_id, ciphertext))
 
