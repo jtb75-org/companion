@@ -56,6 +56,7 @@ class DocumentStatus(enum.StrEnum):
     PENDING_REVIEW = "pending_review"
     ACKNOWLEDGED = "acknowledged"
     HANDLED = "handled"
+    FAILED = "failed"  # terminal: pipeline errored or an admin cancelled it
 
 
 class RetentionPhase(enum.StrEnum):

@@ -26,6 +26,11 @@ class EventPublisher:
         self._topic_cache: dict[str, str] = {}
 
     def _get_client(self):
+        # Pub/Sub retired in the self-hosted migration → dispatch locally. Skip
+        # the client entirely so publish() goes straight to in-process handlers
+        # (no 404 + no ~3s blocking timeout on the caller's event loop).
+        if not settings.pubsub_enabled:
+            return None
         if self._client is None:
             if settings.pubsub_emulator_host:
                 os.environ["PUBSUB_EMULATOR_HOST"] = settings.pubsub_emulator_host

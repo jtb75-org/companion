@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     # Google Cloud (still used for Gemini/Vertex generation)
     gcp_project_id: str = "companion-dev"
     pubsub_emulator_host: str | None = None
+    # GCP Pub/Sub was retired in the self-hosted migration (topics no longer
+    # exist). When disabled, the event publisher dispatches to in-process local
+    # handlers instead of attempting a doomed Pub/Sub publish (which 404s and
+    # stalls the caller ~3s per event). Set true only to use Pub/Sub/emulator.
+    pubsub_enabled: bool = False
 
     # Field-level encryption — local AES-256-GCM key (base64 of 32 bytes:
     # `openssl rand -base64 32`), delivered via SealedSecret. Required
@@ -54,6 +59,12 @@ class Settings(BaseSettings):
     openbao_transit_mount: str = "transit"
     openbao_k8s_role: str = "companion"
     openbao_k8s_auth_mount: str = "kubernetes"
+    # OpenBao's `companion` k8s-auth role requires audience=openbao, but the pod's
+    # DEFAULT SA token has audience=[kube-apiserver] and is rejected (403 invalid
+    # audience). Gitops mounts a projected SA token with `audience: openbao` at
+    # this path; point the transit client at it. Defaults to the k8s default token
+    # for dev/test/back-compat (where the role has no audience requirement).
+    openbao_sa_token_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/token"  # noqa: S105
 
     # Dedicated field-level key for high-sensitivity field TYPES (SSN, bank
     # account numbers, MRN, etc.) — a single per-field-type key, NOT

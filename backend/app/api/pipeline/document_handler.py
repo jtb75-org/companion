@@ -15,11 +15,10 @@ from fastapi import (
 from fastapi import (
     Query as QueryParam,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.db import get_db
 from app.db.context import set_user_context
+from app.db.session import async_session_factory
 from app.pipeline.orchestrator import process_document
 from app.services.push_notification_service import (
     notify_document_processed,
@@ -28,6 +27,31 @@ from app.services.push_notification_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Internal Pipeline"])
+
+
+async def run_document_pipeline(document_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    """Run the full ingestion pipeline for a document in its OWN DB session and
+    tenant context, then notify. Shared by the Pub/Sub push handler and the local
+    in-process `document.received` subscriber (the post-Pub/Sub trigger). Opens
+    its own session so it is safe to run as a detached background task (the
+    request/session that published the event may already be closed)."""
+    async with async_session_factory() as db:
+        try:
+            # RLS tenant context for the pipeline writes (documents/chunks/bills/…).
+            await set_user_context(db, user_id)
+            result = await process_document(db, document_id, user_id)
+            await db.commit()
+
+            # The commit cleared the transaction-local GUC; re-set it so the
+            # notify's device_tokens read (an RLS table) isn't fail-closed.
+            await set_user_context(db, user_id)
+            summary = result.summarization.card_summary or ""
+            await notify_document_processed(db, user_id, summary)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("Pipeline failed for doc %s", document_id)
+            raise
 
 async def verify_pipeline_key(
     x_pipeline_key: str | None = Header(
@@ -57,9 +81,9 @@ async def verify_pipeline_key(
 )
 async def handle_document_received_push(
     payload: dict,
-    db: AsyncSession = Depends(get_db),
 ):
-    """Handle document.received event pushed by Pub/Sub."""
+    """Handle document.received event pushed by Pub/Sub (kept for compatibility;
+    the live trigger is now the in-process local subscriber)."""
     # Pub/Sub push payload has the message in 'message.data' (base64)
     try:
         if "message" in payload and "data" in payload["message"]:
@@ -87,43 +111,13 @@ async def handle_document_received_push(
         document_id,
     )
 
-    # RLS tenant context for the whole pipeline transaction (WS1 Phase 2e). The
-    # pipeline writes documents / document_chunks / pending_reviews /
-    # questions_tracker / bills / appointments on THIS session up to the commit
-    # below; without the GUC those fail-closed once the tables go under RLS. This
-    # endpoint authenticates via the pipeline key (not get_current_user), so it
-    # must set the context itself. Transaction-local.
-    await set_user_context(db, user_id)
-
     try:
-        result = await process_document(
-            db, document_id, user_id
-        )
-        await db.commit()
-
-        # The commit above ended the transaction, which cleared the
-        # transaction-local tenant GUC. notify_document_processed reads (and
-        # prunes) the member's device_tokens — an RLS tenant table — so re-set
-        # the context for this second transaction or the token lookup
-        # fail-closes to zero and the push is silently dropped.
-        await set_user_context(db, user_id)
-        summary = (
-            result.summarization.card_summary or ""
-        )
-        await notify_document_processed(
-            db, user_id, summary
-        )
-        await db.commit()
-
+        await run_document_pipeline(document_id, user_id)
         return {
             "status": "processed",
             "document_id": str(document_id),
         }
     except Exception as exc:
-        await db.rollback()
-        logger.exception(
-            "Pipeline failed for doc %s", document_id
-        )
         raise HTTPException(
             status_code=500, detail="Pipeline failed"
         ) from exc
