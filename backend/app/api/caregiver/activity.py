@@ -3,14 +3,13 @@
 import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.authorize import caregiver_authorized_for_member
 from app.auth.firebase import verify_firebase_token
 from app.config import settings
 from app.db import get_db
 from app.db.context import set_user_context
-from app.models.trusted_contact import TrustedContact
 from app.services import caregiver_service
 
 router = APIRouter(tags=["Caregiver"])
@@ -43,16 +42,10 @@ async def get_activity(
 
     email = decoded.get("email")
 
-    # Verify this email is assigned as a trusted contact for this user
-    result = await db.execute(
-        select(TrustedContact).where(
-            TrustedContact.contact_email == email,
-            TrustedContact.user_id == user_id,
-            TrustedContact.is_active.is_(True),
-        )
-    )
-    contact = result.scalar_one_or_none()
-    if not contact:
+    # Verify this email is an active trusted contact for this member (on the
+    # maintenance session — no member GUC yet → RLS would fail closed). This IS
+    # the access gate.
+    if not await caregiver_authorized_for_member(email, user_id):
         raise HTTPException(
             status_code=403,
             detail="Access denied",
