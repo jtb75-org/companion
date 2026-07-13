@@ -38,6 +38,7 @@ _UID_A = uuid.uuid4()
 _UID_B = uuid.uuid4()
 _EMAIL_A = f"rlsusr-{_UID_A}@t.io"
 _EMAIL_B = f"rlsusr-{_UID_B}@t.io"
+_SUBJECT_A = f"sub-{_UID_A}"
 
 
 def _dsn_as(user: str, password: str) -> str:
@@ -91,6 +92,13 @@ async def rls_users_env():
                 uid,
                 email,
             )
+        # A carries a stable OIDC subject (backfilled); B has none — exercises the
+        # subject read-bootstrap clause added in migration 036.
+        await su.execute(
+            "UPDATE users SET external_subject_id = $1 WHERE id = $2",
+            _SUBJECT_A,
+            _UID_A,
+        )
         yield {}
     finally:
         await su.execute(
@@ -116,6 +124,12 @@ async def _set_email(conn, email) -> None:
     )
 
 
+async def _set_subject(conn, subject) -> None:
+    await conn.execute(
+        "SELECT set_config('app.current_login_subject', $1, false)", subject
+    )
+
+
 async def test_unset_gucs_fail_closed(rls_users_env):
     conn = await _app_conn()
     try:
@@ -136,6 +150,53 @@ async def test_login_email_guc_reads_own_by_email(rls_users_env):
             "SELECT id FROM users WHERE id = ANY($1::uuid[])", [_UID_A, _UID_B]
         )
         assert [r["id"] for r in rows] == [_UID_A]
+    finally:
+        await conn.close()
+
+
+async def test_login_subject_guc_reads_own_by_subject(rls_users_env):
+    """036 bootstrap: with the login-subject GUC set, the by-subject SELECT (the
+    Authentik steady-state path) resolves the member's own row under FORCE RLS."""
+    conn = await _app_conn()
+    try:
+        await _set_subject(conn, _SUBJECT_A)
+        rows = await conn.fetch(
+            "SELECT id FROM users WHERE external_subject_id = $1", _SUBJECT_A
+        )
+        assert [r["id"] for r in rows] == [_UID_A]
+    finally:
+        await conn.close()
+
+
+async def test_unset_subject_guc_fails_closed(rls_users_env):
+    """Regression guard against the superuser-masking bug: WITHOUT the subject GUC
+    the by-subject read fails closed (0 rows) for the NOBYPASSRLS app role — proving
+    the fix is the GUC, not RLS being bypassed."""
+    conn = await _app_conn()
+    try:
+        # No GUC set at all.
+        n = await conn.fetchval(
+            "SELECT count(*) FROM users WHERE external_subject_id = $1", _SUBJECT_A
+        )
+        assert n == 0
+    finally:
+        await conn.close()
+
+
+async def test_subject_bootstrap_cannot_write(rls_users_env):
+    """The subject clause is READ-only, same asymmetry as the email bootstrap: a
+    subject-bootstrapped session may READ its row but the WITH CHECK
+    (id = user-id GUC, unset→NULL) must reject any UPDATE."""
+    conn = await _app_conn()
+    try:
+        await _set_subject(conn, _SUBJECT_A)  # read-bootstrap only; no user-id GUC
+        assert await conn.fetchval(
+            "SELECT count(*) FROM users WHERE id = $1", _UID_A
+        ) == 1
+        with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
+            await conn.execute(
+                "UPDATE users SET preferred_name = 'hacked' WHERE id = $1", _UID_A
+            )
     finally:
         await conn.close()
 

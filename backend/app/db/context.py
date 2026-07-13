@@ -30,6 +30,9 @@ _SET_USER_ID = text(
 _SET_LOGIN_EMAIL = text(
     "SELECT set_config('app.current_login_email', :v, true)"
 )
+_SET_LOGIN_SUBJECT = text(
+    "SELECT set_config('app.current_login_subject', :v, true)"
+)
 
 
 async def set_user_context(db: AsyncSession, user_id) -> None:
@@ -46,3 +49,10 @@ async def clear_user_context(db: AsyncSession) -> None:
 async def set_login_email_context(db: AsyncSession, email: str) -> None:
     """Set the bootstrap email so the pre-context `users` lookup passes RLS."""
     await db.execute(_SET_LOGIN_EMAIL, {"v": email or ""})
+
+
+async def set_login_subject_context(db: AsyncSession, subject: str) -> None:
+    """Set the bootstrap OIDC subject so the pre-context `users` lookup-by-subject
+    (Authentik login) passes RLS. Read-only bootstrap: the users policy WITH CHECK
+    still fences writes to the tenant id GUC."""
+    await db.execute(_SET_LOGIN_SUBJECT, {"v": subject or ""})

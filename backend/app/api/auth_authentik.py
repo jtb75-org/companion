@@ -44,7 +44,11 @@ from app.auth.ratelimit import get_login_rate_limiter
 from app.auth.session import get_session_store
 from app.config import settings
 from app.db import get_db
-from app.db.context import set_login_email_context, set_user_context
+from app.db.context import (
+    set_login_email_context,
+    set_login_subject_context,
+    set_user_context,
+)
 from app.models.audit import AccountAuditLog
 from app.models.user import User
 
@@ -181,6 +185,9 @@ async def login(
     # Invite-only gate (mirrors app/api/v1/profile.complete_profile). Resolve the
     # member by the stable OIDC subject first (external_subject_id == sub); this is
     # the steady-state path once a member has logged in via Authentik at least once.
+    # RLS bootstrap: set the login-subject GUC so the users policy (036) admits this
+    # by-subject read (read-only bootstrap; writes stay fenced to the tenant GUC).
+    await set_login_subject_context(db, sub)
     user = (
         await db.execute(select(User).where(User.external_subject_id == sub))
     ).scalar_one_or_none()
