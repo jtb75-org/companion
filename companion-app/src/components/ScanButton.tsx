@@ -130,6 +130,21 @@ export function ScanButton() {
         throw new Error(`Upload failed: ${response.status}`)
       }
 
+      const body = await response.json().catch(() => ({} as any))
+
+      // Exact duplicate: the member re-sent a file they already have (e.g. they
+      // thought the first try didn't work). Reassure them — nothing went wrong,
+      // and we didn't add a second copy.
+      if (body?.duplicate === true) {
+        setStatus('done')
+        Alert.alert(
+          'You already have this',
+          "No need to add it again — it's already saved.",
+        )
+        setTimeout(() => setStatus('idle'), 2000)
+        return
+      }
+
       setStatus('processing')
 
       const pageLabel = assets.length > 1 ? `${assets.length}-page document` : 'Document'

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { AppState, View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native'
+import { Alert, AppState, View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native'
 import { useNavigation, useFocusEffect } from '@react-navigation/native'
 import messaging from '@react-native-firebase/messaging'
 import { api } from '../api/client'
@@ -8,16 +8,49 @@ import { useAuth } from '../auth/AuthProvider'
 import { ScanButton } from '../components/ScanButton'
 import { TodoCheckbox } from '../components/TodoCheckbox'
 
+interface PossibleDuplicate {
+  document_id: string
+  received_at: string
+  classification: string
+}
+
 interface PendingReview {
   id: string
+  document_id: string | null
   source_description: string
   recommended_action: string
   is_urgent: boolean
   is_past_due: boolean
   is_duplicate: boolean
+  possible_duplicate: PossibleDuplicate | null
   card_summary: string | null
   classification: string | null
   proposed_data: Record<string, any>
+}
+
+// Map a document classification to a warm, plain noun the member will
+// recognize. Kept deliberately small and non-clinical.
+function friendlyNoun(classification: string | null | undefined): string {
+  switch (classification) {
+    case 'bill':
+      return 'bill'
+    case 'appointment':
+      return 'appointment'
+    case 'medical_document':
+    case 'insurance':
+      return 'letter'
+    case 'junk_mail':
+      return 'mail'
+    default:
+      return 'item'
+  }
+}
+
+// Friendly date like "July 1" (no year, no time).
+function friendlyDate(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  return d.toLocaleDateString(undefined, { month: 'long', day: 'numeric' })
 }
 
 interface TodayData {
@@ -34,6 +67,12 @@ export function TodayScreen() {
   const [data, setData] = useState<TodayData | null>(null)
   const [loading, setLoading] = useState(true)
   const [greeting, setGreeting] = useState('')
+  // Review ids where the member chose "Keep both" — hides the prompt locally
+  // for this session without touching the server (the review stays).
+  const [keptBoth, setKeptBoth] = useState<Set<string>>(new Set())
+  // Review id currently being removed, so we can show a spinner and block
+  // double taps.
+  const [removingId, setRemovingId] = useState<string | null>(null)
 
   const handleToggleTodo = async (todoId: string) => {
     try {
@@ -52,6 +91,50 @@ export function TodayScreen() {
       // Revert on failure
       loadData()
     }
+  }
+
+  // Member chose to keep both copies — just hide the prompt for this session.
+  const handleKeepBoth = (reviewId: string) => {
+    setKeptBoth((prev) => {
+      const next = new Set(prev)
+      next.add(reviewId)
+      return next
+    })
+  }
+
+  // Member wants to remove the newer copy. Confirm first (never auto-delete),
+  // then delete the document and refresh the list.
+  const handleRemoveDuplicate = (review: PendingReview) => {
+    const dup = review.possible_duplicate
+    if (!review.document_id || !dup) return
+    const noun = friendlyNoun(dup.classification)
+    const date = friendlyDate(dup.received_at)
+
+    Alert.alert(
+      'Remove this one?',
+      `This won't remove your ${noun} from ${date}.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setRemovingId(review.id)
+              await api(`/api/v1/documents/${review.document_id}`, { method: 'DELETE' })
+              await loadData()
+            } catch {
+              Alert.alert(
+                'That didn’t work',
+                'We could not remove it just now. Please try again.',
+              )
+            } finally {
+              setRemovingId(null)
+            }
+          },
+        },
+      ],
+    )
   }
 
   useEffect(() => {
@@ -149,21 +232,57 @@ export function TodayScreen() {
             const subtitle = amount
               ? `$${amount}`
               : review.classification || 'Document to review'
+            const dup = review.possible_duplicate
+            const showDupPrompt =
+              !!dup && !!review.document_id && !keptBoth.has(review.id)
+            const isRemoving = removingId === review.id
             return (
-              <TouchableOpacity
-                key={review.id}
-                style={[styles.mailRow, review.is_urgent && styles.mailRowUrgent]}
-                onPress={() => navigation.navigate('Chat', { reviewId: review.id })}
-                activeOpacity={0.7}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.mailTitle}>{title}</Text>
-                  <Text style={styles.mailSubtitle}>
-                    {subtitle} · {review.source_description}
-                  </Text>
-                </View>
-                <Text style={styles.mailArrow}>→</Text>
-              </TouchableOpacity>
+              <View key={review.id}>
+                <TouchableOpacity
+                  style={[styles.mailRow, review.is_urgent && styles.mailRowUrgent]}
+                  onPress={() => navigation.navigate('Chat', { reviewId: review.id })}
+                  activeOpacity={0.7}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.mailTitle}>{title}</Text>
+                    <Text style={styles.mailSubtitle}>
+                      {subtitle} · {review.source_description}
+                    </Text>
+                  </View>
+                  <Text style={styles.mailArrow}>→</Text>
+                </TouchableOpacity>
+                {showDupPrompt && (
+                  <View style={styles.dupPrompt}>
+                    <Text style={styles.dupTitle}>Is this the same?</Text>
+                    <Text style={styles.dupBody}>
+                      This looks a lot like your {friendlyNoun(dup!.classification)} from{' '}
+                      {friendlyDate(dup!.received_at)}.
+                    </Text>
+                    <View style={styles.dupButtons}>
+                      <TouchableOpacity
+                        style={[styles.dupBtn, styles.dupBtnKeep]}
+                        onPress={() => handleKeepBoth(review.id)}
+                        disabled={isRemoving}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={styles.dupBtnKeepText}>Keep both</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.dupBtn, styles.dupBtnRemove]}
+                        onPress={() => handleRemoveDuplicate(review)}
+                        disabled={isRemoving}
+                        activeOpacity={0.7}
+                      >
+                        {isRemoving ? (
+                          <ActivityIndicator size="small" color={colors.blue} />
+                        ) : (
+                          <Text style={styles.dupBtnRemoveText}>Remove this one</Text>
+                        )}
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
+              </View>
             )
           })}
         </View>
@@ -288,4 +407,26 @@ const styles = StyleSheet.create({
   mailTitle: { fontSize: 15, fontWeight: '600', color: colors.gray800 },
   mailSubtitle: { fontSize: 13, color: colors.gray500, marginTop: 2 },
   mailArrow: { fontSize: 18, color: colors.gray400, marginLeft: 8 },
+  dupPrompt: {
+    backgroundColor: colors.blueLight,
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  dupTitle: { fontSize: 15, fontWeight: '700', color: colors.gray800 },
+  dupBody: { fontSize: 14, color: colors.gray700, marginTop: 4, lineHeight: 20 },
+  dupButtons: { flexDirection: 'row', gap: 10, marginTop: 12 },
+  dupBtn: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  dupBtnKeep: { backgroundColor: colors.blue },
+  dupBtnKeepText: { color: colors.white, fontSize: 15, fontWeight: '700' },
+  dupBtnRemove: { backgroundColor: colors.white, borderWidth: 1.5, borderColor: colors.gray300 },
+  dupBtnRemoveText: { color: colors.blue, fontSize: 15, fontWeight: '700' },
 })

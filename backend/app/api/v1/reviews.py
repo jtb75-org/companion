@@ -43,13 +43,39 @@ async def get_pending_reviews(
             if r.document_id
             else None
         )
+        # Fuzzy near-duplicate hint: if the pipeline flagged this doc as likely
+        # the same as an earlier one, surface the earlier doc's id/date/type so
+        # the app can ask the member ("looks like your bill from July 1 — same
+        # one?"). Non-destructive; the member decides.
+        possible_duplicate = None
+        if doc and doc.possible_duplicate_of:
+            earlier = await db.get(Document, doc.possible_duplicate_of)
+            if earlier is not None:
+                possible_duplicate = {
+                    "document_id": str(earlier.id),
+                    "received_at": (
+                        earlier.received_at.isoformat()
+                        if earlier.received_at
+                        else None
+                    ),
+                    "classification": (
+                        getattr(
+                            earlier.classification, "value",
+                            str(earlier.classification),
+                        )
+                        if earlier.classification
+                        else None
+                    ),
+                }
         items.append({
             "id": str(r.id),
+            "document_id": str(r.document_id) if r.document_id else None,
             "source_description": r.source_description,
             "recommended_action": r.recommended_action,
             "is_urgent": r.is_urgent,
             "is_past_due": r.is_past_due,
             "is_duplicate": r.is_duplicate,
+            "possible_duplicate": possible_duplicate,
             "card_summary": (
                 await decrypt_row_field(db, doc, "card_summary")
                 if doc else None
