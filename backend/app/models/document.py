@@ -81,5 +81,9 @@ class Document(Base):
         "DocumentChunk",
         back_populates="document",
         cascade="all, delete-orphan",
+        # The FK is ON DELETE CASCADE, so let the DB remove chunks on document
+        # delete instead of SQLAlchemy loading them first (which needlessly
+        # SELECTs the pgvector `embedding` column).
+        passive_deletes=True,
     )
     pipeline_metrics = relationship("PipelineMetric", back_populates="document")
