@@ -4,9 +4,10 @@ import logging
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.session import maintenance_session
 from app.models.audit import DeletionAuditLog
 from app.models.document import Document
 from app.models.enums import AccountStatus, DeletionReason
@@ -261,25 +262,25 @@ async def execute_deletion(db: AsyncSession, user_id: UUID) -> dict:
     )
     db.add(audit)
 
-    # 8. Remove caregiver relationships where this user is the caregiver (by email)
+    # 8. Remove caregiver relationships where this deleted user is the caregiver,
+    #    matched by email across OTHER members. These are cross-member rows, so
+    #    under trusted_contacts RLS they must be removed on the maintenance
+    #    (BYPASSRLS) session — the member self-serve immediate-deletion path runs
+    #    on a member-scoped session that would otherwise fail-close and orphan
+    #    them. Bulk DELETEs; this commits independently of the outer deletion txn.
     from app.models.assignment_request import CaregiverAssignmentRequest
 
-    caregiver_contacts = await db.execute(
-        select(TrustedContact).where(TrustedContact.contact_email == user.email)
-    )
-    removed_caregiver_count = 0
-    for tc in caregiver_contacts.scalars().all():
-        await db.delete(tc)
-        removed_caregiver_count += 1
-
-    # Remove pending assignment requests for this caregiver
-    pending_requests = await db.execute(
-        select(CaregiverAssignmentRequest).where(
-            CaregiverAssignmentRequest.caregiver_email == user.email
+    async with maintenance_session() as mdb:
+        tc_result = await mdb.execute(
+            delete(TrustedContact).where(TrustedContact.contact_email == user.email)
         )
-    )
-    for req in pending_requests.scalars().all():
-        await db.delete(req)
+        removed_caregiver_count = tc_result.rowcount or 0
+        await mdb.execute(
+            delete(CaregiverAssignmentRequest).where(
+                CaregiverAssignmentRequest.caregiver_email == user.email
+            )
+        )
+        await mdb.commit()
 
     audit_details["caregiver_roles_removed"] = removed_caregiver_count
 

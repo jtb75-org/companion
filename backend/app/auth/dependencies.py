@@ -14,6 +14,7 @@ from app.config import settings
 # This is a placeholder import; adjust to match the actual session provider.
 from app.db import get_db
 from app.db.context import set_login_email_context, set_user_context
+from app.db.session import maintenance_session
 from app.models.admin_user import AdminUser
 from app.models.enums import AccessTier
 from app.models.trusted_contact import TrustedContact
@@ -178,18 +179,35 @@ async def get_current_caregiver(
             detail="Firebase token missing required caregiver claims",
         )
 
-    result = await db.execute(
-        select(TrustedContact).where(TrustedContact.id == uuid.UUID(contact_id))
-    )
-    contact = result.scalar_one_or_none()
+    # The caregiver's own contact row is looked up by the claim's contact_id
+    # before any member GUC exists, so under trusted_contacts RLS this must run
+    # on the maintenance (BYPASSRLS) session or it fails closed → caregiver-auth
+    # outage. This read authorizes the caller, so keep it narrow (single id).
+    async with maintenance_session() as mdb:
+        result = await mdb.execute(
+            select(TrustedContact).where(
+                TrustedContact.id == uuid.UUID(contact_id)
+            )
+        )
+        contact = result.scalar_one_or_none()
     if contact is None:
         raise HTTPException(status_code=401, detail="Trusted contact not found")
     if not contact.is_active:
         raise HTTPException(status_code=403, detail="Trusted contact is not active")
+    # Defense in depth: bind the contact row to the verified Firebase email.
+    # Caregivers are email-invited so their tokens always carry an email claim;
+    # require it (like get_current_user) and fail closed on a malformed token, and
+    # reject a stale/mismatched contact_id claim (relationship revoked and the id
+    # re-pointed to another member) that no longer matches the caller's identity.
+    claim_email = (decoded.get("email") or "").lower()
+    if not claim_email:
+        raise HTTPException(status_code=401, detail="Caregiver token missing email claim")
+    if (contact.contact_email or "").lower() != claim_email:
+        raise HTTPException(status_code=403, detail="Caregiver identity mismatch")
 
     # Caregiver = member-id-as-context: authz happened above (the contact row);
-    # RLS then scopes every downstream query to this member. No caregiver branch
-    # in the table policies is needed. (No-op until RLS policies land.)
+    # RLS then scopes every downstream query on the request session to this
+    # member. No caregiver branch in the table policies is needed.
     await set_user_context(db, contact.user_id)
     return CaregiverContext(
         contact=contact,

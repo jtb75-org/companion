@@ -13,10 +13,33 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.session import maintenance_session
 from app.models.admin_user import AdminUser
 from app.models.trusted_contact import TrustedContact
 
 logger = logging.getLogger(__name__)
+
+
+async def caregiver_authorized_for_member(email: str, user_id) -> bool:
+    """True if ``email`` is an active trusted contact for member ``user_id``.
+
+    Caregiver authorization runs BEFORE any member GUC exists, so under
+    trusted_contacts RLS a normal companion_app session fails closed to 0 rows.
+    This narrow (email, user_id, is_active) existence check is the real access
+    gate, so it runs on the maintenance (BYPASSRLS) session — it reveals only
+    whether this specific pair is an active relationship, no cross-member fan-out.
+    """
+    if not email:
+        return False
+    async with maintenance_session() as mdb:
+        result = await mdb.execute(
+            select(TrustedContact.id).where(
+                TrustedContact.contact_email == email,
+                TrustedContact.user_id == user_id,
+                TrustedContact.is_active.is_(True),
+            )
+        )
+        return result.scalar_one_or_none() is not None
 
 
 @dataclass
@@ -70,14 +93,20 @@ async def authorize_by_email(
             admin_role=admin.role,
         )
 
-    # Check trusted_contacts table
-    result = await db.execute(
-        select(TrustedContact).where(
-            TrustedContact.contact_email == email,
-            TrustedContact.is_active.is_(True),
+    # Check trusted_contacts table. This by-email lookup runs before any member
+    # GUC is set (we're resolving the caller's role), so under trusted_contacts
+    # RLS it must run on the maintenance (BYPASSRLS) session or it fails closed
+    # to 0 rows and every caregiver is misclassified as unauthorized. email is
+    # the caregiver-auth index; matching rows are exactly this caller's active
+    # relationships across the members who invited them.
+    async with maintenance_session() as mdb:
+        result = await mdb.execute(
+            select(TrustedContact).where(
+                TrustedContact.contact_email == email,
+                TrustedContact.is_active.is_(True),
+            )
         )
-    )
-    contacts = result.scalars().all()
+        contacts = result.scalars().all()
     if contacts:
         logger.info(
             f"Authorized as caregiver: {email} "

@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.context import set_user_context
 from app.db.session import maintenance_session
 from app.models.enums import AccountStatus, InvitationStatus
 from app.models.trusted_contact import TrustedContact
@@ -114,18 +115,19 @@ async def create_admin_platform_invitation(
     return await get_or_create_stub_user(db, email, name)
 
 
-async def get_invitation_by_token(
-    db: AsyncSession, token: str
+async def _load_active_invitation(
+    session: AsyncSession, token: str
 ) -> TrustedContact | None:
-    """Look up an invitation by token. Returns None if not found or expired."""
-    result = await db.execute(
+    """Load an invitation by token on ``session``, flipping it to EXPIRED (in the
+    session, for the caller to commit) if past TTL. Returns the still-attached
+    contact, or None if not found or expired."""
+    result = await session.execute(
         select(TrustedContact).where(TrustedContact.invitation_token == token)
     )
     contact = result.scalar_one_or_none()
     if contact is None:
         return None
 
-    # Check expiry
     if contact.invited_at:
         invited_at = contact.invited_at
         if invited_at.tzinfo:
@@ -133,57 +135,77 @@ async def get_invitation_by_token(
         expires = invited_at + timedelta(days=INVITATION_TTL_DAYS)
         if datetime.utcnow() > expires:
             contact.invitation_status = InvitationStatus.EXPIRED
-            await db.flush()
             return None
 
     return contact
+
+
+async def get_invitation_by_token(
+    db: AsyncSession, token: str
+) -> TrustedContact | None:
+    """Look up an invitation by token. Returns None if not found or expired.
+
+    The token is a single-use, high-entropy capability and this lookup happens
+    before any member GUC exists (public /validate + accept/decline), so it runs
+    on the maintenance (BYPASSRLS) session — under trusted_contacts RLS a normal
+    session would fail-close to 0 rows. The returned contact is detached; callers
+    read scalar attrs only (sessions are expire_on_commit=False)."""
+    async with maintenance_session() as mdb:
+        contact = await _load_active_invitation(mdb, token)
+        await mdb.commit()  # persist a possible EXPIRED flip
+        return contact
 
 
 async def accept_invitation(
     db: AsyncSession, token: str, accepting_email: str
 ) -> TrustedContact | None:
     """Accept an invitation. Returns the TrustedContact or None if invalid."""
-    contact = await get_invitation_by_token(db, token)
-    if contact is None:
-        return None
-
-    if contact.invitation_status != InvitationStatus.PENDING:
-        return None
-
-    if contact.contact_email and contact.contact_email.lower() != accepting_email.lower():
-        return None
-
-    now = datetime.utcnow()
-    contact.invitation_status = InvitationStatus.ACCEPTED
-    contact.accepted_at = now
-    contact.is_active = True
-    contact.invitation_token = None  # Consume the token
-
-    # Activate the accepting caregiver's stub account. Cross-tenant (the
-    # caregiver has no member GUC on this session), so run it on the maintenance
-    # (BYPASSRLS) session — under users RLS the by-email read + INVITED->ACTIVE
-    # write would otherwise fail-close.
+    # The whole token lookup → contact mutation → stub activation is cross-tenant
+    # (the caregiver has no member GUC), so run it on ONE maintenance (BYPASSRLS)
+    # session. WRITES to trusted_contacts by a caregiver session would otherwise
+    # be rejected by WITH CHECK (user_id != GUC); the token is the capability.
     async with maintenance_session() as mdb:
+        contact = await _load_active_invitation(mdb, token)
+        if contact is None:
+            await mdb.commit()  # persist a possible EXPIRED flip
+            return None
+        if contact.invitation_status != InvitationStatus.PENDING:
+            return None
+        if (
+            contact.contact_email
+            and contact.contact_email.lower() != accepting_email.lower()
+        ):
+            return None
+
+        contact.invitation_status = InvitationStatus.ACCEPTED
+        contact.accepted_at = datetime.utcnow()
+        contact.is_active = True
+        contact.invitation_token = None  # Consume the token
+
+        # Activate the accepting caregiver's stub account on the same bypass
+        # session (under users RLS the by-email read + INVITED->ACTIVE write
+        # would otherwise fail-close).
         u = (
-            await mdb.execute(
-                select(User).where(User.email == accepting_email)
-            )
+            await mdb.execute(select(User).where(User.email == accepting_email))
         ).scalar_one_or_none()
         if u and u.account_status == AccountStatus.INVITED:
             u.account_status = AccountStatus.ACTIVE
-            await mdb.commit()
 
-    await db.flush()
+        member_user_id = contact.user_id
+        caregiver_name = contact.contact_name
+        await mdb.commit()
 
-    # Notify the member who sent the invitation
+    # Notify the member who sent the invitation. send_push reads the member's
+    # device_tokens (under RLS), so scope the request session to the member.
+    await set_user_context(db, member_user_id)
     from app.services.push_notification_service import (
         notify_caregiver_status_change,
     )
 
     await notify_caregiver_status_change(
         db,
-        inviter_user_id=contact.user_id,
-        caregiver_name=contact.contact_name,
+        inviter_user_id=member_user_id,
+        caregiver_name=caregiver_name,
         new_status="accepted",
     )
 
@@ -194,30 +216,38 @@ async def decline_invitation(
     db: AsyncSession, token: str, declining_email: str
 ) -> TrustedContact | None:
     """Decline an invitation."""
-    contact = await get_invitation_by_token(db, token)
-    if contact is None:
-        return None
+    async with maintenance_session() as mdb:
+        contact = await _load_active_invitation(mdb, token)
+        if contact is None:
+            await mdb.commit()  # persist a possible EXPIRED flip
+            return None
+        if contact.invitation_status != InvitationStatus.PENDING:
+            return None
+        if (
+            contact.contact_email
+            and contact.contact_email.lower() != declining_email.lower()
+        ):
+            return None
 
-    if contact.invitation_status != InvitationStatus.PENDING:
-        return None
+        contact.invitation_status = InvitationStatus.DECLINED
+        contact.is_active = False
+        contact.invitation_token = None
 
-    if contact.contact_email and contact.contact_email.lower() != declining_email.lower():
-        return None
+        member_user_id = contact.user_id
+        caregiver_name = contact.contact_name
+        await mdb.commit()
 
-    contact.invitation_status = InvitationStatus.DECLINED
-    contact.is_active = False
-    contact.invitation_token = None
-    await db.flush()
-
-    # Notify the member who sent the invitation
+    # Notify the member who sent the invitation (send_push reads the member's
+    # device_tokens under RLS → scope the request session to the member).
+    await set_user_context(db, member_user_id)
     from app.services.push_notification_service import (
         notify_caregiver_status_change,
     )
 
     await notify_caregiver_status_change(
         db,
-        inviter_user_id=contact.user_id,
-        caregiver_name=contact.contact_name,
+        inviter_user_id=member_user_id,
+        caregiver_name=caregiver_name,
         new_status="declined",
     )
 
