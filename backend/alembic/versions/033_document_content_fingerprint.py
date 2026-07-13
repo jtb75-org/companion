@@ -9,8 +9,9 @@ return the existing document instead of creating a second copy. Indexed by
 (user_id, content_fingerprint) for the per-user lookup (which RLS also scopes).
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "033"
 down_revision = "032"
