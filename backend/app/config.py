@@ -87,6 +87,48 @@ class Settings(BaseSettings):
     # Firebase
     firebase_project_id: str = "companion-dev"
 
+    # ── Authentik BFF native login (PR #2 of the Firebase→Authentik migration) ──
+    # Master auth switch. DEFAULT "firebase": every existing endpoint keeps
+    # verifying Firebase ID tokens exactly as it does today — this PR does NOT
+    # rewire the ~10 verify_firebase_token call sites. Setting "authentik" only
+    # turns ON the additive BFF /auth/login|/auth/logout endpoints below (which
+    # are otherwise 404/inert); it does NOT yet change how existing endpoints
+    # authenticate. The real cutover (rewiring get_current_user et al.) is a
+    # later PR. So this flag is safe to leave at "firebase" in prod: nothing
+    # authenticates via Authentik until then.
+    auth_provider: str = "firebase"  # firebase | authentik
+
+    # companion-authentik OIDC — consumed ONLY by the BFF path above. In-cluster
+    # base URL for the server-side flow driver + token exchange (no browser).
+    authentik_internal_url: str = "http://companion-authentik-server.companion-authentik.svc"
+    # The Authentik authentication flow slug the executor drives.
+    authentik_auth_flow_slug: str = "companion-authentication-flow"
+    # OIDC client (application/provider) credentials.
+    authentik_oidc_client_id: str = ""
+    authentik_oidc_client_secret: str = ""  # noqa: S105
+    # Public issuer + JWKS (for the future browser bearer path, verified with
+    # require_issuer=True). BFF-fetched in-cluster id_tokens are verified with
+    # require_issuer=False because issuer_mode=per_provider stamps the internal
+    # host as `iss` (signature+audience still prove provenance). See oidc.py.
+    authentik_oidc_issuer: str = ""
+    authentik_oidc_jwks_uri: str = ""
+    # OIDC audience (== client_id for Authentik). Defaults to client_id via
+    # `oidc_audience` below when left empty.
+    authentik_oidc_audience: str = ""
+    # Redirect URI registered on the Authentik provider for the code exchange.
+    bff_oidc_redirect_uri: str = "http://localhost:5173/auth/callback"
+
+    # BFF session cookie + double-submit CSRF cookie (browser/app SPA).
+    session_cookie_name: str = "companion_sid"
+    csrf_cookie_name: str = "companion_csrf"
+    session_cookie_secure: bool = True
+    session_cookie_domain: str = ""  # empty → host-only cookie
+    session_ttl_seconds: int = 60 * 60 * 8  # 8h sliding
+
+    # Login throttle (per username + per client IP, fixed window).
+    login_max_attempts: int = 10
+    login_window_seconds: int = 300
+
     # LLM
     anthropic_api_key: str = ""
     openai_api_key: str = ""
@@ -139,6 +181,18 @@ class Settings(BaseSettings):
     # "member sees nothing" bug). "auto" = on when environment != prod. "on"/"off"
     # force it. Never raises; it is diagnostics, not the security control (RLS is).
     rls_guc_guard: str = "auto"  # auto | on | off
+
+    @property
+    def authentik_enabled(self) -> bool:
+        """True only when the master switch selects Authentik. Gates the additive
+        BFF /auth endpoints; DEFAULT False keeps Firebase the sole live auth."""
+        return self.auth_provider == "authentik"
+
+    @property
+    def oidc_audience(self) -> str:
+        """OIDC audience for the Authentik verifier — the explicit
+        ``authentik_oidc_audience`` if set, else the client_id (Authentik's aud)."""
+        return self.authentik_oidc_audience or self.authentik_oidc_client_id
 
 
 settings = Settings()
