@@ -240,6 +240,7 @@ def get_client() -> OpenBaoTransitClient:
                 transit_mount=settings.openbao_transit_mount,
                 k8s_role=settings.openbao_k8s_role,
                 k8s_auth_mount=settings.openbao_k8s_auth_mount,
+                sa_token_path=settings.openbao_sa_token_path,
             )
         return _client
 

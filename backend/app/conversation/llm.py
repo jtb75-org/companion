@@ -139,10 +139,14 @@ class GeminiClient(LLMClient):
                 gen_kwargs["response_mime_type"] = "application/json"
             
             if disable_thinking:
-                from vertexai.generative_models import ThinkingConfig
-                gen_kwargs["thinking_config"] = ThinkingConfig(
-                    thinking_budget=0
-                )
+                # ThinkingConfig was removed from vertexai.generative_models in
+                # newer SDK versions; if unavailable, skip it — thinking stays on
+                # and any thinking blocks are stripped from the output downstream.
+                try:
+                    from vertexai.generative_models import ThinkingConfig
+                    gen_kwargs["thinking_config"] = ThinkingConfig(thinking_budget=0)
+                except ImportError:
+                    pass
 
             response = await model.generate_content_async(
                 contents,
@@ -208,10 +212,14 @@ class GeminiClient(LLMClient):
                 "temperature": temperature,
             }
             if disable_thinking:
-                from vertexai.generative_models import ThinkingConfig
-                gen_kwargs["thinking_config"] = ThinkingConfig(
-                    thinking_budget=0
-                )
+                # ThinkingConfig was removed from vertexai.generative_models in
+                # newer SDK versions; if unavailable, skip it — thinking stays on
+                # and any thinking blocks are stripped from the output downstream.
+                try:
+                    from vertexai.generative_models import ThinkingConfig
+                    gen_kwargs["thinking_config"] = ThinkingConfig(thinking_budget=0)
+                except ImportError:
+                    pass
 
             response = await model.generate_content_async(
                 contents,
@@ -253,10 +261,14 @@ class GeminiClient(LLMClient):
                 "temperature": temperature,
             }
             if disable_thinking:
-                from vertexai.generative_models import ThinkingConfig
-                gen_kwargs["thinking_config"] = ThinkingConfig(
-                    thinking_budget=0
-                )
+                # ThinkingConfig was removed from vertexai.generative_models in
+                # newer SDK versions; if unavailable, skip it — thinking stays on
+                # and any thinking blocks are stripped from the output downstream.
+                try:
+                    from vertexai.generative_models import ThinkingConfig
+                    gen_kwargs["thinking_config"] = ThinkingConfig(thinking_budget=0)
+                except ImportError:
+                    pass
 
             response = await model.generate_content_async(
                 contents,

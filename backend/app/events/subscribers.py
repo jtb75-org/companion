@@ -1,10 +1,42 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
 
 from app.events.publisher import on_event
 
 logger = logging.getLogger(__name__)
+
+# Tasks are fire-and-forget; keep strong refs so the event loop doesn't GC them
+# mid-run (asyncio only holds weak references to running tasks).
+_background_tasks: set[asyncio.Task] = set()
+
+
+@on_event("document.received")
+async def handle_document_received(envelope: dict):
+    """Trigger the ingestion pipeline in-process (Pub/Sub was retired in the
+    migration). Runs the pipeline as a detached background task so the upload
+    request that published this event returns immediately — the doc processes
+    asynchronously and the member is notified on completion."""
+    payload = envelope.get("payload") or {}
+    try:
+        document_id = uuid.UUID(payload["document_id"])
+        user_id = uuid.UUID(envelope["user_id"])
+    except (KeyError, ValueError, TypeError):
+        logger.error("document.received: unparseable envelope %s", envelope)
+        return
+
+    async def _run():
+        from app.api.pipeline.document_handler import run_document_pipeline
+        try:
+            await run_document_pipeline(document_id, user_id)
+        except Exception:
+            logger.exception("Background pipeline failed for doc %s", document_id)
+
+    task = asyncio.create_task(_run())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 @on_event("document.processed")
