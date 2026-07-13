@@ -1,6 +1,6 @@
 # RESUME — Companion self-hosted migration
 
-Session handoff. Last updated **2026-07-12**. Source of truth for live state is
+Session handoff. Last updated **2026-07-13**. Source of truth for live state is
 this file + `MEMORY.md` (+ linked notes). `CLAUDE.md` "Current state" is also
 current as of 2026-07-12. The older 2026-06-18 history below the line is kept
 for context but is superseded.
@@ -132,8 +132,22 @@ Done: `source_metadata.ocr_text` is encrypted in `process_camera_scan`
   retention tests for `ocr_shadow.shadow_text`.
 
 **Other:**
-- Firebase finish: publish OAuth consent screen; build/sign mobile binaries +
-  register Android release SHA-1.
+- **Firebase finish:**
+  - **FCM iOS push — APNs key missing (owner action, root-caused 2026-07-13).**
+    Push delivery to iOS fails with `401 THIRD_PARTY_AUTH_ERROR` ("missing
+    required authentication credential"). Root cause: Firebase project
+    `companion-prod-491606` has **no APNs auth credential**, so FCM can't auth to
+    Apple's APNs. NOT a code bug — proved the backend SA mints a valid OAuth
+    token (dummy token → 400 INVALID_ARGUMENT = auth OK; real iOS token → 401
+    THIRD_PARTY_AUTH_ERROR), and the mobile `GoogleService-Info.plist` /
+    `google-services.json` both = `companion-prod-491606` (no project mismatch).
+    **Fix:** Apple Developer → Keys → create an **APNs Auth Key (.p8)** (Apple
+    Push Notifications service) → Firebase Console → Project Settings → Cloud
+    Messaging → Apple app (`com.mydailydignity.companion`) → upload `.p8` + Key ID
+    + Team ID. Caveat: iOS **Simulator** push over real APNs is unreliable — test
+    on a physical device. Detail in [[document-pipeline-prod-gaps]].
+  - Publish OAuth consent screen; build/sign mobile binaries + register the
+    Android release SHA-1.
 - Owner one-offs: revoke bootstrap OpenBao token; key rotation automation.
 
 > NOTE: DB currently has **1 member user** (`smoketest@mydailydignity.com`,
