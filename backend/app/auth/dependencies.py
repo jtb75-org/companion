@@ -3,11 +3,12 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.firebase import verify_firebase_token
+from app.auth.principal import resolve_session_principal
 from app.config import settings
 
 # Database session dependency — imported from wherever the app defines it.
@@ -49,10 +50,17 @@ async def _extract_bearer_token(authorization: str | None) -> dict:
 # ---------------------------------------------------------------------------
 
 async def get_current_user(
+    request: Request = None,
     authorization: str | None = Header(None, alias="Authorization"),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    """Resolve the authenticated user from a Firebase ID token.
+    """Resolve the authenticated user.
+
+    DUAL-RUN: when auth_provider == "authentik" and a valid BFF session cookie is
+    present, the member is resolved from that session (preferred); otherwise the
+    existing Firebase bearer path runs. When auth_provider == "firebase" (DEFAULT)
+    ``resolve_session_principal`` returns ``None`` immediately and behavior is
+    byte-identical to before.
 
     In development/test environments, if no Authorization header is provided
     the first user in the database is returned as a convenience mock.
@@ -68,6 +76,11 @@ async def get_current_user(
             raise HTTPException(status_code=404, detail="No mock user available in dev database")
         await set_user_context(db, user.id)
         return user
+
+    # DUAL-RUN Authentik-session branch (inert unless auth_provider == "authentik").
+    principal = await resolve_session_principal(request, db)
+    if principal is not None:
+        return principal.user
 
     decoded = await _extract_bearer_token(authorization)
 
@@ -91,12 +104,15 @@ async def get_current_user(
 
 
 async def get_current_user_allow_inactive(
+    request: Request = None,
     authorization: str | None = Header(None, alias="Authorization"),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """Like get_current_user but allows deactivated/pending_deletion accounts.
 
-    Used only for reactivation and cancel-deletion endpoints.
+    Used only for reactivation and cancel-deletion endpoints. DUAL-RUN aware:
+    accepts a BFF session (with allow_inactive) when Authentik is live, else the
+    existing Firebase path (unchanged when auth_provider == "firebase").
     """
     if settings.dev_auth_bypass and authorization is None:
         result = await db.execute(select(User).limit(1))
@@ -105,6 +121,11 @@ async def get_current_user_allow_inactive(
             raise HTTPException(status_code=404, detail="No mock user available in dev database")
         await set_user_context(db, user.id)
         return user
+
+    # DUAL-RUN Authentik-session branch (inert unless auth_provider == "authentik").
+    principal = await resolve_session_principal(request, db, allow_inactive=True)
+    if principal is not None:
+        return principal.user
 
     decoded = await _extract_bearer_token(authorization)
     email: str | None = decoded.get("email")
@@ -243,10 +264,19 @@ def require_tier(minimum_tier: AccessTier):
 # ---------------------------------------------------------------------------
 
 async def get_current_admin(
+    request: Request = None,
     authorization: str | None = Header(None, alias="Authorization"),
     db: AsyncSession = Depends(get_db),
 ) -> AdminUser:
-    """Resolve the authenticated admin from a Firebase ID token.
+    """Resolve the authenticated admin.
+
+    DUAL-RUN: when auth_provider == "authentik" and a valid BFF session is present,
+    the admin is resolved by the session member's verified email (a session only
+    exists for a member whose row pre-existed via /auth/login, so the subject
+    resolves to a User row carrying the trusted email). Otherwise the existing
+    Firebase bearer path runs. Byte-identical to before when auth_provider ==
+    "firebase". ``admin_users`` is RLS-disabled, so no tenant GUC is needed for the
+    admin lookup itself.
 
     In development/test environments, if no Authorization header is provided
     the first admin user in the database is returned as a convenience mock.
@@ -262,9 +292,13 @@ async def get_current_admin(
             raise HTTPException(status_code=404, detail="No mock admin available in dev database")
         return admin
 
-    decoded = await _extract_bearer_token(authorization)
-
-    email: str | None = decoded.get("email")
+    # DUAL-RUN Authentik-session branch (inert unless auth_provider == "authentik").
+    principal = await resolve_session_principal(request, db)
+    if principal is not None:
+        email: str | None = principal.email
+    else:
+        decoded = await _extract_bearer_token(authorization)
+        email = decoded.get("email")
     if not email:
         raise HTTPException(status_code=401, detail="Firebase token missing email claim")
 
