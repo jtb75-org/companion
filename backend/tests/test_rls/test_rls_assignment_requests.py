@@ -102,9 +102,9 @@ async def rls_ar_env():
             await su.execute(
                 "INSERT INTO caregiver_assignment_requests "
                 "(id, member_id, caregiver_email, caregiver_name, relationship_type, "
-                " access_tier, status, initiated_by) "
+                " access_tier, status, initiated_by, expires_at) "
                 "VALUES (gen_random_uuid(), $1, 'cg@t.io', 'CG', $2, $3, "
-                "'pending_approval', 'caregiver')",
+                "'pending_approval', 'caregiver', now() + interval '14 days')",
                 uid,
                 rel,
                 tier,
@@ -166,9 +166,9 @@ async def test_cross_member_write_rejected(rls_ar_env):
             await conn.execute(
                 "INSERT INTO caregiver_assignment_requests "
                 "(id, member_id, caregiver_email, caregiver_name, relationship_type, "
-                " access_tier, status, initiated_by) "
+                " access_tier, status, initiated_by, expires_at) "
                 "VALUES (gen_random_uuid(), $1, 'x@t.io', 'X', $2, $3, "
-                "'pending_approval', 'caregiver')",
+                "'pending_approval', 'caregiver', now() + interval '14 days')",
                 _UID_B,  # not the GUC owner → WITH CHECK rejects
                 rls_ar_env["rel"],
                 rls_ar_env["tier"],
