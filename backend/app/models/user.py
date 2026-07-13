@@ -20,6 +20,13 @@ class User(TimestampMixin, Base):
     # break those. phone/date_of_birth/address ARE encrypted at rest
     # (per-tenant envelope) and so are stored as tagged-ciphertext Text.
     email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    # Stable OIDC subject (Authentik per-provider ``sub``) → member mapping. NULL
+    # for Firebase-era rows; backfilled on first Authentik login (see
+    # app/api/auth_authentik.py). Nullable + UNIQUE: Postgres permits many NULLs,
+    # so it is additive/inert until the Authentik cutover.
+    external_subject_id: Mapped[str | None] = mapped_column(
+        Text, unique=True, nullable=True
+    )
     phone: Mapped[str | None] = mapped_column(Text, nullable=True)
     preferred_name: Mapped[str] = mapped_column(Text, nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)

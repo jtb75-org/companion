@@ -15,9 +15,11 @@ Companion adaptations vs the HealthCostClarity original:
   * Invite-only: HCC JIT-provisions on first login; Companion REFUSES an email
     with no pre-existing User row (mirrors app/api/v1/profile.complete_profile —
     only an `invited` stub or existing user may proceed). No member is auto-created.
-  * Identity resolved by EMAIL claim (Companion has no external_subject_id column
-    yet — that column + sub-based resolution is the NEXT PR). The opaque Authentik
-    `sub` is what gets stored in the session (privacy: no email/PII in Redis).
+  * Identity resolved by the stable ``external_subject_id`` (the Authentik
+    per-provider ``sub``), falling back to the EMAIL claim on the first Authentik
+    login of an existing member — at which point the sub is lazily backfilled onto
+    the row so subsequent logins resolve by subject (PR #3). The opaque ``sub`` is
+    what gets stored in the session (privacy: no email/PII in Redis).
 """
 
 from __future__ import annotations
@@ -42,7 +44,11 @@ from app.auth.ratelimit import get_login_rate_limiter
 from app.auth.session import get_session_store
 from app.config import settings
 from app.db import get_db
-from app.db.context import set_login_email_context
+from app.db.context import (
+    set_login_email_context,
+    set_login_subject_context,
+    set_user_context,
+)
 from app.models.audit import AccountAuditLog
 from app.models.user import User
 
@@ -163,31 +169,75 @@ async def login(
             status.HTTP_502_BAD_GATEWAY, "invalid token from identity provider"
         ) from exc
 
+    # Safety gate (safety-reviewer follow-up #4, PR #71): the subject is the stable
+    # identity we look up, backfill, and mint the session on — an empty/absent sub
+    # would collapse those to a NULL match. Refuse before it is ever used.
+    sub = (verified.sub or "").strip()
+    if not sub:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "identity provider token missing subject"
+        )
+
     email = (verified.email or "").strip().lower()
     if not email:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "identity provider token missing email")
 
     # Invite-only gate (mirrors app/api/v1/profile.complete_profile). Resolve the
-    # user by EMAIL claim — exactly like the current Firebase get_current_user
-    # path. TODO(next PR): resolve by `external_subject_id` (verified.sub) once that
-    # column exists, instead of email-matching.
-    # RLS bootstrap: set the login-email GUC so the users policy admits this lookup.
-    await set_login_email_context(db, email)
+    # member by the stable OIDC subject first (external_subject_id == sub); this is
+    # the steady-state path once a member has logged in via Authentik at least once.
+    # RLS bootstrap: set the login-subject GUC so the users policy (036) admits this
+    # by-subject read (read-only bootstrap; writes stay fenced to the tenant GUC).
+    await set_login_subject_context(db, sub)
     user = (
-        await db.execute(select(User).where(User.email == email))
+        await db.execute(select(User).where(User.external_subject_id == sub))
     ).scalar_one_or_none()
+
     if user is None:
-        # No row => this email was never invited. Refuse; do NOT auto-provision.
-        # Audit on its own commit so it survives the 403's request rollback.
-        db.add(AccountAuditLog(event="signup_refused", email=email))
-        await db.commit()
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "No invitation found for this account.")
+        # No subject match → this is either the member's first Authentik login (sub
+        # not yet stored) or an uninvited email. Fall back to the by-email lookup,
+        # exactly like the current Firebase get_current_user path.
+        # RLS bootstrap: set the login-email GUC so the users policy admits this lookup.
+        await set_login_email_context(db, email)
+        user = (
+            await db.execute(select(User).where(User.email == email))
+        ).scalar_one_or_none()
+        if user is None:
+            # No row by sub OR email => this email was never invited. Refuse; do NOT
+            # auto-provision. Audit on its own commit so it survives the 403's
+            # request rollback.
+            db.add(AccountAuditLog(event="signup_refused", email=email))
+            await db.commit()
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "No invitation found for this account."
+            )
+
     if user.account_status in _INACTIVE_STATUSES:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is deactivated")
 
+    # Lazy backfill: bind this member's row to the stable subject on first Authentik
+    # login so every subsequent login resolves by sub (above) and never touches the
+    # email path. If a DIFFERENT subject is already bound, a member's stable identity
+    # would be changing under us — treat as an anomaly and refuse rather than
+    # overwrite (prevents an attacker-controlled sub from hijacking a member row).
+    if user.external_subject_id is None:
+        # Bootstrap the tenant GUC to the now-authenticated member's id so the
+        # backfill UPDATE satisfies the users RLS WITH CHECK (id = current_user_id);
+        # the login-email GUC only admits READS. Without this the write would be
+        # RLS-refused under the NOBYPASSRLS app role once Authentik is live.
+        await set_user_context(db, user.id)
+        user.external_subject_id = sub
+        await db.commit()
+    elif user.external_subject_id != sub:
+        log.warning(
+            "BFF login subject mismatch for user %s: token sub != stored subject",
+            user.id,
+        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Account identity mismatch")
+
     await limiter.reset(user_bucket)  # clear the throttle on a successful login
-    # Store the opaque Authentik subject (not the email) — no PII in Redis.
-    sid = await get_session_store().create(verified.sub)
+    # Store the opaque Authentik subject (not the email) — no PII in Redis. This is
+    # the same stable subject now persisted as external_subject_id above.
+    sid = await get_session_store().create(sub)
     _set_cookie(response, settings.session_cookie_name, sid, http_only=True)
     _set_cookie(response, settings.csrf_cookie_name, secrets.token_urlsafe(32), http_only=False)
     return {"status": "ok"}

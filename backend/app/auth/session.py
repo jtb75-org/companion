@@ -11,10 +11,11 @@ Adapted from HealthCostClarity: reuses Companion's shared Redis pool
 (``app.db.redis.get_redis``) and the ``companion:`` key namespace.
 
 NOTE (deferred to the cutover PR): no existing endpoint resolves this session yet.
-The auth deps still read only the Firebase ``Authorization`` bearer. Once the
-``external_subject_id`` column lands, ``get_current_user`` will resolve the
-principal from the stored ``sub`` and this becomes the browser/app session of
-record. Today it is minted but unconsumed.
+The auth deps still read only the Firebase ``Authorization`` bearer. The
+``external_subject_id`` column now exists (PR #3) and the login path backfills it,
+so ``get_current_user`` will resolve the principal by matching the stored ``sub``
+against ``users.external_subject_id`` at cutover; this store keeps holding that
+opaque subject. Today it is minted but unconsumed.
 """
 
 from __future__ import annotations

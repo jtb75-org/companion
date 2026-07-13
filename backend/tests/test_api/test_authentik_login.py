@@ -157,3 +157,132 @@ async def test_login_refuses_deactivated_account(monkeypatch):
         r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
     assert r.status_code == 403
     await _delete_user(email)
+
+
+# ── PR #3: stable-subject resolution + lazy backfill ──
+
+
+@requires_db
+async def test_login_resolves_by_subject(monkeypatch):
+    """A member whose external_subject_id is already set resolves by SUB, not email.
+
+    We give the row a distinct email so an email lookup would miss — proving the
+    by-subject path is what admits the login."""
+    email = "authentik-bysub@example.com"
+    sub = "sub-already-bound"
+    await _delete_user(email)
+    async with db_module.async_session_factory() as s:
+        s.add(
+            User(
+                email=email,
+                preferred_name="S",
+                display_name="S",
+                account_status=AccountStatus.ACTIVE,
+                external_subject_id=sub,
+            )
+        )
+        await s.commit()
+    # Token carries a DIFFERENT email claim; only the sub matches the stored row.
+    _, store = _enable_authentik_with_mocks(
+        monkeypatch, sub=sub, email="not-the-stored-email@example.com"
+    )
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 200
+    sid = r.cookies["companion_sid"]
+    assert await store.get(sid) == sub
+    await _delete_user(email)
+
+
+@requires_db
+async def test_login_backfills_subject_on_first_login(monkeypatch):
+    """First Authentik login of an invited member: resolved by email, then the
+    stable subject is lazily persisted to external_subject_id."""
+    email = "authentik-backfill@example.com"
+    sub = "sub-backfilled"
+    await _delete_user(email)
+    async with db_module.async_session_factory() as s:
+        s.add(
+            User(
+                email=email,
+                preferred_name="B",
+                display_name="B",
+                account_status=AccountStatus.INVITED,
+            )
+        )
+        await s.commit()
+    _enable_authentik_with_mocks(monkeypatch, sub=sub, email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 200
+    # The mapping was written to the column.
+    async with db_module.async_session_factory() as s:
+        row = (
+            await s.execute(select(User).where(User.email == email))
+        ).scalar_one()
+        assert row.external_subject_id == sub
+    await _delete_user(email)
+
+
+@requires_db
+async def test_login_refuses_subject_mismatch(monkeypatch):
+    """An existing row bound to subject A must not be overwritten by token subject
+    B arriving on the same email — refuse (a member's stable subject can't change)."""
+    email = "authentik-mismatch@example.com"
+    await _delete_user(email)
+    async with db_module.async_session_factory() as s:
+        s.add(
+            User(
+                email=email,
+                preferred_name="M",
+                display_name="M",
+                account_status=AccountStatus.ACTIVE,
+                external_subject_id="sub-original",
+            )
+        )
+        await s.commit()
+    # Token's sub does NOT match the stored one, but the email does.
+    _enable_authentik_with_mocks(monkeypatch, sub="sub-attacker", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 403
+    # The stored subject was NOT overwritten.
+    async with db_module.async_session_factory() as s:
+        row = (
+            await s.execute(select(User).where(User.email == email))
+        ).scalar_one()
+        assert row.external_subject_id == "sub-original"
+    await _delete_user(email)
+
+
+@requires_db
+async def test_login_refuses_empty_subject(monkeypatch):
+    """An id_token with an empty sub is refused before any lookup/backfill/session
+    (safety-reviewer follow-up #4: sub non-emptiness)."""
+    email = "authentik-emptysub@example.com"
+    await _delete_user(email)
+    async with db_module.async_session_factory() as s:
+        s.add(
+            User(
+                email=email,
+                preferred_name="E",
+                display_name="E",
+                account_status=AccountStatus.ACTIVE,
+            )
+        )
+        await s.commit()
+    _enable_authentik_with_mocks(monkeypatch, sub="", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 401
+    # No backfill happened.
+    async with db_module.async_session_factory() as s:
+        row = (
+            await s.execute(select(User).where(User.email == email))
+        ).scalar_one()
+        assert row.external_subject_id is None
+    await _delete_user(email)

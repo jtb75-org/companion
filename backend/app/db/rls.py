@@ -19,6 +19,10 @@ _USER_GUC = "NULLIF(current_setting('app.current_user_id', true), '')::uuid"
 # The bootstrap email GUC — set before the user_id is known (auth-by-email). Same
 # fail-closed idiom: unset/empty → NULL → `email = NULL` → false.
 _LOGIN_EMAIL_GUC = "NULLIF(current_setting('app.current_login_email', true), '')"
+# The bootstrap subject GUC — the stable OIDC `sub`, set before the user_id is
+# known on the Authentik login path (auth-by-subject; app/api/auth_authentik.py).
+# Same fail-closed idiom: unset/empty → NULL → `external_subject_id = NULL` → false.
+_LOGIN_SUBJECT_GUC = "NULLIF(current_setting('app.current_login_subject', true), '')"
 
 
 def tenant_isolation_statements(table: str, *, user_col: str = "user_id") -> list[str]:
@@ -40,19 +44,21 @@ def tenant_isolation_statements(table: str, *, user_col: str = "user_id") -> lis
 def users_isolation_statements() -> list[str]:
     """ENABLE + FORCE RLS + the `users`-table isolation policy.
 
-    `users` is special: it is keyed on ``id`` (not ``user_id``) and needs a
-    read-only bootstrap clause because auth resolves a member by email *before*
-    the user_id GUC exists. So a row is READABLE when its id matches the tenant
-    GUC OR its email matches the login-email GUC, but WRITES are fenced to the
-    tenant GUC only (``id = app.current_user_id``) — the email bootstrap must
-    never authorize a write. Cross-user reads/writes (admin, invitation stubs)
-    run under the BYPASSRLS ``companion_maintenance`` role.
+    `users` is special: it is keyed on ``id`` (not ``user_id``) and needs
+    read-only bootstrap clauses because auth resolves a member by email (Firebase)
+    or by stable OIDC subject (Authentik) *before* the user_id GUC exists. So a row
+    is READABLE when its id matches the tenant GUC OR its email matches the
+    login-email GUC OR its external_subject_id matches the login-subject GUC, but
+    WRITES are fenced to the tenant GUC only (``id = app.current_user_id``) — the
+    bootstrap clauses must never authorize a write. Cross-user reads/writes (admin,
+    invitation stubs) run under the BYPASSRLS ``companion_maintenance`` role.
     """
     return [
         "ALTER TABLE users ENABLE ROW LEVEL SECURITY",
         "ALTER TABLE users FORCE ROW LEVEL SECURITY",
         "CREATE POLICY users_isolation ON users "
-        f"USING (id = {_USER_GUC} OR email = {_LOGIN_EMAIL_GUC}) "
+        f"USING (id = {_USER_GUC} OR email = {_LOGIN_EMAIL_GUC} "
+        f"OR external_subject_id = {_LOGIN_SUBJECT_GUC}) "
         f"WITH CHECK (id = {_USER_GUC})",
     ]
 
