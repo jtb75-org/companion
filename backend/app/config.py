@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     # handlers instead of attempting a doomed Pub/Sub publish (which 404s and
     # stalls the caller ~3s per event). Set true only to use Pub/Sub/emulator.
     pubsub_enabled: bool = False
+    # Pipeline-stage observability events were written to GCP Firestore, also
+    # retired in the migration (the DB `documents.status` + admin pipeline-health
+    # endpoint cover status now). When disabled, publish_pipeline_event is a no-op
+    # instead of failing every stage write and logging a warning per stage.
+    firestore_pipeline_events: bool = False
 
     # Field-level encryption — local AES-256-GCM key (base64 of 32 bytes:
     # `openssl rand -base64 32`), delivered via SealedSecret. Required
