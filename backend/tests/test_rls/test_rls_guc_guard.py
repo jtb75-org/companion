@@ -8,10 +8,14 @@ a warning is emitted. Covers the users email-bootstrap asymmetry.
 from __future__ import annotations
 
 import logging
+import os
+import uuid
 
 import pytest
 
 from app.db import rls_guard
+
+_DB_URL = os.environ.get("COMPANION_DATABASE_URL", "")
 
 
 class _FakeConn:
@@ -129,3 +133,46 @@ def test_dedupe_warns_once_per_callsite(caplog):
     assert _warned(caplog, conn, "SELECT id FROM bills WHERE user_id = $1")
     # Same callsite+tables → suppressed on the second identical statement.
     assert not _warned(caplog, conn, "SELECT id FROM bills WHERE user_id = $1")
+
+
+class _SettingsStub:
+    rls_guc_guard = "on"
+    environment = "test"
+
+
+async def test_commit_clears_shadow_state_end_to_end(caplog):
+    """DB-backed: prove the whole listener + event wiring works — the tenant GUC
+    is honored for queries in-transaction, and the `commit` event clears the
+    shadow state so a post-commit tenant query (GUC now gone) warns. This is the
+    guard's core invariant (niru). Skips without a reachable Postgres."""
+    if not _DB_URL:
+        pytest.skip("no reachable Postgres for the end-to-end guard test")
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(_DB_URL)
+    try:
+        assert rls_guard.install_rls_guc_guard(engine, _SettingsStub())
+        rls_guard._seen_warnings.clear()
+
+        async with engine.connect() as conn:
+            # Set the tenant GUC, then a tenant-table query must NOT warn.
+            await conn.execute(
+                text("SELECT set_config('app.current_user_id', :v, true)"),
+                {"v": str(uuid.uuid4())},
+            )
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="app.db.rls_guard"):
+                await conn.execute(text("SELECT count(*) FROM todos"))
+            assert not any("RLS unset-GUC" in r.message for r in caplog.records)
+
+            # Commit clears the transaction-local GUC; the guard's commit handler
+            # must clear its shadow state, so the next tenant query WARNS.
+            await conn.commit()
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="app.db.rls_guard"):
+                await conn.execute(text("SELECT count(*) FROM todos"))
+            assert any("RLS unset-GUC" in r.message for r in caplog.records)
+    finally:
+        await engine.dispose()
