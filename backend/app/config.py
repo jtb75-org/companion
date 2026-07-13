@@ -103,8 +103,12 @@ class Settings(BaseSettings):
     authentik_internal_url: str = "http://companion-authentik-server.companion-authentik.svc"
     # The Authentik authentication flow slug the executor drives.
     authentik_auth_flow_slug: str = "companion-authentication-flow"
-    # OIDC client (application/provider) credentials.
-    authentik_oidc_client_id: str = ""
+    # OIDC client (application/provider) credentials. The client_id is a PUBLIC
+    # client identifier (not a secret): it is the ``aud`` the OIDCVerifier checks,
+    # so it must be present for the Authentik path to verify tokens. Defaults to
+    # the real companion-authentik provider client_id; override via env if the
+    # provider is re-created. The client_secret stays env/SealedSecret-driven.
+    authentik_oidc_client_id: str = "Jc9eGA2hKkQatYjpDfr0Q0zt9k3RrUHGNYxrukut"
     authentik_oidc_client_secret: str = ""  # noqa: S105
     # Public issuer + JWKS (for the future browser bearer path, verified with
     # require_issuer=True). BFF-fetched in-cluster id_tokens are verified with
@@ -186,6 +190,19 @@ class Settings(BaseSettings):
     def authentik_enabled(self) -> bool:
         """True only when the master switch selects Authentik. Gates the additive
         BFF /auth endpoints; DEFAULT False keeps Firebase the sole live auth."""
+        return self.auth_provider == "authentik"
+
+    @property
+    def authentik_login_enabled(self) -> bool:
+        """DUAL-RUN switch for request-time auth resolution.
+
+        When True (auth_provider == "authentik"), the auth dependencies ACCEPT a
+        BFF Authentik session cookie (preferred when present) AND still accept a
+        Firebase bearer as a fallback, so no client is locked out mid-migration.
+        When False (DEFAULT "firebase"), the Authentik resolution branch is inert
+        — behavior is byte-identical to the pre-dual-run Firebase-only path. There
+        is deliberately NO mode that rejects Firebase; Firebase retirement is a
+        later PR."""
         return self.auth_provider == "authentik"
 
     @property
