@@ -4,6 +4,8 @@ import asyncio
 import logging
 from datetime import datetime
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 _firestore_available: bool | None = None
@@ -41,6 +43,12 @@ async def publish_pipeline_event(
 
     Fails fast (2s timeout) to avoid blocking the pipeline.
     """
+    # Firestore was retired in the self-hosted migration; skip entirely when
+    # disabled (default) so the pipeline doesn't attempt a doomed write and log
+    # a warning per stage. Document status lives in the DB now.
+    if not settings.firestore_pipeline_events:
+        return
+
     doc_id = str(document_id)
 
     try:
