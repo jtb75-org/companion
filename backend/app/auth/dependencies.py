@@ -194,13 +194,15 @@ async def get_current_caregiver(
         raise HTTPException(status_code=401, detail="Trusted contact not found")
     if not contact.is_active:
         raise HTTPException(status_code=403, detail="Trusted contact is not active")
-    # Defense in depth: when the verified token carries an email claim (caregivers
-    # are email-invited, so it always does in practice), bind the contact row to
-    # it — a stale/mismatched contact_id claim (relationship revoked and the id
-    # re-pointed to another member) then can't authorize. Enforced only when the
-    # claim is present so a hypothetical email-less token isn't newly broken.
+    # Defense in depth: bind the contact row to the verified Firebase email.
+    # Caregivers are email-invited so their tokens always carry an email claim;
+    # require it (like get_current_user) and fail closed on a malformed token, and
+    # reject a stale/mismatched contact_id claim (relationship revoked and the id
+    # re-pointed to another member) that no longer matches the caller's identity.
     claim_email = (decoded.get("email") or "").lower()
-    if claim_email and (contact.contact_email or "").lower() != claim_email:
+    if not claim_email:
+        raise HTTPException(status_code=401, detail="Caregiver token missing email claim")
+    if (contact.contact_email or "").lower() != claim_email:
         raise HTTPException(status_code=403, detail="Caregiver identity mismatch")
 
     # Caregiver = member-id-as-context: authz happened above (the contact row);
