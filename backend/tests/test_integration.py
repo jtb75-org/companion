@@ -297,6 +297,61 @@ class TestDocumentPipeline:
         assert body.get("duplicate") is True
         assert body.get("document_id") == seeded_id
 
+    @requires_db
+    async def test_deleting_document_removes_its_pending_review(
+        self, client: AsyncClient
+    ):
+        """Removing a document ('Remove this one' on a duplicate) also clears its
+        pending review, so the card actually leaves the queue."""
+        from sqlalchemy import select
+
+        from app.db.session import async_session_factory
+        from app.models.document import Document
+        from app.models.enums import (
+            DocumentStatus,
+            RecommendedAction,
+            ReviewStatus,
+            SourceChannel,
+        )
+        from app.models.pending_review import PendingReview
+        from app.models.user import User
+
+        async with async_session_factory() as s:
+            uid = (await s.execute(select(User.id).limit(1))).scalar_one()
+            doc = Document(
+                user_id=uid,
+                source_channel=SourceChannel.CAMERA_SCAN,
+                status=DocumentStatus.SUMMARIZED,
+                raw_text_ref="seed",
+            )
+            s.add(doc)
+            await s.flush()
+            review = PendingReview(
+                user_id=uid,
+                document_id=doc.id,
+                review_status=ReviewStatus.PENDING,
+                recommended_action=RecommendedAction.FILE_ONLY,
+                proposed_record_data="{}",
+            )
+            s.add(review)
+            await s.commit()
+            doc_id, review_id = str(doc.id), str(review.id)
+
+        r = await client.delete(f"/api/v1/documents/{doc_id}")
+        assert r.status_code in (200, 204)
+
+        async with async_session_factory() as s:
+            doc_gone = (
+                await s.execute(select(Document).where(Document.id == doc_id))
+            ).scalar_one_or_none()
+            review_gone = (
+                await s.execute(
+                    select(PendingReview).where(PendingReview.id == review_id)
+                )
+            ).scalar_one_or_none()
+        assert doc_gone is None
+        assert review_gone is None  # the review left the queue with the doc
+
 
 # ---------------------------------------------------------------------------
 # Notifications & morning check-in
