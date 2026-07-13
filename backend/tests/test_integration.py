@@ -11,6 +11,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from tests.conftest import requires_db
 
 
 @pytest.fixture(scope="session")
@@ -256,6 +257,45 @@ class TestDocumentPipeline:
         data = r.json()
         assert "documents" in data
         assert "total" in data
+
+    @requires_db
+    async def test_scan_deduplicates_identical_upload(self, client: AsyncClient):
+        """Re-uploading the identical file returns the existing document with
+        duplicate=true instead of creating a second copy (the double-tap case)."""
+        import hashlib
+
+        from sqlalchemy import select
+
+        from app.db.session import async_session_factory
+        from app.models.document import Document
+        from app.models.enums import DocumentStatus, SourceChannel
+        from app.models.user import User
+
+        fake = b"\xff\xd8\xff\xe0" + b"DEDUPE-PROBE" * 40
+        fp = hashlib.sha256(fake).hexdigest()
+
+        async with async_session_factory() as s:
+            uid = (await s.execute(select(User.id).limit(1))).scalar_one()
+            doc = Document(
+                user_id=uid,
+                source_channel=SourceChannel.CAMERA_SCAN,
+                status=DocumentStatus.RECEIVED,
+                raw_text_ref="seed",
+                content_fingerprint=fp,
+                page_count=1,
+            )
+            s.add(doc)
+            await s.commit()
+            seeded_id = str(doc.id)
+
+        r = await client.post(
+            "/api/v1/documents/scan",
+            files={"file": ("dup.jpg", fake, "image/jpeg")},
+        )
+        assert r.status_code in (200, 201)
+        body = r.json()
+        assert body.get("duplicate") is True
+        assert body.get("document_id") == seeded_id
 
 
 # ---------------------------------------------------------------------------
