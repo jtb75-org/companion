@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import app.events  # noqa: F401
 from app.api.admin import router as admin_router
 from app.api.admin.seed_admin import router as seed_admin_router
+from app.api.auth_authentik import router as authentik_auth_router
 from app.api.caregiver import router as caregiver_router
 from app.api.internal import router as internal_router
 from app.api.pipeline import router as pipeline_router
@@ -95,6 +96,10 @@ app.include_router(pipeline_router)
 app.include_router(admin_router)
 app.include_router(internal_router)
 app.include_router(auth_router)
+# Additive BFF native-login surface (Firebase→Authentik migration, PR #2).
+# The endpoints self-gate on settings.authentik_enabled (DEFAULT False → 404),
+# so including the router here is inert until the master auth_provider flag flips.
+app.include_router(authentik_auth_router)
 app.include_router(seed_admin_router)
 if settings.dev_auth_bypass:
     logger.warning(

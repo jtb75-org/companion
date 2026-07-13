@@ -24,6 +24,8 @@ dependencies = [
 
     # Auth
     "firebase-admin>=6.5.0",
+    # OIDC id_token verification for the Authentik BFF path (RS256 via cryptography)
+    "pyjwt[crypto]>=2.8.0",
 
     # Object storage (S3-compatible MinIO; replaces GCS)
     "boto3>=1.35.0",
@@ -72,6 +74,9 @@ extend-exclude = ["alembic/versions"]
 [tool.ruff.lint.per-file-ignores]
 "app/conversation/persona.py" = ["E501"]  # Prompt templates have natural long lines
 "app/integrations/email_service.py" = ["E501"]  # HTML email templates have natural long lines
+# Ported verbatim from HealthCostClarity to stay re-syncable; keep the upstream
+# exception names (AuthenticationFailed / MfaRequired) instead of an Error suffix.
+"app/auth/authentik_flow.py" = ["N818"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B"]

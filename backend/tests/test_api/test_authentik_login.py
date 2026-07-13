@@ -1,0 +1,159 @@
+"""BFF /auth/login endpoint: flag-gating + Companion's invite-only refusal.
+
+Authentik and Redis are mocked — we never reach a live IdP or Redis. The flag
+default (auth_provider="firebase") must make the endpoint 404/inert; the DB-backed
+tests flip the flag and assert the invite-only gate mirrors complete_profile.
+"""
+
+from __future__ import annotations
+
+import app.auth.ratelimit as ratelimit_module
+import app.auth.session as session_module
+from app.auth.oidc import VerifiedToken
+from app.auth.ratelimit import InMemoryRateLimiter
+from app.auth.session import InMemorySessionStore
+
+_LOGIN = "/auth/login"
+
+
+def _client():
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+# ── flag-gating: no DB / Redis needed (the gate fires before anything else) ──
+
+async def test_login_404_when_authentik_disabled():
+    """DEFAULT auth_provider=firebase → the BFF surface does not exist (404)."""
+    from app.config import settings
+
+    assert settings.auth_provider == "firebase"  # sanity: default keeps Firebase live
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": "a@b.com", "password": "x"})
+    assert r.status_code == 404
+
+
+async def test_logout_404_when_authentik_disabled():
+    async with _client() as ac:
+        r = await ac.post("/auth/logout")
+    assert r.status_code == 404
+
+
+# ── invite-only + success: DB-backed, IdP + Redis mocked ──
+
+from sqlalchemy import delete, select  # noqa: E402
+
+from app.db import session as db_module  # noqa: E402
+from app.models.audit import AccountAuditLog  # noqa: E402
+from app.models.enums import AccountStatus  # noqa: E402
+from app.models.user import User  # noqa: E402
+from tests.conftest import requires_db  # noqa: E402
+
+
+def _enable_authentik_with_mocks(monkeypatch, *, sub: str, email: str):
+    """Flip the flag on and stub the IdP flow + verifier + Redis-backed stores."""
+    monkeypatch.setattr("app.api.auth_authentik.settings.auth_provider", "authentik")
+
+    class _FakeAuthenticator:
+        async def authenticate(self, username, password):  # noqa: ARG002
+            from app.auth.authentik_flow import TokenResult
+
+            return TokenResult(id_token="fake-id-token", access_token=None)
+
+    class _FakeVerifier:
+        def verify(self, token, *, require_issuer=True):  # noqa: ARG002
+            return VerifiedToken(sub=sub, email=email, name="T", claims={})
+
+    monkeypatch.setattr("app.api.auth_authentik._authenticator", lambda: _FakeAuthenticator())
+    monkeypatch.setattr(
+        "app.api.auth_authentik.get_authentik_verifier", lambda: _FakeVerifier()
+    )
+    # In-memory doubles so no live Redis is required.
+    limiter = InMemoryRateLimiter()
+    store = InMemorySessionStore()
+    monkeypatch.setattr(ratelimit_module, "_limiter", limiter)
+    monkeypatch.setattr(session_module, "_store", store)
+    return limiter, store
+
+
+async def _delete_user(email: str):
+    async with db_module.async_session_factory() as s:
+        await s.execute(delete(User).where(User.email == email))
+        await s.execute(delete(AccountAuditLog).where(AccountAuditLog.email == email))
+        await s.commit()
+
+
+@requires_db
+async def test_login_refuses_uninvited_email(monkeypatch):
+    email = "authentik-uninvited@example.com"
+    await _delete_user(email)
+    _enable_authentik_with_mocks(monkeypatch, sub="sub-uninvited", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 403
+    # No account was auto-provisioned.
+    async with db_module.async_session_factory() as s:
+        assert (
+            await s.execute(select(User).where(User.email == email))
+        ).scalar_one_or_none() is None
+        events = (
+            await s.execute(select(AccountAuditLog).where(AccountAuditLog.email == email))
+        ).scalars().all()
+    assert "signup_refused" in [e.event for e in events]
+    await _delete_user(email)
+
+
+@requires_db
+async def test_login_succeeds_for_invited_stub(monkeypatch):
+    email = "authentik-invited@example.com"
+    await _delete_user(email)
+    async with db_module.async_session_factory() as s:
+        s.add(
+            User(
+                email=email,
+                preferred_name="Inv",
+                display_name="Inv",
+                account_status=AccountStatus.INVITED,
+            )
+        )
+        await s.commit()
+    _, store = _enable_authentik_with_mocks(monkeypatch, sub="sub-invited", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+    # Session + CSRF cookies set.
+    cookie_names = {c for c in r.cookies}
+    assert "companion_sid" in cookie_names
+    assert "companion_csrf" in cookie_names
+    # The session maps to the opaque Authentik subject (no email/PII stored).
+    sid = r.cookies["companion_sid"]
+    assert await store.get(sid) == "sub-invited"
+    await _delete_user(email)
+
+
+@requires_db
+async def test_login_refuses_deactivated_account(monkeypatch):
+    email = "authentik-deactivated@example.com"
+    await _delete_user(email)
+    async with db_module.async_session_factory() as s:
+        s.add(
+            User(
+                email=email,
+                preferred_name="D",
+                display_name="D",
+                account_status=AccountStatus.DEACTIVATED,
+            )
+        )
+        await s.commit()
+    _enable_authentik_with_mocks(monkeypatch, sub="sub-deact", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 403
+    await _delete_user(email)
