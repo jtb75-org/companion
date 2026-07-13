@@ -117,5 +117,12 @@ class Settings(BaseSettings):
     debug: bool = False
     api_v1_prefix: str = "/api/v1"
 
+    # RLS unset-GUC guard (WS1 Phase 2f-ii): warn-only observability that flags a
+    # query hitting an RLS tenant table on the app connection with no
+    # app.current_user_id set (which fails closed to 0 rows silently — a latent
+    # "member sees nothing" bug). "auto" = on when environment != prod. "on"/"off"
+    # force it. Never raises; it is diagnostics, not the security control (RLS is).
+    rls_guc_guard: str = "auto"  # auto | on | off
+
 
 settings = Settings()

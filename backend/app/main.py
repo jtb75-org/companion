@@ -34,6 +34,18 @@ async def lifespan(app: FastAPI):
             "This exposes all endpoints without authentication. "
             "Set COMPANION_DEV_AUTH_BYPASS=false and redeploy."
         )
+    # Startup: require the maintenance (BYPASSRLS) DB URL in production. Every
+    # per-member table is under FORCE RLS, so admin/cross-member/bootstrap paths
+    # depend on the companion_maintenance connection. If it is unset,
+    # get_maintenance_db / maintenance_session() silently fall back to the
+    # fail-closed companion_app session — admin reads return 0 rows and caregiver
+    # auth / invitation flows break with no error. Fail loud on boot instead.
+    if settings.environment == "prod" and not settings.maintenance_database_url:
+        raise RuntimeError(
+            "FATAL: COMPANION_MAINTENANCE_DATABASE_URL is not set in production. "
+            "Under per-user RLS, cross-member/admin/bootstrap access silently "
+            "degrades to the fail-closed app connection. Set it and redeploy."
+        )
     yield
     # Shutdown
     await engine.dispose()

@@ -22,6 +22,14 @@ class _FakeResult:
         return self._obj
 
 
+class _FakeNested:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
 class _FakeDB:
     def __init__(self, existing=None):
         self.executed: list[str] = []
@@ -34,6 +42,9 @@ class _FakeDB:
 
     def add(self, obj):
         self.added.append(obj)
+
+    def begin_nested(self):
+        return _FakeNested()
 
     async def flush(self):
         pass

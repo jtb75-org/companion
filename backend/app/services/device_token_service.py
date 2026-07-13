@@ -4,10 +4,18 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import maintenance_session
 from app.models.device_token import DeviceToken
+
+
+def _refresh_token(token: DeviceToken, platform, device_name, now) -> None:
+    token.device_platform = platform
+    token.device_name = device_name
+    token.is_active = True
+    token.last_used_at = now
 
 
 async def _release_token_other_user(fcm_token: str, user_id: UUID) -> int:
@@ -56,10 +64,7 @@ async def register_token(
     )
     existing = result.scalar_one_or_none()
     if existing:
-        existing.device_platform = platform
-        existing.device_name = device_name
-        existing.is_active = True
-        existing.last_used_at = now
+        _refresh_token(existing, platform, device_name, now)
         await db.flush()
         return existing
 
@@ -67,19 +72,43 @@ async def register_token(
     # cross-tenant, then create our own row. Without the release, the INSERT
     # below would hit the unique constraint (the other row is invisible to a
     # member session under RLS).
-    await _release_token_other_user(fcm_token, user_id)
-
-    token = DeviceToken(
-        user_id=user_id,
-        fcm_token=fcm_token,
-        device_platform=platform,
-        device_name=device_name,
-        is_active=True,
-        last_used_at=now,
-    )
-    db.add(token)
-    await db.flush()
-    return token
+    #
+    # The release (a committed maintenance txn) and our insert are two steps, so
+    # a concurrent register for the same token can re-claim it in between and our
+    # flush hits the unique constraint. Retry once inside a SAVEPOINT so the
+    # IntegrityError doesn't poison the request transaction; on the retry the
+    # token may now belong to THIS user (a concurrent register for us committed),
+    # in which case refresh it instead of inserting.
+    last_exc: IntegrityError | None = None
+    for _ in range(2):
+        await _release_token_other_user(fcm_token, user_id)
+        try:
+            async with db.begin_nested():
+                token = DeviceToken(
+                    user_id=user_id,
+                    fcm_token=fcm_token,
+                    device_platform=platform,
+                    device_name=device_name,
+                    is_active=True,
+                    last_used_at=now,
+                )
+                db.add(token)
+                await db.flush()
+            return token
+        except IntegrityError as exc:
+            last_exc = exc
+            result = await db.execute(
+                select(DeviceToken).where(
+                    DeviceToken.user_id == user_id,
+                    DeviceToken.fcm_token == fcm_token,
+                )
+            )
+            existing = result.scalar_one_or_none()
+            if existing:
+                _refresh_token(existing, platform, device_name, now)
+                await db.flush()
+                return existing
+    raise last_exc
 
 
 async def deactivate_token(
