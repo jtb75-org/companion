@@ -19,6 +19,30 @@ async_session_factory = async_sessionmaker(
     expire_on_commit=False,
 )
 
+# Attach the RLS unset-GUC guard to the APP engine only (warn-only diagnostics;
+# no-op when disabled by config). The maintenance engine is intentionally not
+# guarded — its whole job is cross-member/no-GUC access.
+from app.db.rls_guard import install_rls_guc_guard  # noqa: E402
+
+install_rls_guc_guard(engine, settings)
+
+# Fallback maintenance factory for dev/test (maintenance URL unset): the normal
+# app engine, but with the guard suppressed since these sessions legitimately run
+# cross-member/no-GUC queries. In prod the maintenance URL is set (validated at
+# startup) so this fallback is not used.
+_maintenance_fallback_factory: async_sessionmaker[AsyncSession] | None = None
+
+
+def _get_maintenance_fallback_factory() -> async_sessionmaker[AsyncSession]:
+    global _maintenance_fallback_factory
+    if _maintenance_fallback_factory is None:
+        _maintenance_fallback_factory = async_sessionmaker(
+            engine.execution_options(skip_rls_guc_guard=True),
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+    return _maintenance_fallback_factory
+
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_factory() as session:
@@ -76,7 +100,7 @@ async def get_maintenance_db() -> AsyncGenerator[AsyncSession, None]:
     factory = (
         get_maintenance_session_factory()
         if settings.maintenance_database_url
-        else async_session_factory
+        else _get_maintenance_fallback_factory()
     )
     async with factory() as session:
         try:
@@ -102,7 +126,7 @@ async def maintenance_session() -> AsyncIterator[AsyncSession]:
     factory = (
         get_maintenance_session_factory()
         if settings.maintenance_database_url
-        else async_session_factory
+        else _get_maintenance_fallback_factory()
     )
     async with factory() as session:
         yield session
