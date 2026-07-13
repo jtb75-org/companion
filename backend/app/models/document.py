@@ -60,6 +60,15 @@ class Document(Base):
     # upload (a member re-submitting the same file — the "I thought it glitched"
     # double-tap). Not a secret (one-way hash); scoped per-user by RLS.
     content_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set by the pipeline (fuzzy tier) when this document's extracted fields
+    # closely match an EARLIER document of the same member — a likely
+    # re-photograph of the same document. NON-destructive: only a hint so the app
+    # can ask the member; never auto-merged (a different bill from the same biller
+    # looks similar). Points at the earlier document's id.
+    possible_duplicate_of: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     retention_phase: Mapped[RetentionPhase] = mapped_column(
         nullable=False, default=RetentionPhase.FULL
     )

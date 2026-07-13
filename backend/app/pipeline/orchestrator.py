@@ -121,6 +121,21 @@ async def process_document(
         doc.extracted_fields = await encrypt_json_for_user(
             db, user_id, extraction_result.extracted_fields
         )
+        # Fuzzy near-duplicate hint: compare this doc's (plaintext) extracted
+        # fields against the member's earlier same-class docs. Non-destructive —
+        # just a hint for the app to ask the member. Best-effort; never fails the
+        # pipeline.
+        try:
+            from app.pipeline.dedup import find_near_duplicate
+            doc.possible_duplicate_of = await find_near_duplicate(
+                db, user_id, document_id,
+                doc.classification, extraction_result.extracted_fields,
+            )
+        except Exception:
+            logger.warning(
+                "Near-duplicate check failed for doc %s", document_id,
+                exc_info=True,
+            )
         await db.flush()
         await _record_metric(db, document_id, "extraction", "completed", stage_start, {
             "missing_fields": extraction_result.missing_fields,

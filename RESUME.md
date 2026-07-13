@@ -117,6 +117,12 @@ processor, since deleted — 0 remain.)
    `tls_disable=1`); **vault the encryption keys** off-cluster
    (`~/companion-key-backup/` → 1Password, then shred).
 3. Recalibrate OCR confidence tiers now that PaddleOCR is primary.
+4. **`documents.content_fingerprint` → per-user keyed HMAC** (safety-reviewer
+   follow-up, #68). It's currently an unsalted SHA-256 of the document bytes for
+   exact-dup detection; a privileged DB/maintenance-role breach could correlate
+   which members hold the identical document and run a known-document guess
+   attack. Switch to HMAC-SHA-256 under the member's DEK before real-PHI
+   onboarding (preserves per-user exact dedup, removes cross-member linkage).
 
 Done: `source_metadata.ocr_text` is encrypted in `process_camera_scan`
 (`encrypt_for_user` in `backend/app/pipeline/ingestion.py`).

@@ -36,6 +36,18 @@ async def _serialize_document(db: AsyncSession, doc) -> dict:
     """
     from app.services.field_crypto import decrypt_row_field
 
+    # Fuzzy near-duplicate hint: if the pipeline flagged this doc as a likely
+    # re-photograph of an earlier one, surface the earlier doc's id + date so the
+    # app can ask ("this looks like your document from <date> — same one?").
+    possible_duplicate = None
+    if doc.possible_duplicate_of:
+        earlier = await db.get(Document, doc.possible_duplicate_of)
+        if earlier is not None:
+            possible_duplicate = {
+                "id": earlier.id,
+                "received_at": earlier.received_at,
+            }
+
     return {
         "id": doc.id,
         "source_channel": doc.source_channel,
@@ -51,6 +63,8 @@ async def _serialize_document(db: AsyncSession, doc) -> dict:
         "received_at": doc.received_at,
         "processed_at": doc.processed_at,
         "acknowledged_at": doc.acknowledged_at,
+        "possible_duplicate_of": doc.possible_duplicate_of,
+        "possible_duplicate": possible_duplicate,
     }
 
 ALLOWED_SCAN_TYPES = {
