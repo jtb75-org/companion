@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.db.session import maintenance_session
 from app.models.audit import DeletionAuditLog
@@ -300,7 +301,13 @@ async def execute_deletion(db: AsyncSession, user_id: UUID) -> dict:
     firebase_deleted = delete_firebase_user(user.email)
     audit_details["firebase_auth_deleted"] = firebase_deleted
 
-    # 10. Delete user row (CASCADE handles member's own data)
+    # audit_details was mutated in-place AFTER db.add(audit) and after the admin lookup
+    # above triggered an autoflush that serialized a PARTIAL dict. Plain-dict mutations to
+    # a JSONB column aren't change-tracked (no MutableDict), so flag it dirty to persist
+    # the complete details (incl. firebase_auth_deleted / admin_record_deleted) on flush.
+    flag_modified(audit, "details")
+
+    # 11. Delete user row (CASCADE handles member's own data)
     await db.delete(user)
     await db.flush()
 
