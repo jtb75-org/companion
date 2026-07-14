@@ -50,7 +50,7 @@ from app.db.context import (
     set_login_subject_context,
     set_user_context,
 )
-from app.db.session import maintenance_session
+from app.db.session import async_session_factory, maintenance_session
 from app.models.admin_user import AdminUser
 from app.models.audit import AccountAuditLog
 from app.models.trusted_contact import TrustedContact
@@ -143,6 +143,44 @@ async def _mint_session(response: Response, *, subject: str, mobile: bool) -> di
     return result
 
 
+async def _audit_login_event(
+    event: str,
+    email: str,
+    *,
+    user_id=None,
+    details: dict | None = None,
+    best_effort: bool = False,
+) -> None:
+    """Durably record a BFF auth event to account_audit_log in its OWN transaction.
+
+    A dedicated session so the record survives a request/maintenance-session ROLLBACK —
+    in particular a subject-mismatch/refusal 403, where we must keep the record even
+    though the login transaction unwinds (same rationale as the signup_refused commit).
+    ``account_audit_log`` is not RLS-fenced. No PII beyond the invited email; ``details``
+    is structured metadata only (e.g. the role).
+
+    ``best_effort`` (SUCCESS audits only): the session is already minted + delivered by
+    the time we audit a success, so an audit-DB hiccup must NOT turn a valid login into a
+    500 — log and continue. Refusal/mismatch audits keep best_effort=False so no login is
+    refused without a durable record."""
+    try:
+        async with async_session_factory() as adb:
+            adb.add(
+                AccountAuditLog(
+                    event=event, email=email, user_id=user_id, details=details
+                )
+            )
+            await adb.commit()
+    except Exception:
+        if not best_effort:
+            raise
+        log.error(
+            "failed to write %s login audit (best-effort, login still delivered)",
+            event,
+            exc_info=True,
+        )
+
+
 async def _try_caregiver_login(
     email: str, subject: str, response: Response, *, mobile: bool
 ) -> dict | None:
@@ -184,6 +222,9 @@ async def _try_caregiver_login(
                     "token sub != stored subject",
                     contact.id,
                 )
+                await _audit_login_event(
+                    "bff_login_subject_mismatch", email, details={"role": "caregiver"}
+                )
                 raise HTTPException(
                     status.HTTP_403_FORBIDDEN, "Account identity mismatch"
                 )
@@ -213,6 +254,11 @@ async def _try_admin_login(
             return None
         if not admin.is_active:
             # Parity with get_current_admin: an inactive admin is refused, not admitted.
+            await _audit_login_event(
+                "bff_login_refused",
+                email,
+                details={"role": "admin", "reason": "inactive_account"},
+            )
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN, "Admin account is not active"
             )
@@ -226,6 +272,9 @@ async def _try_admin_login(
                 "BFF admin login subject mismatch for admin %s: "
                 "token sub != stored subject",
                 admin.id,
+            )
+            await _audit_login_event(
+                "bff_login_subject_mismatch", email, details={"role": "admin"}
             )
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Account identity mismatch")
         await mdb.commit()
@@ -314,6 +363,10 @@ async def login(
     # it is verified — otherwise an account with an attacker-chosen unverified email
     # could be pointed at another member's invite. Refuse an unverified email outright.
     if not verified.email_verified:
+        # Role is unknown at this point (before member/caregiver/admin resolution).
+        await _audit_login_event(
+            "bff_login_refused", email, details={"reason": "email_unverified"}
+        )
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "email address is not verified with the identity provider"
         )
@@ -346,6 +399,12 @@ async def login(
             )
             if caregiver_login is not None:
                 await limiter.reset(user_bucket)  # clear the throttle on success
+                await _audit_login_event(
+                    "bff_login_success",
+                    email,
+                    details={"role": "caregiver"},
+                    best_effort=True,
+                )
                 return caregiver_login
             # Not a member or caregiver. Admit an active ADMIN (admin_users email).
             admin_login = await _try_admin_login(
@@ -353,6 +412,12 @@ async def login(
             )
             if admin_login is not None:
                 await limiter.reset(user_bucket)  # clear the throttle on success
+                await _audit_login_event(
+                    "bff_login_success",
+                    email,
+                    details={"role": "admin"},
+                    best_effort=True,
+                )
                 return admin_login
             # No member, caregiver, OR admin => never invited. Refuse; do NOT
             # auto-provision. Audit on its own commit so it survives the 403's
@@ -364,6 +429,13 @@ async def login(
             )
 
     if user.account_status in _INACTIVE_STATUSES:
+        # Valid IdP creds against a DISABLED member account — a security-relevant signal.
+        await _audit_login_event(
+            "bff_login_refused",
+            email,
+            user_id=user.id,
+            details={"role": "member", "reason": "inactive_account"},
+        )
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is deactivated")
 
     # Lazy backfill: bind this member's row to the stable subject on first Authentik
@@ -384,6 +456,9 @@ async def login(
             "BFF login subject mismatch for user %s: token sub != stored subject",
             user.id,
         )
+        await _audit_login_event(
+            "bff_login_subject_mismatch", email, user_id=user.id, details={"role": "member"}
+        )
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account identity mismatch")
 
     await limiter.reset(user_bucket)  # clear the throttle on a successful login
@@ -392,7 +467,18 @@ async def login(
     # get the session via the httpOnly cookie alone; a mobile client (body.mobile)
     # also receives the opaque sid in the body (Keychain → Authorization: Bearer,
     # non-ambient → no CSRF; see app/auth/principal.resolve_session_subject).
-    return await _mint_session(response, subject=sub, mobile=body.mobile)
+    result = await _mint_session(response, subject=sub, mobile=body.mobile)
+    # Audit AFTER the session is minted + delivered, best-effort (niru + safety): all
+    # cohorts audit success post-mint for consistent "session delivered" semantics, and
+    # a rare audit-DB error must not 500 an already-valid login.
+    await _audit_login_event(
+        "bff_login_success",
+        email,
+        user_id=user.id,
+        details={"role": "member"},
+        best_effort=True,
+    )
+    return result
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
