@@ -48,6 +48,7 @@ from sqlalchemy import delete, select  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.db import session as db_module  # noqa: E402
+from app.db.context import set_user_context  # noqa: E402
 from app.models.admin_user import AdminUser  # noqa: E402
 from app.models.audit import AccountAuditLog, CaregiverActivityLog  # noqa: E402
 from app.models.enums import (  # noqa: E402
@@ -698,7 +699,10 @@ async def test_caregiver_dashboard_view_is_logged(monkeypatch):
             cookies={settings.session_cookie_name: sid},
         )
     assert r.status_code == 200
+    # caregiver_activity_log is under per-member RLS (028): read under the member's
+    # tenant context so the USING policy admits the row (CI enforces RLS; local may not).
     async with db_module.async_session_factory() as s:
+        await set_user_context(s, member_id)
         logs = (
             await s.execute(
                 select(CaregiverActivityLog).where(
