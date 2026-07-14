@@ -46,6 +46,7 @@ async def test_logout_404_when_authentik_disabled():
 
 from sqlalchemy import delete, select  # noqa: E402
 
+from app.config import settings  # noqa: E402
 from app.db import session as db_module  # noqa: E402
 from app.models.audit import AccountAuditLog  # noqa: E402
 from app.models.enums import AccountStatus  # noqa: E402
@@ -198,6 +199,36 @@ async def test_login_refuses_deactivated_account(monkeypatch):
         r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
     assert r.status_code == 403
     await _delete_user(email)
+
+
+async def test_logout_revokes_bearer_session(monkeypatch):
+    """Mobile logout: a bearer-only /auth/logout (no cookie jar) must delete the
+    server-side session, so a copied/stolen bearer sid cannot outlive logout
+    until its TTL (niru finding on the #74/#75 pair)."""
+    _, store = _enable_authentik_with_mocks(
+        monkeypatch, sub="sub-logout", email="logout@example.com"
+    )
+    sid = await store.create("sub-logout")
+    assert await store.get(sid) == "sub-logout"
+    async with _client() as ac:
+        r = await ac.post("/auth/logout", headers={"Authorization": f"Bearer {sid}"})
+    assert r.status_code == 204
+    # The session is gone from the store — the bearer is now dead server-side.
+    assert await store.get(sid) is None
+
+
+async def test_logout_revokes_cookie_session(monkeypatch):
+    """Web logout still revokes the cookie-borne session (regression guard)."""
+    _, store = _enable_authentik_with_mocks(
+        monkeypatch, sub="sub-cookie", email="cookie@example.com"
+    )
+    sid = await store.create("sub-cookie")
+    async with _client() as ac:
+        r = await ac.post(
+            "/auth/logout", cookies={settings.session_cookie_name: sid}
+        )
+    assert r.status_code == 204
+    assert await store.get(sid) is None
 
 
 @requires_db

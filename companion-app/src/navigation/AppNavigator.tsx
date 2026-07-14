@@ -7,8 +7,10 @@ import { ChatScreen } from '../screens/ChatScreen'
 import { MyStuffScreen } from '../screens/MyStuffScreen'
 import { ProfileScreen } from '../screens/ProfileScreen'
 import { LoginScreen } from '../auth/LoginScreen'
+import { AuthentikLoginScreen } from '../auth/AuthentikLoginScreen'
 import { OnboardingScreen } from '../auth/OnboardingScreen'
 import { useAuth } from '../auth/AuthProvider'
+import { AUTH_PROVIDER } from '../auth/authConfig'
 import { api } from '../api/client'
 import { usePushNotifications } from '../hooks/usePushNotifications'
 import { colors } from '../theme/colors'
@@ -30,12 +32,12 @@ function TabIcon({ label, focused }: { label: string; focused: boolean }) {
 }
 
 export function AppNavigator() {
-  const { user, loading } = useAuth()
+  const { user, isAuthenticated, loading } = useAuth()
   const [profileComplete, setProfileComplete] = useState<boolean | null>(null)
   usePushNotifications(profileComplete === true)
 
   useEffect(() => {
-    if (!user) {
+    if (!isAuthenticated) {
       setProfileComplete(null)
       return
     }
@@ -55,12 +57,15 @@ export function AppNavigator() {
       }
     }
     checkProfile()
-  }, [user])
+    // `user` is kept in deps so Firebase mode re-checks on every auth-state
+    // change exactly as before; `isAuthenticated` drives the Authentik path
+    // (where `user` is always null).
+  }, [isAuthenticated, user])
 
   if (loading) return null
 
-  if (!user) {
-    return <LoginScreen />
+  if (!isAuthenticated) {
+    return AUTH_PROVIDER === 'authentik' ? <AuthentikLoginScreen /> : <LoginScreen />
   }
 
   if (profileComplete === null) {
