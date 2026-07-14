@@ -45,6 +45,7 @@ from app.auth.session import get_session_store
 from app.config import settings
 from app.db.context import set_login_subject_context, set_user_context
 from app.db.session import maintenance_session
+from app.models.admin_user import AdminUser
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
 
@@ -171,49 +172,74 @@ async def resolve_session_principal(
     return SessionPrincipal(user=user, email=user.email, subject=subject)
 
 
+async def _email_for_subject(mdb: AsyncSession, subject: str) -> str | None:
+    """Recover the IdP-verified email bound to an Authentik ``subject``, from ANY role
+    table the subject was backfilled on.
+
+    A person may hold more than one role (e.g. an admin who is also a caregiver), but
+    ``/auth/login`` backfills ``external_subject_id`` only on the FIRST matching role's
+    table. So resolution must be role-agnostic: check ``users`` → active
+    ``trusted_contacts`` → ``admin_users`` by subject and return the first email found.
+    This returns ONLY an email — every caller still applies its own role check
+    (``caregiver_authorized_for_member`` / the ``admin_users`` + ``is_active`` lookup),
+    so this never grants a role by itself. The subject was bound only after
+    ``email_verified``, so the email is IdP-verified. Runs on the MAINTENANCE (BYPASSRLS)
+    session because ``trusted_contacts`` is under per-member RLS (030) and no member GUC
+    exists here; the reads are single-row and scoped to the caller's own subject."""
+    for stmt in (
+        select(User.email).where(User.external_subject_id == subject),
+        select(TrustedContact.contact_email)
+        .where(
+            TrustedContact.external_subject_id == subject,
+            TrustedContact.is_active.is_(True),
+        )
+        .limit(1),
+        select(AdminUser.email).where(AdminUser.external_subject_id == subject),
+    ):
+        email = (await mdb.execute(stmt)).scalar_one_or_none()
+        if email:
+            return email.strip().lower()
+    return None
+
+
 async def resolve_caregiver_session(request: Request) -> str | None:
     """Return the IdP-verified EMAIL for a caregiver's BFF session, else ``None``.
 
     The caregiver auth path (app/api/caregiver/*, /api/v1/auth/my-charges) is keyed on
     the verified email — ``trusted_contacts.contact_email`` — NOT a ``users`` row (a
-    pure caregiver has none). This is the caregiver counterpart to
-    ``resolve_session_principal``; it returns just the email so the existing
-    ``caregiver_authorized_for_member(email, user_id)`` gate is unchanged.
+    pure caregiver has none). Returns just the email so the existing
+    ``caregiver_authorized_for_member(email, user_id)`` gate is unchanged and remains
+    the real authorization; a non-caregiver email simply fails that gate.
 
-    ``None`` means "no Authentik caregiver session — fall back to the Firebase bearer
-    path". Returns ``None`` when the switch is off (inert; first line), there is no
-    session (``resolve_session_subject``), or the subject maps to neither a member nor
-    an active caregiver.
-
-    Resolution runs on the MAINTENANCE (BYPASSRLS) session because caregiver auth runs
-    before any member GUC exists and ``trusted_contacts`` is under per-member RLS (030),
-    so a normal app-role read would fail closed. We resolve the subject to an email via:
-      1) a ``users`` row by subject — a member who is ALSO a caregiver — else
-      2) an ACTIVE ``trusted_contacts`` row by subject — a pure caregiver.
-    The subject was bound at ``/auth/login`` only after ``email_verified``, so the
-    returned email is IdP-verified. CSRF on state-changing methods is already enforced
-    inside ``resolve_session_subject`` for cookie sessions."""
+    ``None`` (→ Firebase fallback) when the switch is off (inert; first line), there is
+    no session, or the subject maps to no known account. CSRF on state-changing methods
+    is enforced inside ``resolve_session_subject`` for cookie sessions."""
     if not settings.authentik_login_enabled:
         return None
     subject = await resolve_session_subject(request)
     if subject is None:
         return None
     async with maintenance_session() as mdb:
-        member_email = (
-            await mdb.execute(
-                select(User.email).where(User.external_subject_id == subject)
-            )
-        ).scalar_one_or_none()
-        if member_email:
-            return member_email.strip().lower()
-        caregiver_email = (
-            await mdb.execute(
-                select(TrustedContact.contact_email)
-                .where(
-                    TrustedContact.external_subject_id == subject,
-                    TrustedContact.is_active.is_(True),
-                )
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        return caregiver_email.strip().lower() if caregiver_email else None
+        return await _email_for_subject(mdb, subject)
+
+
+async def resolve_admin_session(request: Request) -> str | None:
+    """Return the IdP-verified EMAIL for an admin's BFF session, else ``None``.
+
+    The admin auth path (``get_current_admin``) keys on the verified email, then looks
+    up ``admin_users`` by it + checks ``is_active`` — that lookup stays the real
+    authorization, so a non-admin email resolved here simply gets 403. Admins may have
+    no ``users`` row (pure admin), which is why we recover the email from the subject.
+
+    ``None`` (→ Firebase fallback) when the switch is off (inert; first line), there is
+    no session, or the subject maps to no known account. Role-agnostic resolution (see
+    ``_email_for_subject``) so an admin who is ALSO a caregiver — whose login backfilled
+    only ``trusted_contacts`` — still resolves. CSRF on unsafe methods is enforced inside
+    ``resolve_session_subject`` for cookie sessions."""
+    if not settings.authentik_login_enabled:
+        return None
+    subject = await resolve_session_subject(request)
+    if subject is None:
+        return None
+    async with maintenance_session() as mdb:
+        return await _email_for_subject(mdb, subject)

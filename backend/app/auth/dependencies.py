@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.firebase import verify_firebase_token
-from app.auth.principal import resolve_session_principal
+from app.auth.principal import resolve_admin_session, resolve_session_principal
 from app.config import settings
 
 # Database session dependency — imported from wherever the app defines it.
@@ -271,12 +271,12 @@ async def get_current_admin(
     """Resolve the authenticated admin.
 
     DUAL-RUN: when auth_provider == "authentik" and a valid BFF session is present,
-    the admin is resolved by the session member's verified email (a session only
-    exists for a member whose row pre-existed via /auth/login, so the subject
-    resolves to a User row carrying the trusted email). Otherwise the existing
-    Firebase bearer path runs. Byte-identical to before when auth_provider ==
-    "firebase". ``admin_users`` is RLS-disabled, so no tenant GUC is needed for the
-    admin lookup itself.
+    the admin is resolved by the session's verified email via ``resolve_admin_session``
+    — which recovers the email from the opaque subject whether the admin is also a
+    member (``users`` row) or a PURE admin (``admin_users`` only, no ``users`` row).
+    Otherwise the existing Firebase bearer path runs. Byte-identical to before when
+    auth_provider == "firebase" (``resolve_admin_session`` short-circuits to ``None``).
+    ``admin_users`` is RLS-disabled, so no tenant GUC is needed for the admin lookup.
 
     In development/test environments, if no Authorization header is provided
     the first admin user in the database is returned as a convenience mock.
@@ -293,10 +293,10 @@ async def get_current_admin(
         return admin
 
     # DUAL-RUN Authentik-session branch (inert unless auth_provider == "authentik").
-    principal = await resolve_session_principal(request, db)
-    if principal is not None:
-        email: str | None = principal.email
-    else:
+    # Resolve the admin's verified email from the session (member OR pure-admin subject);
+    # when None (firebase, or no session), fall through to the verbatim Firebase path.
+    email: str | None = await resolve_admin_session(request)
+    if email is None:
         decoded = await _extract_bearer_token(authorization)
         email = decoded.get("email")
     if not email:

@@ -51,6 +51,7 @@ from app.db.context import (
     set_user_context,
 )
 from app.db.session import maintenance_session
+from app.models.admin_user import AdminUser
 from app.models.audit import AccountAuditLog
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
@@ -190,6 +191,47 @@ async def _try_caregiver_login(
     return await _mint_session(response, subject=subject, mobile=mobile)
 
 
+async def _try_admin_login(
+    email: str, subject: str, response: Response, *, mobile: bool
+) -> dict | None:
+    """Mint an admin BFF session if ``email`` is an active admin, else ``None``.
+
+    Admins are not members — a pure admin has no ``users`` row — so like caregivers they
+    authenticate as the PERSON (subject). We admit the verified email if it matches an
+    ACTIVE ``admin_users`` row and lazy-backfill the subject so subsequent requests
+    resolve by subject (``resolve_admin_session``). Returns the login response dict, or
+    ``None`` when the email is no admin (the caller then refuses).
+
+    Runs on the MAINTENANCE (BYPASSRLS) session for symmetry with the caregiver path;
+    ``admin_users`` is RLS-disabled so this is not strictly required. ``email`` is
+    IdP-verified (email_verified was asserted above), so binding it is safe."""
+    async with maintenance_session() as mdb:
+        admin = (
+            await mdb.execute(select(AdminUser).where(AdminUser.email == email))
+        ).scalar_one_or_none()
+        if admin is None:
+            return None
+        if not admin.is_active:
+            # Parity with get_current_admin: an inactive admin is refused, not admitted.
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "Admin account is not active"
+            )
+        if admin.external_subject_id is None:
+            admin.external_subject_id = subject
+        elif admin.external_subject_id != subject:
+            # Verified email already bound to a DIFFERENT subject — refuse rather than
+            # overwrite (mirrors the member/caregiver subject-mismatch guard); the raise
+            # rolls back the maintenance transaction, so no partial backfill.
+            log.warning(
+                "BFF admin login subject mismatch for admin %s: "
+                "token sub != stored subject",
+                admin.id,
+            )
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Account identity mismatch")
+        await mdb.commit()
+    return await _mint_session(response, subject=subject, mobile=mobile)
+
+
 def _client_ip(request: Request) -> str:
     """Best-effort client IP for the login rate-limit bucket (cutover gate #3).
 
@@ -305,7 +347,14 @@ async def login(
             if caregiver_login is not None:
                 await limiter.reset(user_bucket)  # clear the throttle on success
                 return caregiver_login
-            # No member AND no caregiver => this email was never invited. Refuse; do NOT
+            # Not a member or caregiver. Admit an active ADMIN (admin_users email).
+            admin_login = await _try_admin_login(
+                email, sub, response, mobile=body.mobile
+            )
+            if admin_login is not None:
+                await limiter.reset(user_bucket)  # clear the throttle on success
+                return admin_login
+            # No member, caregiver, OR admin => never invited. Refuse; do NOT
             # auto-provision. Audit on its own commit so it survives the 403's
             # request rollback.
             db.add(AccountAuditLog(event="signup_refused", email=email))
