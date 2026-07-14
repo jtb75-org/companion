@@ -9,6 +9,11 @@ import {
 } from 'firebase/auth'
 import { auth, googleProvider } from './firebase'
 
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+const AUTH_PROVIDER = import.meta.env.VITE_AUTH_PROVIDER || 'firebase'
+
+type CaregiverUser = { user_id: string; contact_name: string; access_tier: string }
+
 interface AuthContextType {
   user: User | null
   loading: boolean
@@ -16,7 +21,7 @@ interface AuthContextType {
   adminRole: string | null   // "viewer", "editor", "admin"
   authorized: boolean | null // null = still checking, true/false = result
   profileComplete: boolean | null
-  caregiverUsers: Array<{ user_id: string; contact_name: string; access_tier: string }> | null
+  caregiverUsers: Array<CaregiverUser> | null
   loginWithGoogle: () => Promise<void>
   loginWithEmail: (email: string, password: string) => Promise<void>
   registerWithEmail: (email: string, password: string) => Promise<void>
@@ -26,14 +31,22 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null)
 
-export function AuthProvider({ children }: { children: ReactNode }) {
+// Read a cookie value by name from document.cookie (Authentik CSRF token).
+function readCookie(name: string): string | null {
+  const match = document.cookie.match(
+    new RegExp('(?:^|; )' + name.replace(/([.$?*|{}()[\]\\/+^])/g, '\\$1') + '=([^;]*)')
+  )
+  return match ? decodeURIComponent(match[1]) : null
+}
+
+function FirebaseAuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const [role, setRole] = useState<string | null>(null)
   const [adminRole, setAdminRole] = useState<string | null>(null)
   const [authorized, setAuthorized] = useState<boolean | null>(null)
   const [profileComplete, setProfileComplete] = useState<boolean | null>(null)
-  const [caregiverUsers, setCaregiverUsers] = useState<Array<{ user_id: string; contact_name: string; access_tier: string }> | null>(null)
+  const [caregiverUsers, setCaregiverUsers] = useState<Array<CaregiverUser> | null>(null)
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u)
@@ -60,7 +73,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const token = await user.getIdToken()
         const res = await fetch(
-          `${import.meta.env.VITE_API_BASE_URL || ''}/api/v1/auth/check`,
+          `${API_BASE}/api/v1/auth/check`,
           { headers: { Authorization: `Bearer ${token}` } }
         )
         if (res.ok) {
@@ -111,6 +124,146 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }}>
       {children}
     </AuthContext.Provider>
+  )
+}
+
+function AuthentikAuthProvider({ children }: { children: ReactNode }) {
+  // `user` is a truthy object when a BFF cookie session exists. Consumers only
+  // test truthiness, so a minimal { email } shape stands in for the Firebase User.
+  const [user, setUser] = useState<{ email: string } | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [role, setRole] = useState<string | null>(null)
+  const [adminRole, setAdminRole] = useState<string | null>(null)
+  const [authorized, setAuthorized] = useState<boolean | null>(null)
+  const [profileComplete, setProfileComplete] = useState<boolean | null>(null)
+  const [caregiverUsers, setCaregiverUsers] = useState<Array<CaregiverUser> | null>(null)
+
+  // Drop all session state back to logged-out. Used on no-session, logout, and a
+  // mid-session 401 (see the session-expired listener below). setState setters are
+  // stable, so this is safe to reference from an effect without re-subscribing.
+  const clearSession = () => {
+    setUser(null)
+    setAuthorized(null)
+    setRole(null)
+    setAdminRole(null)
+    setProfileComplete(null)
+    setCaregiverUsers(null)
+  }
+
+  // Resolve the current session from the ambient cookie. Mirrors the Firebase
+  // checkAuth field handling. A non-200 means "no session" → show login (NOT
+  // AccessDenied), so we leave authorized=null rather than false.
+  const checkSession = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/auth/check`, {
+        credentials: 'include',
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setRole(data.role)
+        setAdminRole(data.admin_role || null)
+        setAuthorized(true)
+        setProfileComplete(data.profile_complete ?? true)
+        setCaregiverUsers(data.has_charges ? [] : null)
+        setUser({ email: data.email ?? '' })
+      } else {
+        clearSession()
+      }
+    } catch {
+      clearSession()
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    checkSession()
+  }, [])
+
+  // The api client dispatches this when an authenticated request 401s (cookie
+  // session expired mid-use). Clear state so the privileged shell can't linger;
+  // ProtectedRoute then sends the user to /login.
+  useEffect(() => {
+    const onExpired = () => clearSession()
+    window.addEventListener('companion:session-expired', onExpired)
+    return () => window.removeEventListener('companion:session-expired', onExpired)
+  }, [])
+
+  const loginWithEmail = async (email: string, password: string) => {
+    setLoading(true)
+    try {
+      const res = await fetch(`${API_BASE}/auth/login`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: email, password }),
+      })
+      if (res.ok) {
+        await checkSession()
+        return
+      }
+      if (res.status === 401) {
+        throw new Error('Incorrect email or password.')
+      }
+      if (res.status === 403) {
+        // Authenticated but not admitted (unverified email / inactive / identity
+        // mismatch). Don't surface the backend's raw `detail` — those strings expose
+        // internal auth architecture and read cold. One plain, warm message covers all.
+        throw new Error(
+          "Your account isn't able to sign in here. Please contact your administrator if you need help."
+        )
+      }
+      throw new Error('Something went wrong. Please try again.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loginWithGoogle = async () => {
+    throw new Error("Google sign-in isn't available here.")
+  }
+
+  const registerWithEmail = async () => {
+    throw new Error('Accounts are created by invitation only.')
+  }
+
+  const logout = async () => {
+    try {
+      const headers: Record<string, string> = {}
+      const csrf = readCookie('companion_csrf')
+      if (csrf) {
+        headers['X-CSRF-Token'] = csrf
+      }
+      await fetch(`${API_BASE}/auth/logout`, {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+      })
+    } catch {
+      // best-effort: swallow network errors, still clear local state
+    }
+    clearSession()
+  }
+
+  const getToken = async (): Promise<string | null> => null
+
+  return (
+    <AuthContext.Provider value={{
+      user: user as unknown as User | null,
+      loading, role, adminRole, authorized, profileComplete, caregiverUsers,
+      loginWithGoogle, loginWithEmail,
+      registerWithEmail, logout, getToken,
+    }}>
+      {children}
+    </AuthContext.Provider>
+  )
+}
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  return AUTH_PROVIDER === 'authentik' ? (
+    <AuthentikAuthProvider>{children}</AuthentikAuthProvider>
+  ) : (
+    <FirebaseAuthProvider>{children}</FirebaseAuthProvider>
   )
 }
 
