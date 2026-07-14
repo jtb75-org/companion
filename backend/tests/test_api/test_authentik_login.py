@@ -786,3 +786,30 @@ async def test_bff_login_subject_mismatch_is_audited(monkeypatch):
     assert len(rows) == 1
     assert rows[0].details == {"role": "member"}
     await _delete_user(email)
+
+
+@requires_db
+async def test_bff_login_refused_inactive_is_audited(monkeypatch):
+    """Valid IdP creds against a DEACTIVATED member write a bff_login_refused record."""
+    email = "audit-inactive@example.com"
+    await _delete_user(email)
+    async with db_module.async_session_factory() as s:
+        s.add(
+            User(
+                email=email,
+                preferred_name="I",
+                display_name="I",
+                account_status=AccountStatus.DEACTIVATED,
+                external_subject_id="sub-inactive-aud",
+            )
+        )
+        await s.commit()
+    _enable_authentik_with_mocks(monkeypatch, sub="sub-inactive-aud", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 403
+    rows = await _audit_rows(email, "bff_login_refused")
+    assert len(rows) == 1
+    assert rows[0].details == {"role": "member", "reason": "inactive_account"}
+    await _delete_user(email)
