@@ -7,6 +7,7 @@ lock the behavior in so the cutover flip is safe.
 
 from __future__ import annotations
 
+import pytest
 from starlette.requests import Request
 
 from app.api.auth_authentik import _client_ip
@@ -57,16 +58,30 @@ def test_client_ip_peer_fallback():
     assert _client_ip(_req({}, client=None)) == "unknown"
 
 
-# ── #6: CORS preflight must allow the BFF CSRF header ──
+# ── #6: CORS must allow the BFF CSRF header ──
+
+
+def test_cors_config_allows_csrf_header():
+    """The CORS middleware is configured to allow X-CSRF-Token (env-independent —
+    the source of truth regardless of which origins a given environment permits)."""
+    from app.main import app
+
+    cors = next(
+        m for m in app.user_middleware if m.cls.__name__ == "CORSMiddleware"
+    )
+    assert "X-CSRF-Token" in cors.kwargs["allow_headers"]
 
 
 async def test_cors_preflight_allows_csrf_header():
-    """A browser SPA's preflight for an unsafe session request carries
-    Access-Control-Request-Headers: X-CSRF-Token. It must be allowed, or the request
-    never reaches the app."""
+    """Behavioral: a browser SPA's preflight for an unsafe session request carries
+    Access-Control-Request-Headers: X-CSRF-Token; it must be allowed. Uses the app's
+    OWN configured origins so it isn't tied to one environment (skips if none)."""
     from httpx import ASGITransport, AsyncClient
 
-    from app.main import app
+    from app.main import _cors_origins, app
+
+    if not _cors_origins:
+        pytest.skip("no CORS origins configured in this environment")
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
@@ -74,7 +89,7 @@ async def test_cors_preflight_allows_csrf_header():
         r = await ac.options(
             "/api/v1/me",
             headers={
-                "Origin": "http://localhost:5173",
+                "Origin": _cors_origins[0],
                 "Access-Control-Request-Method": "POST",
                 "Access-Control-Request-Headers": "X-CSRF-Token",
             },
