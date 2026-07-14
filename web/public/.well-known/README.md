@@ -16,6 +16,16 @@ instead of the web page. They must be served from the site root of
   the `SHA256:` line (colon-separated hex). Multiple entries allowed (upload + Play
   signing keys).
 
+### Android App Link verification is DEFERRED (status)
+The manifest ships `android:autoVerify="true"`, but Android verification **cannot
+succeed with the placeholder SHA-256** — and the real release SHA does not exist
+until the app is release-built/signed (tracked separately under mobile build/signing).
+**Until then, Android `/activate` links fall back to the browser** (the web page) —
+safe and functional, just not the in-app screen. iOS Universal Links are complete
+(the AASA carries real values) once the owner enables the capability + hosts this
+file. So: **iOS in-app deep link = ready-on-owner-hosting; Android in-app deep link =
+deferred to the release-signing milestone (fill the SHA here then).**
+
 ## OWNER / INFRA serving requirements (deep links won't verify until these hold)
 1. **Serve from the site root**, not the SPA fallback. `GET /.well-known/apple-app-site-association`
    and `GET /.well-known/assetlinks.json` must return THESE files — the SPA history

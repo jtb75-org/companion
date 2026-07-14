@@ -39,7 +39,16 @@ describe('parseActivationToken', () => {
     'https://evil.example.com/activate?token=t', // wrong host
     'https://app.mydailydignity.com/activate?token=', // empty token
     'not-a-url',
-  ])('returns null for a bad or unrelated link: %s', (input) => {
+    // Lookalike host: our host as a SUBDOMAIN/PREFIX of an attacker domain must be
+    // rejected by the EXACT host check (a substring match would have accepted it).
+    'https://app.mydailydignity.com.evil.example/activate?token=t',
+    'https://evil.example.com/app.mydailydignity.com/activate?token=t',
+    // Lookalike path: /activate only as a substring/prefix of a different path.
+    'https://app.mydailydignity.com/activateXYZ?token=t',
+    'https://app.mydailydignity.com/not/activate?token=t',
+    // Host embedded in the query, not the authority.
+    'https://evil.example.com/x?to=app.mydailydignity.com/activate&token=t',
+  ])('returns null for a bad, unrelated, or lookalike link: %s', (input) => {
     expect(parseActivationToken(input as string | null)).toBeNull()
   })
 })

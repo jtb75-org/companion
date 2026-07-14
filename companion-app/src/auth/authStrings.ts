@@ -55,8 +55,9 @@ export const authStrings = {
   activateEmailLabel: 'Your email',
   // New-password field.
   activateNewPasswordPlaceholder: 'New password',
-  // The button that saves the new password.
-  activateCreateButton: 'Create Password',
+  // The button that saves the new password. Same verb ("Make") as the prompt
+  // above, so one action reads consistently for the member (guidelines §3.3).
+  activateCreateButton: 'Make Password',
   // Client-side check before we send: password too short.
   activateTooShort: 'Please use at least 8 letters or numbers.',
   // The link is old or wrong (bad token on check OR on save). Calm, no blame.

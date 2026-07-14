@@ -141,10 +141,12 @@ export function AuthentikActivateScreen({
     )
   }
 
-  // phase === 'ready'
-  const greeting = details?.name
-    ? `${authStrings.activateHello} ${details.name}`
-    : authStrings.activateHello
+  // phase === 'ready'. The backend falls back name→email when a member has no
+  // name, so drop to a bare "Hi" rather than greeting them by their email.
+  const greeting =
+    details?.name && details.name !== details.email
+      ? `${authStrings.activateHello} ${details.name}`
+      : authStrings.activateHello
 
   return (
     <KeyboardAvoidingView
