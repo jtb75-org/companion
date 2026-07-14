@@ -1,6 +1,16 @@
 import { auth } from '../auth/firebase'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+const AUTH_PROVIDER = import.meta.env.VITE_AUTH_PROVIDER || 'firebase'
+
+// Read a cookie value by name from document.cookie (used for the CSRF
+// double-submit token in Authentik BFF mode).
+function readCookie(name: string): string | null {
+  const match = document.cookie.match(
+    new RegExp('(?:^|; )' + name.replace(/([.$?*|{}()[\]\\/+^])/g, '\\$1') + '=([^;]*)')
+  )
+  return match ? decodeURIComponent(match[1]) : null
+}
 
 export async function api<T>(
   path: string,
@@ -10,25 +20,42 @@ export async function api<T>(
     'Content-Type': 'application/json',
   }
 
-  const user = auth.currentUser
-  if (user) {
+  const user = AUTH_PROVIDER === 'firebase' ? auth.currentUser : null
+  if (AUTH_PROVIDER === 'firebase' && user) {
     const token = await user.getIdToken()
     headers['Authorization'] = `Bearer ${token}`
   }
 
+  // Authentik BFF: cookie session is ambient. Attach the CSRF double-submit
+  // header on unsafe methods (backend compares it to the companion_csrf cookie).
+  if (AUTH_PROVIDER === 'authentik') {
+    const method = (options?.method || 'GET').toUpperCase()
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      const csrf = readCookie('companion_csrf')
+      if (csrf) {
+        headers['X-CSRF-Token'] = csrf
+      }
+    }
+  }
+
+  // Spread options FIRST so our credentials/headers below always win — a
+  // caller's options.headers merges on top of the defaults, but must never
+  // clobber the ambient-cookie credentials mode or drop the CSRF/auth headers.
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { ...headers, ...options?.headers },
-    signal: options?.signal,
     ...options,
+    credentials: 'include',
+    signal: options?.signal,
+    headers: { ...headers, ...options?.headers },
   })
 
-  // On 401, try refreshing the token and retry once
-  if (res.status === 401 && user) {
+  // Firebase mode: on 401, try refreshing the token and retry once.
+  if (res.status === 401 && AUTH_PROVIDER === 'firebase' && user) {
     const freshToken = await user.getIdToken(true) // force refresh
     headers['Authorization'] = `Bearer ${freshToken}`
     const retry = await fetch(`${API_BASE}${path}`, {
-      headers: { ...headers, ...options?.headers },
       ...options,
+      credentials: 'include',
+      headers: { ...headers, ...options?.headers },
     })
     if (!retry.ok) {
       throw new Error(`API error: ${retry.status}`)
