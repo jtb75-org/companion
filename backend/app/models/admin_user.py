@@ -15,6 +15,14 @@ class AdminUser(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    # Stable Authentik OIDC subject, lazy-backfilled at BFF login (auth_authentik.py,
+    # active only when auth_provider == "authentik"). Lets an admin session — which
+    # stores only the opaque sub in Redis, no PII — resolve to the admin row without a
+    # `users` row (admins are not members). UNIQUE like users.external_subject_id: one
+    # admin ↔ one row ↔ one subject.
+    external_subject_id: Mapped[str | None] = mapped_column(
+        Text, unique=True, nullable=True
+    )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[str] = mapped_column(Text, nullable=False, server_default="viewer")
     is_active: Mapped[bool] = mapped_column(
