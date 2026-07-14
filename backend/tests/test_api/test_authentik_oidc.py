@@ -75,6 +75,15 @@ def test_valid_token_returns_claims(keypair, verifier):
     assert result.name == "Test Member"
 
 
+def test_email_verified_claim_exposed(keypair, verifier):
+    """The verifier surfaces the OIDC email_verified claim (cutover gate #5). Absent
+    or falsey → False; explicit true → True."""
+    priv, _ = keypair
+    assert verifier.verify(_make_token(priv)).email_verified is False
+    assert verifier.verify(_make_token(priv, email_verified=True)).email_verified is True
+    assert verifier.verify(_make_token(priv, email_verified=False)).email_verified is False
+
+
 def test_expired_token_rejected(keypair, verifier):
     priv, _ = keypair
     now = int(time.time())

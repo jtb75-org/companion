@@ -182,6 +182,15 @@ async def login(
     if not email:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "identity provider token missing email")
 
+    # Cutover gate #5 (safety-reviewer): the invite-only resolution and lazy backfill
+    # bind a member row to this email. Only trust the email claim if the IdP asserts
+    # it is verified — otherwise an account with an attacker-chosen unverified email
+    # could be pointed at another member's invite. Refuse an unverified email outright.
+    if not verified.email_verified:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "email address is not verified with the identity provider"
+        )
+
     # Invite-only gate (mirrors app/api/v1/profile.complete_profile). Resolve the
     # member by the stable OIDC subject first (external_subject_id == sub); this is
     # the steady-state path once a member has logged in via Authentik at least once.
@@ -238,9 +247,16 @@ async def login(
     # Store the opaque Authentik subject (not the email) — no PII in Redis. This is
     # the same stable subject now persisted as external_subject_id above.
     sid = await get_session_store().create(sub)
+    csrf = secrets.token_urlsafe(32)
     _set_cookie(response, settings.session_cookie_name, sid, http_only=True)
-    _set_cookie(response, settings.csrf_cookie_name, secrets.token_urlsafe(32), http_only=False)
-    return {"status": "ok"}
+    _set_cookie(response, settings.csrf_cookie_name, csrf, http_only=False)
+    # Web clients use the httpOnly cookie + CSRF cookie above. A mobile (RN) client
+    # cannot rely on an ambient cookie jar, so we ALSO return the opaque session id in
+    # the body: the app stores it in the Keychain and presents it as an
+    # ``Authorization: Bearer <session_token>`` header. Being non-ambient, the bearer
+    # session needs no CSRF (see app/auth/principal.resolve_session_subject); the
+    # csrf_token is returned only for completeness/parity with the cookie flow.
+    return {"status": "ok", "session_token": sid, "csrf_token": csrf}
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
