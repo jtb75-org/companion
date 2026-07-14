@@ -20,7 +20,9 @@ class AdminUser(Base):
     # stores only the opaque sub in Redis, no PII — resolve to the admin row without a
     # `users` row (admins are not members). UNIQUE like users.external_subject_id: one
     # admin ↔ one row ↔ one subject.
-    external_subject_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    external_subject_id: Mapped[str | None] = mapped_column(
+        Text, unique=True, nullable=True
+    )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[str] = mapped_column(Text, nullable=False, server_default="viewer")
     is_active: Mapped[bool] = mapped_column(
