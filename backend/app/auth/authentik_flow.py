@@ -82,19 +82,24 @@ class AuthentikFlowAuthenticator:
         client_id: str,
         redirect_uri: str,
         scope: str = "openid profile email",
+        verify: bool | str = True,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._flow = auth_flow_slug
         self._client_id = client_id
         self._redirect_uri = redirect_uri
         self._scope = scope
+        # httpx TLS verification for the Authentik channel: True = system CAs, or a path
+        # to a CA bundle (PEM) for a private/internal CA. Only meaningful when base_url is
+        # https; harmless for http (dev). See settings.authentik_ca_bundle_path (gate #2).
+        self._verify = verify
 
     async def authenticate(
         self, username: str, password: str, *, client: httpx.AsyncClient | None = None
     ) -> TokenResult:
         owns = client is None
         client = client or httpx.AsyncClient(
-            base_url=self._base, follow_redirects=True, timeout=10.0
+            base_url=self._base, follow_redirects=True, timeout=10.0, verify=self._verify
         )
         try:
             await self._run_flow(client, username, password)

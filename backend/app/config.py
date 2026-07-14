@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     # companion-authentik OIDC — consumed ONLY by the BFF path above. In-cluster
     # base URL for the server-side flow driver + token exchange (no browser).
     authentik_internal_url: str = "http://companion-authentik-server.companion-authentik.svc"
+    # CA bundle (PEM path) to verify Authentik's TLS when authentik_internal_url is https.
+    # Empty → httpx default (system CAs). In prod set to the mounted internal-CA ca.crt so
+    # the BFF↔Authentik channel — which carries the user password (flow executor) + the
+    # id_token — is encrypted AND server-authenticated (cutover gate #2). Inert while
+    # auth_provider=firebase (the flow authenticator is never constructed).
+    authentik_ca_bundle_path: str = ""
     # The Authentik authentication flow slug the executor drives.
     authentik_auth_flow_slug: str = "companion-authentication-flow"
     # OIDC client (application/provider) credentials. The client_id is a PUBLIC

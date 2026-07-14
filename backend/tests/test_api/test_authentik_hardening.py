@@ -97,3 +97,54 @@ async def test_cors_preflight_allows_csrf_header():
     assert r.status_code in (200, 204)
     allowed = r.headers.get("access-control-allow-headers", "").lower()
     assert "x-csrf-token" in allowed
+
+
+# ── gate #2: TLS to Authentik — CA bundle threads config → authenticator → httpx ──
+
+
+def test_authenticator_uses_ca_bundle_when_configured(monkeypatch):
+    """A configured CA bundle path is threaded to the flow authenticator so httpx
+    verifies Authentik's TLS against the internal CA (cutover gate #2)."""
+    from app.api.auth_authentik import _authenticator
+
+    monkeypatch.setattr(settings, "authentik_ca_bundle_path", "/etc/authentik-ca/ca.crt")
+    assert _authenticator()._verify == "/etc/authentik-ca/ca.crt"
+
+
+def test_authenticator_defaults_to_system_cas(monkeypatch):
+    """Empty CA bundle → verify=True (httpx system CAs); the dev default."""
+    from app.api.auth_authentik import _authenticator
+
+    monkeypatch.setattr(settings, "authentik_ca_bundle_path", "")
+    assert _authenticator()._verify is True
+
+
+async def test_flow_client_built_with_verify(monkeypatch):
+    """The httpx client the authenticator builds uses its verify value (so a private
+    CA bundle is actually applied to the TLS handshake, not silently dropped)."""
+    import contextlib
+
+    import httpx
+
+    from app.auth.authentik_flow import AuthentikFlowAuthenticator
+
+    captured: dict = {}
+    real_client = httpx.AsyncClient
+
+    def _spy(*args, **kwargs):
+        captured.update(kwargs)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _spy)
+    auth = AuthentikFlowAuthenticator(
+        base_url="https://authentik.internal",
+        auth_flow_slug="f",
+        client_id="c",
+        redirect_uri="r",
+        verify="/etc/authentik-ca/ca.crt",
+    )
+    # It will fail to connect (no server), but the client is constructed first — which
+    # is all we assert.
+    with contextlib.suppress(Exception):
+        await auth.authenticate("u", "p")
+    assert captured.get("verify") == "/etc/authentik-ca/ca.crt"
