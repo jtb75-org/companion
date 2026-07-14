@@ -49,9 +49,45 @@ from sqlalchemy import delete, select  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db import session as db_module  # noqa: E402
 from app.models.audit import AccountAuditLog  # noqa: E402
-from app.models.enums import AccountStatus  # noqa: E402
+from app.models.enums import AccessTier, AccountStatus, RelationshipType  # noqa: E402
+from app.models.trusted_contact import TrustedContact  # noqa: E402
 from app.models.user import User  # noqa: E402
 from tests.conftest import requires_db  # noqa: E402
+
+
+async def _seed_member_with_caregiver(
+    member_email: str, cg_email: str, *, cg_subject: str | None = None
+):
+    """Create an active member + an active TrustedContact for cg_email. Returns the
+    member id. Deleting the member cascades the contact (FK ON DELETE CASCADE)."""
+    async with db_module.async_session_factory() as s:
+        # Defensive: drop any orphaned contact rows for this caregiver email so a
+        # prior failed run's residue can't perturb by-email scalar_one() lookups.
+        await s.execute(
+            delete(TrustedContact).where(TrustedContact.contact_email == cg_email)
+        )
+        await s.commit()
+        member = User(
+            email=member_email,
+            preferred_name="M",
+            display_name="M",
+            account_status=AccountStatus.ACTIVE,
+        )
+        s.add(member)
+        await s.flush()
+        s.add(
+            TrustedContact(
+                user_id=member.id,
+                contact_name="Care Giver",
+                contact_email=cg_email,
+                relationship_type=RelationshipType.FAMILY,
+                access_tier=AccessTier.TIER_2,
+                is_active=True,
+                external_subject_id=cg_subject,
+            )
+        )
+        await s.commit()
+        return member.id
 
 
 def _enable_authentik_with_mocks(monkeypatch, *, sub: str, email: str,
@@ -385,3 +421,116 @@ async def test_login_refuses_empty_subject(monkeypatch):
         ).scalar_one()
         assert row.external_subject_id is None
     await _delete_user(email)
+
+
+# ── caregiver wave: caregiver login admission + subject backfill + resolver ──
+
+
+@requires_db
+async def test_login_admits_active_caregiver(monkeypatch):
+    """A verified email that is NOT a member but IS an active trusted contact gets a
+    BFF session, and the caregiver subject is lazy-backfilled onto the contact row."""
+    member_email = "cg-owner@example.com"
+    cg_email = "caregiver-admit@example.com"
+    await _delete_user(member_email)
+    await _seed_member_with_caregiver(member_email, cg_email)
+    _, store = _enable_authentik_with_mocks(monkeypatch, sub="sub-cg-admit", email=cg_email)
+
+    async with _client() as ac:
+        r = await ac.post(
+            _LOGIN, json={"username": cg_email, "password": "pw", "mobile": True}
+        )
+    assert r.status_code == 200
+    sid = r.json()["session_token"]
+    # Session maps to the caregiver's opaque subject (no member row exists for them).
+    assert await store.get(sid) == "sub-cg-admit"
+    # The subject was lazy-backfilled onto the caregiver's active contact row.
+    async with db_module.async_session_factory() as s:
+        tc = (
+            await s.execute(
+                select(TrustedContact).where(TrustedContact.contact_email == cg_email)
+            )
+        ).scalar_one()
+        assert tc.external_subject_id == "sub-cg-admit"
+    await _delete_user(member_email)
+
+
+@requires_db
+async def test_login_refuses_caregiver_subject_mismatch(monkeypatch):
+    """A caregiver contact already bound to a DIFFERENT subject is refused, not
+    overwritten (mirrors the member subject-mismatch guard)."""
+    member_email = "cg-owner2@example.com"
+    cg_email = "caregiver-mismatch@example.com"
+    await _delete_user(member_email)
+    await _seed_member_with_caregiver(
+        member_email, cg_email, cg_subject="sub-original"
+    )
+    _enable_authentik_with_mocks(monkeypatch, sub="sub-attacker", email=cg_email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": cg_email, "password": "pw"})
+    assert r.status_code == 403
+    # The original binding is untouched (the mismatch rolled back).
+    async with db_module.async_session_factory() as s:
+        tc = (
+            await s.execute(
+                select(TrustedContact).where(TrustedContact.contact_email == cg_email)
+            )
+        ).scalar_one()
+        assert tc.external_subject_id == "sub-original"
+    await _delete_user(member_email)
+
+
+@requires_db
+async def test_caregiver_session_lists_charges(monkeypatch):
+    """End-to-end: a caregiver BFF session resolves to the verified email and
+    /my-charges returns the member — no Firebase token involved."""
+    member_email = "cg-owner3@example.com"
+    cg_email = "caregiver-charges@example.com"
+    await _delete_user(member_email)
+    member_id = await _seed_member_with_caregiver(
+        member_email, cg_email, cg_subject="sub-cg-charges"
+    )
+    _, store = _enable_authentik_with_mocks(
+        monkeypatch, sub="sub-cg-charges", email=cg_email
+    )
+    sid = await store.create("sub-cg-charges")
+
+    async with _client() as ac:
+        r = await ac.get(
+            "/api/v1/auth/my-charges",
+            cookies={settings.session_cookie_name: sid},
+        )
+    assert r.status_code == 200
+    # The caregiver session resolved to the verified email and /my-charges returned
+    # this caregiver's member (a caregiver may serve several, so assert membership).
+    charges = r.json()["charges"]
+    assert str(member_id) in [c["user_id"] for c in charges]
+    await _delete_user(member_email)
+
+
+@requires_db
+async def test_login_refuses_unverified_caregiver_email(monkeypatch):
+    """An UNVERIFIED email that matches an active caregiver row is refused before the
+    caregiver branch runs (the email_verified gate precedes admission), and no subject
+    is bound (safety follow-up)."""
+    member_email = "cg-owner5@example.com"
+    cg_email = "caregiver-unverified@example.com"
+    await _delete_user(member_email)
+    await _seed_member_with_caregiver(member_email, cg_email)
+    _enable_authentik_with_mocks(
+        monkeypatch, sub="sub-cg-unverif", email=cg_email, email_verified=False
+    )
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": cg_email, "password": "pw"})
+    assert r.status_code == 403
+    # The email_verified gate fired first — no subject was bound to the caregiver row.
+    async with db_module.async_session_factory() as s:
+        tc = (
+            await s.execute(
+                select(TrustedContact).where(TrustedContact.contact_email == cg_email)
+            )
+        ).scalar_one()
+        assert tc.external_subject_id is None
+    await _delete_user(member_email)
