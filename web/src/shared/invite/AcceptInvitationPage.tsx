@@ -4,6 +4,8 @@ import { useAuth } from '../auth/AuthProvider'
 import { api } from '../api/client'
 import { BRAND_MID, BRAND_EMOJI } from '../branding'
 
+const AUTH_PROVIDER = import.meta.env.VITE_AUTH_PROVIDER || 'firebase'
+
 interface InvitationInfo {
   valid: boolean
   contact_name: string
@@ -16,12 +18,28 @@ export default function AcceptInvitationPage() {
   const [searchParams] = useSearchParams()
   const token = searchParams.get('token')
   const navigate = useNavigate()
-  const { user, loading: authLoading, loginWithGoogle } = useAuth()
+  const { user, loading: authLoading, loginWithGoogle, loginWithEmail } = useAuth()
 
   const [invitation, setInvitation] = useState<InvitationInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [accepting, setAccepting] = useState(false)
+
+  // Inline email/password login (Authentik mode). On success `user` becomes
+  // truthy and the accept effect above fires with the same token still in the URL.
+  const [loginEmail, setLoginEmail] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
+  const [loginError, setLoginError] = useState('')
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoginError('')
+    try {
+      await loginWithEmail(loginEmail, loginPassword)
+    } catch (err: any) {
+      setLoginError(err.message || 'Sign in failed. Please try again.')
+    }
+  }
 
   // Validate the token on mount
   useEffect(() => {
@@ -94,7 +112,40 @@ export default function AcceptInvitationPage() {
           </div>
         )}
 
-        {!user && (
+        {!user && AUTH_PROVIDER === 'authentik' && (
+          <>
+            <p className="text-gray-600 text-sm text-center mb-4">
+              Sign in to accept this invitation.
+            </p>
+            <form onSubmit={handleLogin} className="space-y-4">
+              <input
+                type="email"
+                placeholder="Email"
+                value={loginEmail}
+                onChange={(e) => setLoginEmail(e.target.value)}
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-companion-blue focus:outline-none transition"
+              />
+              <input
+                type="password"
+                placeholder="Password"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-companion-blue focus:outline-none transition"
+              />
+              {loginError && (
+                <p className="text-red-500 text-sm">{loginError}</p>
+              )}
+              <button
+                type="submit"
+                className="w-full bg-companion-blue text-white font-medium py-3 rounded-xl hover:bg-companion-blue-mid transition"
+              >
+                Sign In
+              </button>
+            </form>
+          </>
+        )}
+
+        {!user && AUTH_PROVIDER !== 'authentik' && (
           <>
             <p className="text-gray-600 text-sm text-center mb-4">
               Sign in with your Google account to accept this invitation.
