@@ -27,6 +27,7 @@ from app.services.account_lifecycle_service import (
     reactivate_account,
     request_deletion,
 )
+from app.services.activation_service import send_activation_if_enabled
 
 _editor = require_admin_role("editor")
 
@@ -98,7 +99,11 @@ async def create_companion_user(
     # Commit first so a provisioning error can never roll back the row; the call
     # is best-effort + idempotent + inert on the Firebase default.
     await db.commit()
-    await provision_authentik_account(user.email, user.display_name or user.email)
+    _name = user.display_name or user.email
+    await provision_authentik_account(user.email, _name)
+    # Under Authentik, email the branded activation link (best-effort, inert under
+    # firebase). The /activate universal link opens the mobile app for members.
+    await send_activation_if_enabled(user.email, _name)
     return {"id": str(user.id), "created": True}
 
 

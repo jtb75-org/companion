@@ -1,6 +1,5 @@
 """Admin API — Admin user management."""
 
-import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -8,15 +7,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AdminUser, require_admin_role
-from app.config import settings
 from app.db import get_db
 from app.integrations.authentik_admin import provision_authentik_account
-from app.integrations.email_service import send_activation_email
 from app.models.admin_user import AdminUser as AdminUserModel
 from app.schemas.admin import AdminUserCreate
-from app.services.activation_service import issue_activation_token
-
-log = logging.getLogger("companion.admin.admin_users")
+from app.services.activation_service import send_activation_if_enabled
 
 router = APIRouter(prefix="/admin/admin-users", tags=["Admin - Users"])
 
@@ -68,22 +63,9 @@ async def create_admin_user(
     # is best-effort + idempotent + inert on the Firebase default.
     await db.commit()
     await provision_authentik_account(new_user.email, new_user.name)
-
-    # Under Authentik, follow provisioning with a branded activation email so the new
-    # admin can set their password and sign in. Best-effort — a token/mail failure must
-    # not fail the (already-committed) admin creation. On the Firebase default this
-    # block is skipped entirely (admins keep using Google sign-in), so behavior is
-    # byte-identical there.
-    if settings.authentik_login_enabled:
-        try:
-            token = await issue_activation_token(new_user.email)
-            await send_activation_email(new_user.email, new_user.name, token)
-        except Exception:
-            log.error(
-                "failed to issue/send activation email for new admin %s",
-                new_user.email,
-                exc_info=True,
-            )
+    # Under Authentik, follow provisioning with a branded activation email (best-effort,
+    # inert under firebase). Shared helper — same seam for admins + members.
+    await send_activation_if_enabled(new_user.email, new_user.name)
     return new_user
 
 

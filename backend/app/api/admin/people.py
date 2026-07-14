@@ -20,6 +20,7 @@ from app.models.trusted_contact import TrustedContact
 from app.models.user import User
 from app.schemas.invitation import AdminPlatformInvite, AdminPlatformInviteResponse
 from app.services import assignment_service, invitation_service
+from app.services.activation_service import send_activation_if_enabled
 from app.services.field_crypto import decrypt_row_field, set_user_profile_pii
 
 _editor = require_admin_role("editor")
@@ -273,9 +274,12 @@ async def create_person(
     # default, so it never affects this response.
     if user_id or admin_id:
         await db.commit()
-        await provision_authentik_account(
-            email, f"{first_name} {last_name}".strip() or email
-        )
+        _name = f"{first_name} {last_name}".strip() or email
+        await provision_authentik_account(email, _name)
+        # Under Authentik, email the branded activation link so the new person can set
+        # their password (best-effort, inert under firebase). Members receive it too;
+        # the /activate universal link opens the mobile app.
+        await send_activation_if_enabled(email, _name)
 
     return {
         "created": True,
