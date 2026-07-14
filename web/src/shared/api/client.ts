@@ -63,6 +63,14 @@ export async function api<T>(
     return retry.json()
   }
 
+  // Authentik mode: a 401 on an authenticated request means the ambient cookie
+  // session expired mid-use (login/check use raw fetch, not this client, so they
+  // never reach here). Signal the AuthProvider to drop session state so the
+  // privileged shell can't linger; ProtectedRoute then redirects to /login.
+  if (res.status === 401 && AUTH_PROVIDER === 'authentik') {
+    window.dispatchEvent(new Event('companion:session-expired'))
+  }
+
   if (!res.ok) {
     throw new Error(`API error: ${res.status}`)
   }

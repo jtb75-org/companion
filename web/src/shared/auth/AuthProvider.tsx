@@ -138,6 +138,18 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
   const [profileComplete, setProfileComplete] = useState<boolean | null>(null)
   const [caregiverUsers, setCaregiverUsers] = useState<Array<CaregiverUser> | null>(null)
 
+  // Drop all session state back to logged-out. Used on no-session, logout, and a
+  // mid-session 401 (see the session-expired listener below). setState setters are
+  // stable, so this is safe to reference from an effect without re-subscribing.
+  const clearSession = () => {
+    setUser(null)
+    setAuthorized(null)
+    setRole(null)
+    setAdminRole(null)
+    setProfileComplete(null)
+    setCaregiverUsers(null)
+  }
+
   // Resolve the current session from the ambient cookie. Mirrors the Firebase
   // checkAuth field handling. A non-200 means "no session" → show login (NOT
   // AccessDenied), so we leave authorized=null rather than false.
@@ -155,20 +167,10 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
         setCaregiverUsers(data.has_charges ? [] : null)
         setUser({ email: data.email ?? '' })
       } else {
-        setUser(null)
-        setAuthorized(null)
-        setRole(null)
-        setAdminRole(null)
-        setProfileComplete(null)
-        setCaregiverUsers(null)
+        clearSession()
       }
     } catch {
-      setUser(null)
-      setAuthorized(null)
-      setRole(null)
-      setAdminRole(null)
-      setProfileComplete(null)
-      setCaregiverUsers(null)
+      clearSession()
     } finally {
       setLoading(false)
     }
@@ -176,6 +178,15 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     checkSession()
+  }, [])
+
+  // The api client dispatches this when an authenticated request 401s (cookie
+  // session expired mid-use). Clear state so the privileged shell can't linger;
+  // ProtectedRoute then sends the user to /login.
+  useEffect(() => {
+    const onExpired = () => clearSession()
+    window.addEventListener('companion:session-expired', onExpired)
+    return () => window.removeEventListener('companion:session-expired', onExpired)
   }, [])
 
   const loginWithEmail = async (email: string, password: string) => {
@@ -195,14 +206,12 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
         throw new Error('Incorrect email or password.')
       }
       if (res.status === 403) {
-        let detail = ''
-        try {
-          const body = await res.json()
-          detail = body?.detail || ''
-        } catch {
-          // ignore parse errors
-        }
-        throw new Error(detail || "Your account isn't able to sign in here.")
+        // Authenticated but not admitted (unverified email / inactive / identity
+        // mismatch). Don't surface the backend's raw `detail` — those strings expose
+        // internal auth architecture and read cold. One plain, warm message covers all.
+        throw new Error(
+          "Your account isn't able to sign in here. Please contact your administrator if you need help."
+        )
       }
       throw new Error('Something went wrong. Please try again.')
     } finally {
@@ -233,12 +242,7 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // best-effort: swallow network errors, still clear local state
     }
-    setUser(null)
-    setAuthorized(null)
-    setRole(null)
-    setAdminRole(null)
-    setProfileComplete(null)
-    setCaregiverUsers(null)
+    clearSession()
   }
 
   const getToken = async (): Promise<string | null> => null
