@@ -21,6 +21,12 @@ class TrustedContact(Base):
     contact_name: Mapped[str] = mapped_column(Text, nullable=False)
     contact_phone: Mapped[str | None] = mapped_column(Text, nullable=True)
     contact_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Stable Authentik OIDC subject for the caregiver PERSON, lazy-backfilled at
+    # BFF login (app/api/auth_authentik.py, active only when auth_provider ==
+    # "authentik"). Lets a caregiver session (which carries only the opaque sub)
+    # recover the verified email without storing PII in Redis. NON-unique: one
+    # caregiver may serve several members, so their N contact rows share one sub.
+    external_subject_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     relationship_type: Mapped[RelationshipType] = mapped_column(nullable=False)
     access_tier: Mapped[AccessTier] = mapped_column(
         nullable=False, default=AccessTier.TIER_1
