@@ -1,20 +1,36 @@
 """App API — Invitation routes (member-initiated caregiver invitations)."""
 
+import logging
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.auth_authentik import _require_authentik_enabled
 from app.auth.dependencies import User, _extract_bearer_token, require_complete_profile
 from app.auth.principal import resolve_caregiver_session
+from app.config import settings
 from app.db import get_db
 from app.db.session import maintenance_session
+from app.integrations.authentik_admin import (
+    provision_authentik_account,
+    set_authentik_password,
+)
 from app.integrations.email_service import (
     send_caregiver_invitation,
     send_invitation_accepted_notification,
 )
+from app.models.enums import AccountStatus
 from app.models.user import User as UserModel
-from app.schemas.invitation import InvitationAccept, InvitationCreate, InvitationResponse
+from app.schemas.invitation import (
+    InvitationAccept,
+    InvitationCreate,
+    InvitationResponse,
+    SetPasswordRequest,
+)
 from app.services import invitation_service
+
+log = logging.getLogger("companion.invitations")
 
 router = APIRouter(prefix="/invitations", tags=["Invitations"])
 
@@ -144,19 +160,86 @@ async def validate_invitation_token(
     if contact is None:
         raise HTTPException(404, "Invalid or expired invitation")
 
-    # Look up the member name. This is a public, unauthenticated endpoint with
-    # no member GUC, so read the member row on the maintenance (BYPASSRLS)
-    # session — under users RLS the by-id lookup would otherwise fail-close.
+    # Look up the member name AND the invitee's own users stub. This is a public,
+    # unauthenticated endpoint with no member GUC, so both reads run on the
+    # maintenance (BYPASSRLS) session — under users RLS the by-id/by-email lookups
+    # would otherwise fail-close.
     async with maintenance_session() as mdb:
-        result = await mdb.execute(
-            select(UserModel).where(UserModel.id == contact.user_id)
-        )
-        member = result.scalar_one_or_none()
+        member = (
+            await mdb.execute(
+                select(UserModel).where(UserModel.id == contact.user_id)
+            )
+        ).scalar_one_or_none()
+        stub = (
+            await mdb.execute(
+                select(UserModel).where(UserModel.email == contact.contact_email)
+            )
+        ).scalar_one_or_none()
+
+    # First-time setup ⇒ under Authentik AND the invitee's stub is still INVITED
+    # (never activated ⇒ never set a password). Under firebase authentik_login_enabled
+    # is False so this is always False (the web ignores it in firebase mode anyway).
+    needs_password_setup = (
+        settings.authentik_login_enabled
+        and stub is not None
+        and stub.account_status == AccountStatus.INVITED
+    )
 
     return {
         "valid": True,
         "contact_name": contact.contact_name,
+        "contact_email": contact.contact_email,
         "member_name": member.preferred_name if member else None,
         "relationship_type": contact.relationship_type,
         "access_tier": contact.access_tier,
+        "needs_password_setup": needs_password_setup,
     }
+
+
+@router.post("/set-password")
+async def set_invitation_password(data: SetPasswordRequest):
+    """First-time invitee sets their Authentik password in Companion's branded UI.
+
+    Authentik-only (404s under firebase). Does NOT log the invitee in or accept the
+    invite — the web calls /auth/login + /invitations/accept next. Enforces
+    first-time-only: only an INVITED stub may set a password here, so a leaked/reused
+    invite token can't reset an already-established (ACTIVE) account's credentials."""
+    _require_authentik_enabled()
+
+    # The token is the capability; load it on the BYPASSRLS session (trusted_contacts
+    # is per-member RLS-fenced and there is no member GUC on this public endpoint).
+    async with maintenance_session() as mdb:
+        contact = await invitation_service._load_active_invitation(mdb, data.token)
+        await mdb.commit()  # persist a possible EXPIRED flip
+    if contact is None:
+        raise HTTPException(400, "Invalid, expired, or already-used invitation token")
+
+    # Refuse unless the invitee's users stub is still INVITED (first-time only). A
+    # missing stub or an ACTIVE one ⇒ an established account whose password must NOT
+    # be resettable via an invite token.
+    async with maintenance_session() as mdb:
+        stub = (
+            await mdb.execute(
+                select(UserModel).where(UserModel.email == contact.contact_email)
+            )
+        ).scalar_one_or_none()
+    if stub is None or stub.account_status != AccountStatus.INVITED:
+        raise HTTPException(409, "This account is already set up. Please sign in.")
+
+    # Provision-ensure (idempotent — self-heals if PR 1 provisioning had failed),
+    # then set the password. Provisioning is best-effort/never-raises; the password
+    # set is must-succeed and its failure is surfaced as a clean 502.
+    await provision_authentik_account(contact.contact_email, contact.contact_name)
+    try:
+        await set_authentik_password(contact.contact_email, data.password)
+    except Exception:
+        log.error(
+            "failed to set Authentik password for invitee %s",
+            contact.contact_email,
+            exc_info=True,
+        )
+        raise HTTPException(
+            502, "Could not set your password. Please try again."
+        ) from None
+
+    return {"ok": True, "email": contact.contact_email}

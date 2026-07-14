@@ -19,6 +19,14 @@ class InvitationAccept(BaseModel):
     token: str = Field(description="Invitation token from the email link")
 
 
+class SetPasswordRequest(BaseModel):
+    token: str = Field(description="Invitation token from the email link")
+    # 8 is the enforced floor: the Authentik admin set_password API bypasses the
+    # flow password policy, so this schema is the ONLY password-strength gate today.
+    # Enforcing the Authentik policy on this seam is a follow-up.
+    password: str = Field(min_length=8, max_length=512)
+
+
 class InvitationResponse(BaseModel):
     contact_id: UUID
     invitation_status: str

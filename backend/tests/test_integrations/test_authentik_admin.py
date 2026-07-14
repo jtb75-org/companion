@@ -24,7 +24,10 @@ import pytest
 
 from app.config import settings
 from app.integrations import authentik_admin
-from app.integrations.authentik_admin import provision_authentik_account
+from app.integrations.authentik_admin import (
+    provision_authentik_account,
+    set_authentik_password,
+)
 
 
 class Recorder:
@@ -165,6 +168,68 @@ async def test_does_not_raise_on_5xx(monkeypatch):
 
     await provision_authentik_account("x@example.com", "X")  # no raise
     assert [r.method for r in rec.requests] == ["GET"]  # 500 on GET ⇒ no POST
+
+
+# ── 5b. set_authentik_password — must-succeed activation (PR 2) ─────────────────
+@pytest.mark.asyncio
+async def test_set_password_raises_when_not_configured(monkeypatch):
+    # No switch / no token ⇒ programming error (only called from the gated endpoint).
+    monkeypatch.setattr(settings, "auth_provider", "firebase")
+    monkeypatch.setattr(settings, "authentik_api_token", "tok")
+    rec = Recorder()
+    _install_client(monkeypatch, _make_handler(rec, existing=[]), rec)
+    with pytest.raises(RuntimeError):
+        await set_authentik_password("x@example.com", "pw12345678")
+    assert rec.instantiations == 0  # zero HTTP
+
+
+@pytest.mark.asyncio
+async def test_set_password_success(monkeypatch):
+    _enable_authentik(monkeypatch, token="tok-pw")
+    rec = Recorder()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        rec.requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"results": [{"pk": 7, "email": "x"}]})
+        rec.post_body = json.loads(request.content)
+        rec.post_auth = request.headers.get("Authorization")
+        return httpx.Response(204)
+
+    _install_client(monkeypatch, handler, rec)
+
+    await set_authentik_password("x@example.com", "s3cret-password")
+
+    assert [r.method for r in rec.requests] == ["GET", "POST"]
+    assert rec.requests[1].url.path == "/api/v3/core/users/7/set_password/"
+    assert rec.post_body == {"password": "s3cret-password"}
+    assert rec.post_auth == "Bearer tok-pw"
+
+
+@pytest.mark.asyncio
+async def test_set_password_raises_when_no_account(monkeypatch):
+    _enable_authentik(monkeypatch)
+    rec = Recorder()
+    _install_client(monkeypatch, _make_handler(rec, existing=[]), rec)
+    with pytest.raises(RuntimeError):
+        await set_authentik_password("missing@example.com", "pw12345678")
+    assert [r.method for r in rec.requests] == ["GET"]  # no POST
+
+
+@pytest.mark.asyncio
+async def test_set_password_raises_on_5xx(monkeypatch):
+    _enable_authentik(monkeypatch)
+    rec = Recorder()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        rec.requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"results": [{"pk": 9}]})
+        return httpx.Response(500, json={"detail": "boom"})
+
+    _install_client(monkeypatch, handler, rec)
+    with pytest.raises(httpx.HTTPStatusError):
+        await set_authentik_password("x@example.com", "pw12345678")
 
 
 # ── 6. seam — get_or_create_stub_user provisions only when the switch is on ─────

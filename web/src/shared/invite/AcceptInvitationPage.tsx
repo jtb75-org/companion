@@ -12,6 +12,8 @@ interface InvitationInfo {
   member_name: string
   relationship_type: string
   access_tier: string
+  contact_email: string
+  needs_password_setup: boolean
 }
 
 export default function AcceptInvitationPage() {
@@ -38,6 +40,32 @@ export default function AcceptInvitationPage() {
       await loginWithEmail(loginEmail, loginPassword)
     } catch (err: any) {
       setLoginError(err.message || 'Sign in failed. Please try again.')
+    }
+  }
+
+  // First-time invitee (Authentik mode): set a password, then sign in with it so
+  // the accept effect below runs. The email is fixed to the invited address.
+  const [newPassword, setNewPassword] = useState('')
+  const [setupError, setSetupError] = useState('')
+  const [settingUp, setSettingUp] = useState(false)
+
+  const handleCreatePassword = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSetupError('')
+    if (!invitation || !token) return
+    setSettingUp(true)
+    try {
+      await api('/api/v1/invitations/set-password', {
+        method: 'POST',
+        body: JSON.stringify({ token, password: newPassword }),
+      })
+      // Password set on the identity provider — sign in with it. On success `user`
+      // becomes truthy and the accept effect submits the invitation. (No settingUp
+      // reset on success: we navigate away.)
+      await loginWithEmail(invitation.contact_email, newPassword)
+    } catch (err: any) {
+      setSetupError(err?.message || 'Could not set your password. Please try again.')
+      setSettingUp(false)
     }
   }
 
@@ -112,7 +140,42 @@ export default function AcceptInvitationPage() {
           </div>
         )}
 
-        {!user && AUTH_PROVIDER === 'authentik' && (
+        {!user && AUTH_PROVIDER === 'authentik' && invitation?.needs_password_setup && (
+          <>
+            <p className="text-gray-600 text-sm text-center mb-4">
+              Create a password to accept this invitation.
+            </p>
+            <form onSubmit={handleCreatePassword} className="space-y-4">
+              <input
+                type="email"
+                value={invitation.contact_email}
+                readOnly
+                disabled
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl bg-gray-50 text-gray-500"
+              />
+              <input
+                type="password"
+                placeholder="Create a password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                minLength={8}
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-companion-blue focus:outline-none transition"
+              />
+              {setupError && (
+                <p className="text-red-500 text-sm">{setupError}</p>
+              )}
+              <button
+                type="submit"
+                disabled={settingUp}
+                className="w-full bg-companion-blue text-white font-medium py-3 rounded-xl hover:bg-companion-blue-mid transition disabled:opacity-60"
+              >
+                {settingUp ? 'Setting up…' : 'Create password & continue'}
+              </button>
+            </form>
+          </>
+        )}
+
+        {!user && AUTH_PROVIDER === 'authentik' && !invitation?.needs_password_setup && (
           <>
             <p className="text-gray-600 text-sm text-center mb-4">
               Sign in to accept this invitation.
