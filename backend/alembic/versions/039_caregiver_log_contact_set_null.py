@@ -10,10 +10,12 @@ log (docs/caregiver-access-and-privacy.md §5). Owner decision 2026-07-14.
 
 The column becomes nullable (only for that post-revocation state; every INSERT still
 sets it). The user_id FK is intentionally left ON DELETE CASCADE — a MEMBER's own
-deletion (right-to-erasure) still removes their audit rows. Pairs with
-passive_deletes=True on the ORM relationships so companion_app (which lacks UPDATE on
-the append-only table, PR #83) never emits an ORM UPDATE — the DB SET NULL, run as the
-table owner, does it.
+deletion (right-to-erasure) still removes their audit rows. Pairs with passive_deletes
+on the ORM relationships so companion_app (which lacks UPDATE on the append-only table,
+PR #83) never emits an ORM UPDATE — the DB SET NULL, run as the table owner, does it.
+TrustedContact.activity_logs uses passive_deletes="all" (True alone still nulls a LOADED
+collection's FKs via an ORM UPDATE); User.caregiver_activity_logs stays True (its
+user_id FK is ON DELETE CASCADE, which does not FK-null).
 """
 
 from sqlalchemy.dialects.postgresql import UUID
