@@ -718,3 +718,71 @@ async def test_caregiver_dashboard_view_is_logged(monkeypatch):
     # details is structured metadata only — never raw member data.
     assert logs[0].details == {"surface": "dashboard"}
     await _delete_user(member_email)
+
+
+# ── pre-PHI: BFF login audit ──
+
+
+async def _audit_rows(email: str, event: str):
+    async with db_module.async_session_factory() as s:
+        return (
+            await s.execute(
+                select(AccountAuditLog).where(
+                    AccountAuditLog.email == email, AccountAuditLog.event == event
+                )
+            )
+        ).scalars().all()
+
+
+@requires_db
+async def test_bff_login_success_is_audited(monkeypatch):
+    """A successful member BFF login writes a durable bff_login_success record."""
+    email = "audit-member@example.com"
+    await _delete_user(email)
+    async with db_module.async_session_factory() as s:
+        s.add(
+            User(
+                email=email,
+                preferred_name="A",
+                display_name="A",
+                account_status=AccountStatus.ACTIVE,
+                external_subject_id="sub-audit",
+            )
+        )
+        await s.commit()
+    _enable_authentik_with_mocks(monkeypatch, sub="sub-audit", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 200
+    rows = await _audit_rows(email, "bff_login_success")
+    assert len(rows) == 1
+    assert rows[0].details == {"role": "member"}
+    await _delete_user(email)
+
+
+@requires_db
+async def test_bff_login_subject_mismatch_is_audited(monkeypatch):
+    """A subject mismatch writes a durable audit record that SURVIVES the 403 rollback."""
+    email = "audit-mismatch@example.com"
+    await _delete_user(email)
+    async with db_module.async_session_factory() as s:
+        s.add(
+            User(
+                email=email,
+                preferred_name="M",
+                display_name="M",
+                account_status=AccountStatus.ACTIVE,
+                external_subject_id="sub-original",
+            )
+        )
+        await s.commit()
+    _enable_authentik_with_mocks(monkeypatch, sub="sub-attacker", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 403
+    rows = await _audit_rows(email, "bff_login_subject_mismatch")
+    assert len(rows) == 1
+    assert rows[0].details == {"role": "member"}
+    await _delete_user(email)
