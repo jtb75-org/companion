@@ -720,6 +720,139 @@ async def test_caregiver_dashboard_view_is_logged(monkeypatch):
     await _delete_user(member_email)
 
 
+@requires_db
+async def test_caregiver_log_retained_when_contact_deleted(monkeypatch):
+    """Revoking a caregiver (deleting the trusted_contact) RETAINS their activity log —
+    the row survives with trusted_contact_id NULL + user_id intact (ON DELETE SET NULL,
+    docs §5 "Sam can view the full activity log")."""
+    member_email = "retain-owner@example.com"
+    cg_email = "retain-cg@example.com"
+    await _delete_user(member_email)
+    member_id = await _seed_member_with_caregiver(
+        member_email, cg_email, cg_subject="sub-retain"
+    )
+    # Write one activity row for (contact, member).
+    async with db_module.async_session_factory() as s:
+        contact = (
+            await s.execute(
+                select(TrustedContact).where(TrustedContact.contact_email == cg_email)
+            )
+        ).scalar_one()
+        contact_id = contact.id
+        s.add(
+            CaregiverActivityLog(
+                trusted_contact_id=contact_id,
+                user_id=member_id,
+                action=CaregiverAction.VIEWED_DASHBOARD,
+                details={"surface": "dashboard"},
+            )
+        )
+        await s.commit()
+
+    # Revoke the caregiver: delete the contact via the ORM (exercises the relationship).
+    async with db_module.async_session_factory() as s:
+        contact = (
+            await s.execute(
+                select(TrustedContact).where(TrustedContact.id == contact_id)
+            )
+        ).scalar_one()
+        await s.delete(contact)
+        await s.commit()
+
+    # The log row is RETAINED with the contact link nulled — not cascade-erased.
+    async with db_module.async_session_factory() as s:
+        logs = (
+            await s.execute(
+                select(CaregiverActivityLog).where(
+                    CaregiverActivityLog.user_id == member_id
+                )
+            )
+        ).scalars().all()
+    assert len(logs) == 1
+    assert logs[0].trusted_contact_id is None
+    assert logs[0].user_id == member_id
+    assert logs[0].action == CaregiverAction.VIEWED_DASHBOARD
+    await _delete_user(member_email)
+
+
+@requires_db
+async def test_contact_delete_emits_no_orm_write_on_append_only_log(monkeypatch):
+    """passive_deletes='all' must fully defer to the DB ON DELETE SET NULL: even with
+    activity_logs EAGER-LOADED, SQLAlchemy must emit NO UPDATE/DELETE on the append-only
+    caregiver_activity_log (companion_app lacks both, #83). Regression for niru's finding
+    that passive_deletes=True still UPDATEs a loaded collection. As the owner role an ORM
+    UPDATE would silently succeed, so we assert on the emitted SQL, not just the outcome."""
+    from sqlalchemy import event
+    from sqlalchemy.orm import selectinload
+
+    member_email = "noupd-owner@example.com"
+    cg_email = "noupd-cg@example.com"
+    await _delete_user(member_email)
+    member_id = await _seed_member_with_caregiver(
+        member_email, cg_email, cg_subject="sub-noupd"
+    )
+    async with db_module.async_session_factory() as s:
+        contact_id = (
+            await s.execute(
+                select(TrustedContact.id).where(
+                    TrustedContact.contact_email == cg_email
+                )
+            )
+        ).scalar_one()
+        s.add(
+            CaregiverActivityLog(
+                trusted_contact_id=contact_id,
+                user_id=member_id,
+                action=CaregiverAction.VIEWED_DASHBOARD,
+                details={"surface": "dashboard"},
+            )
+        )
+        await s.commit()
+
+    statements: list[str] = []
+
+    def _capture(conn, cursor, statement, params, context, executemany):
+        statements.append(statement)
+
+    engine = db_module.async_session_factory.kw["bind"]
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        async with db_module.async_session_factory() as s:
+            contact = (
+                await s.execute(
+                    select(TrustedContact)
+                    .options(selectinload(TrustedContact.activity_logs))
+                    .where(TrustedContact.id == contact_id)
+                )
+            ).scalar_one()
+            assert contact.activity_logs  # eager-loaded into the session
+            await s.delete(contact)
+            await s.commit()
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+    offending = [
+        st
+        for st in statements
+        if st.lower().strip().startswith(
+            ("update caregiver_activity_log", "delete from caregiver_activity_log")
+        )
+    ]
+    assert not offending, f"ORM wrote to the append-only log: {offending}"
+    # And the row was retained with the contact link nulled by the DB.
+    async with db_module.maintenance_session() as s:
+        logs = (
+            await s.execute(
+                select(CaregiverActivityLog).where(
+                    CaregiverActivityLog.user_id == member_id
+                )
+            )
+        ).scalars().all()
+    assert len(logs) == 1
+    assert logs[0].trusted_contact_id is None
+    await _delete_user(member_email)
+
+
 # ── pre-PHI: BFF login audit ──
 
 

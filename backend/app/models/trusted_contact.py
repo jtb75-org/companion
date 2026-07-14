@@ -61,9 +61,12 @@ class TrustedContact(Base):
     activity_logs = relationship(
         "CaregiverActivityLog",
         back_populates="trusted_contact",
-        cascade="all, delete-orphan",
-        # Defer child deletion to the DB ON DELETE CASCADE (owner-run) so deleting a
-        # trusted_contact (incl. via a user delete that cascades to contacts) does not
-        # emit an ORM DELETE on the append-only log as companion_app. See app/db/grants.py.
-        passive_deletes=True,
+        # NOT delete/delete-orphan: deleting a trusted_contact (revoking a caregiver)
+        # RETAINS its activity log — the FK is ON DELETE SET NULL, so the history stays
+        # for Sam (docs §5). passive_deletes="all" (not True): True still emits an ORM
+        # UPDATE ... SET trusted_contact_id=NULL when the collection is ALREADY LOADED,
+        # which would 500 under the append-only REVOKE (companion_app lacks UPDATE on
+        # this table, #83). "all" fully defers the FK-nulling to the DB ON DELETE SET
+        # NULL (run as the table owner), loaded or not.
+        passive_deletes="all",
     )
