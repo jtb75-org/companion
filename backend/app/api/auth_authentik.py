@@ -91,6 +91,9 @@ def _authenticator() -> AuthentikFlowAuthenticator:
         auth_flow_slug=settings.authentik_auth_flow_slug,
         client_id=settings.authentik_oidc_client_id,
         redirect_uri=settings.bff_oidc_redirect_uri,
+        # A private-CA bundle path (prod) or True/system CAs (dev). Only used when
+        # authentik_internal_url is https; the flow authenticator is inert on firebase.
+        verify=settings.authentik_ca_bundle_path or True,
     )
 
 
