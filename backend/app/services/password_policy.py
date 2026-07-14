@@ -86,7 +86,9 @@ def validate_password(password: str, *, email: str | None = None) -> None:
 
     # 3. Too predictable (single repeated char or a straight sequential run).
     if _is_predictable(password):
-        raise PasswordPolicyError("Please pick a less predictable password.")
+        raise PasswordPolicyError(
+            "Please don't use a simple pattern, like 1234 or 1111."
+        )
 
     # 4. Contains their email's local-part.
     if email:

@@ -76,7 +76,7 @@ def test_too_predictable(monkeypatch, pw):
     monkeypatch.setattr(settings, "password_min_length", 10)
     with pytest.raises(PasswordPolicyError) as ei:
         validate_password(pw)
-    assert ei.value.message == "Please pick a less predictable password."
+    assert ei.value.message == "Please don't use a simple pattern, like 1234 or 1111."
 
 
 def test_email_local_part_in_password(monkeypatch):
