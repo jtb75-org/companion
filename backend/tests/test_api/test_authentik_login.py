@@ -640,3 +640,31 @@ async def test_admin_session_authorizes_admin_endpoint(monkeypatch):
         )
     assert r.status_code == 200
     await _delete_admin(email)
+
+
+@requires_db
+async def test_role_overlap_admin_resolves_via_caregiver_subject(monkeypatch):
+    """Role-agnostic resolution (niru): a person who is BOTH an active caregiver and an
+    active admin logs in via the caregiver branch (which backfills trusted_contacts
+    only), yet a later admin request still resolves via the shared subject→email lookup
+    and reaches the admin endpoint."""
+    email = "overlap@example.com"
+    member_email = "overlap-owner@example.com"
+    await _delete_user(member_email)
+    await _delete_admin(email)
+    # Active caregiver contact for `email`, already bound to the subject (as the
+    # caregiver login branch would have left it); admin row NOT backfilled.
+    await _seed_member_with_caregiver(member_email, email, cg_subject="sub-overlap")
+    await _seed_admin(email)
+    _, store = _enable_authentik_with_mocks(
+        monkeypatch, sub="sub-overlap", email=email
+    )
+    sid = await store.create("sub-overlap")
+
+    async with _client() as ac:
+        r = await ac.get(
+            "/admin/config", cookies={settings.session_cookie_name: sid}
+        )
+    assert r.status_code == 200
+    await _delete_admin(email)
+    await _delete_user(member_email)
