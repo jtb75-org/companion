@@ -82,6 +82,11 @@ def test_email_verified_claim_exposed(keypair, verifier):
     assert verifier.verify(_make_token(priv)).email_verified is False
     assert verifier.verify(_make_token(priv, email_verified=True)).email_verified is True
     assert verifier.verify(_make_token(priv, email_verified=False)).email_verified is False
+    # Strict: a non-boolean claim (e.g. the string "false", which is truthy in
+    # Python) must NOT be read as verified — `is True` fail-closes (niru #6).
+    assert verifier.verify(_make_token(priv, email_verified="false")).email_verified is False
+    assert verifier.verify(_make_token(priv, email_verified="true")).email_verified is False
+    assert verifier.verify(_make_token(priv, email_verified=1)).email_verified is False
 
 
 def test_expired_token_rejected(keypair, verifier):

@@ -83,5 +83,7 @@ class OIDCVerifier:
             email=claims.get("email"),
             name=claims.get("name") or claims.get("preferred_username"),
             claims=claims,
-            email_verified=bool(claims.get("email_verified")),
+            # Strict: only a JSON boolean `true` counts as verified. A malformed
+            # string like "false" is truthy in Python, so `is True` fail-closes.
+            email_verified=(claims.get("email_verified") is True),
         )

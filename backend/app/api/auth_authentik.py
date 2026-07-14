@@ -93,6 +93,11 @@ def _authenticator() -> AuthentikFlowAuthenticator:
 class LoginIn(BaseModel):
     username: str = Field(min_length=1, max_length=320)  # email or username
     password: str = Field(min_length=1, max_length=512)
+    # Mobile (RN) clients set this true to receive the session token in the body
+    # (they have no usable httpOnly cookie jar). Web clients omit it and rely
+    # SOLELY on the httpOnly companion_sid cookie — so the sid is never exposed to
+    # browser JS, preserving the full httpOnly/XSS posture (safety follow-up).
+    mobile: bool = False
 
 
 def _set_cookie(response: Response, name: str, value: str, *, http_only: bool) -> None:
@@ -250,13 +255,17 @@ async def login(
     csrf = secrets.token_urlsafe(32)
     _set_cookie(response, settings.session_cookie_name, sid, http_only=True)
     _set_cookie(response, settings.csrf_cookie_name, csrf, http_only=False)
-    # Web clients use the httpOnly cookie + CSRF cookie above. A mobile (RN) client
-    # cannot rely on an ambient cookie jar, so we ALSO return the opaque session id in
-    # the body: the app stores it in the Keychain and presents it as an
-    # ``Authorization: Bearer <session_token>`` header. Being non-ambient, the bearer
-    # session needs no CSRF (see app/auth/principal.resolve_session_subject); the
-    # csrf_token is returned only for completeness/parity with the cookie flow.
-    return {"status": "ok", "session_token": sid, "csrf_token": csrf}
+    # Web clients use the httpOnly cookie + CSRF cookie above and get NOTHING
+    # sensitive in the body (the sid stays unreadable to browser JS). Only a
+    # mobile client (which set body.mobile) — with no usable cookie jar — receives
+    # the opaque session id to store in the Keychain and present as an
+    # ``Authorization: Bearer <session_token>`` header. Being non-ambient, the
+    # bearer session needs no CSRF (see app/auth/principal.resolve_session_subject).
+    result: dict = {"status": "ok"}
+    if body.mobile:
+        result["session_token"] = sid
+        result["csrf_token"] = csrf
+    return result
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
