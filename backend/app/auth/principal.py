@@ -45,6 +45,7 @@ from app.auth.session import get_session_store
 from app.config import settings
 from app.db.context import set_login_subject_context, set_user_context
 from app.db.session import maintenance_session
+from app.models.admin_user import AdminUser
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
 
@@ -217,3 +218,44 @@ async def resolve_caregiver_session(request: Request) -> str | None:
             )
         ).scalar_one_or_none()
         return caregiver_email.strip().lower() if caregiver_email else None
+
+
+async def resolve_admin_session(request: Request) -> str | None:
+    """Return the IdP-verified EMAIL for an admin's BFF session, else ``None``.
+
+    The admin auth path (``get_current_admin``) keys on the verified email, then looks
+    up ``admin_users`` by it. Admins are NOT members, so — like caregivers — they may
+    have no ``users`` row; this resolver recovers the email from the opaque session
+    subject without one. Counterpart to ``resolve_session_principal``, returning just
+    the email so the existing ``admin_users`` lookup + active check are unchanged.
+
+    ``None`` means "no Authentik admin session — fall back to the Firebase bearer path".
+    Inert when the switch is off (first line). Resolution runs on the MAINTENANCE
+    (BYPASSRLS) session so a ``users`` by-subject read is not RLS-fenced; ``admin_users``
+    itself is RLS-disabled. We resolve the subject to an email via:
+      1) a ``users`` row by subject — an admin who is ALSO a member — else
+      2) an ``admin_users`` row by subject — a pure admin.
+    The subject was bound at ``/auth/login`` only after ``email_verified``, so the
+    returned email is IdP-verified. CSRF on unsafe methods is enforced inside
+    ``resolve_session_subject`` for cookie sessions."""
+    if not settings.authentik_login_enabled:
+        return None
+    subject = await resolve_session_subject(request)
+    if subject is None:
+        return None
+    async with maintenance_session() as mdb:
+        member_email = (
+            await mdb.execute(
+                select(User.email).where(User.external_subject_id == subject)
+            )
+        ).scalar_one_or_none()
+        if member_email:
+            return member_email.strip().lower()
+        admin_email = (
+            await mdb.execute(
+                select(AdminUser.email).where(
+                    AdminUser.external_subject_id == subject
+                )
+            )
+        ).scalar_one_or_none()
+        return admin_email.strip().lower() if admin_email else None

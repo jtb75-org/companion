@@ -48,11 +48,36 @@ from sqlalchemy import delete, select  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.db import session as db_module  # noqa: E402
+from app.models.admin_user import AdminUser  # noqa: E402
 from app.models.audit import AccountAuditLog  # noqa: E402
 from app.models.enums import AccessTier, AccountStatus, RelationshipType  # noqa: E402
 from app.models.trusted_contact import TrustedContact  # noqa: E402
 from app.models.user import User  # noqa: E402
 from tests.conftest import requires_db  # noqa: E402
+
+
+async def _delete_admin(email: str):
+    async with db_module.async_session_factory() as s:
+        await s.execute(delete(AdminUser).where(AdminUser.email == email))
+        await s.commit()
+
+
+async def _seed_admin(
+    email: str, *, subject: str | None = None, is_active: bool = True, role: str = "admin"
+):
+    """Create (or replace) an admin_users row. Admins have NO users row."""
+    async with db_module.async_session_factory() as s:
+        await s.execute(delete(AdminUser).where(AdminUser.email == email))
+        s.add(
+            AdminUser(
+                email=email,
+                name="Ad Min",
+                role=role,
+                is_active=is_active,
+                external_subject_id=subject,
+            )
+        )
+        await s.commit()
 
 
 async def _seed_member_with_caregiver(
@@ -534,3 +559,84 @@ async def test_login_refuses_unverified_caregiver_email(monkeypatch):
         ).scalar_one()
         assert tc.external_subject_id is None
     await _delete_user(member_email)
+
+
+# ── admin wave: pure-admin login admission + subject backfill + resolution ──
+
+
+@requires_db
+async def test_login_admits_active_admin(monkeypatch):
+    """A verified email that is NOT a member/caregiver but IS an active admin gets a
+    BFF session, and the subject is lazy-backfilled onto the admin_users row."""
+    email = "pure-admin@example.com"
+    await _seed_admin(email)
+    _, store = _enable_authentik_with_mocks(monkeypatch, sub="sub-admin", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(
+            _LOGIN, json={"username": email, "password": "pw", "mobile": True}
+        )
+    assert r.status_code == 200
+    sid = r.json()["session_token"]
+    assert await store.get(sid) == "sub-admin"
+    async with db_module.async_session_factory() as s:
+        admin = (
+            await s.execute(select(AdminUser).where(AdminUser.email == email))
+        ).scalar_one()
+        assert admin.external_subject_id == "sub-admin"
+    await _delete_admin(email)
+
+
+@requires_db
+async def test_login_refuses_inactive_admin(monkeypatch):
+    """An inactive admin is refused (parity with get_current_admin) and not bound."""
+    email = "inactive-admin@example.com"
+    await _seed_admin(email, is_active=False)
+    _enable_authentik_with_mocks(monkeypatch, sub="sub-inactive-admin", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 403
+    async with db_module.async_session_factory() as s:
+        admin = (
+            await s.execute(select(AdminUser).where(AdminUser.email == email))
+        ).scalar_one()
+        assert admin.external_subject_id is None
+    await _delete_admin(email)
+
+
+@requires_db
+async def test_login_refuses_admin_subject_mismatch(monkeypatch):
+    """An admin already bound to a DIFFERENT subject is refused, not overwritten."""
+    email = "mismatch-admin@example.com"
+    await _seed_admin(email, subject="sub-original-admin")
+    _enable_authentik_with_mocks(monkeypatch, sub="sub-attacker-admin", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 403
+    async with db_module.async_session_factory() as s:
+        admin = (
+            await s.execute(select(AdminUser).where(AdminUser.email == email))
+        ).scalar_one()
+        assert admin.external_subject_id == "sub-original-admin"
+    await _delete_admin(email)
+
+
+@requires_db
+async def test_admin_session_authorizes_admin_endpoint(monkeypatch):
+    """End-to-end: a pure-admin BFF session (no users row) resolves via
+    get_current_admin and reaches an admin endpoint."""
+    email = "e2e-admin@example.com"
+    await _seed_admin(email, subject="sub-e2e-admin", role="admin")
+    _, store = _enable_authentik_with_mocks(
+        monkeypatch, sub="sub-e2e-admin", email=email
+    )
+    sid = await store.create("sub-e2e-admin")
+
+    async with _client() as ac:
+        r = await ac.get(
+            "/admin/config", cookies={settings.session_cookie_name: sid}
+        )
+    assert r.status_code == 200
+    await _delete_admin(email)
