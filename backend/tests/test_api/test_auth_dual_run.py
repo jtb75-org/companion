@@ -262,6 +262,90 @@ async def test_authentik_session_post_requires_csrf(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# (b2) MOBILE: the SAME opaque session id presented as Authorization: Bearer
+# ---------------------------------------------------------------------------
+
+
+async def test_authentik_bearer_session_resolves_member(monkeypatch):
+    """flag=authentik, no cookie: a session id in ``Authorization: Bearer`` resolves
+    the member (the mobile BFF path)."""
+    email = f"dual-bearer-{uuid.uuid4()}@t.io"
+    await _cleanup(email)
+    await _add_user(email, sub="sub-bearer")
+    store = _enable_authentik(monkeypatch)
+    sid = await store.create("sub-bearer")
+    req = _make_request(headers={"Authorization": f"Bearer {sid}"})
+    async with db_module.async_session_factory() as db:
+        user = await deps.get_current_user(req, authorization=f"Bearer {sid}", db=db)
+    assert user.email == email
+    await _cleanup(email)
+
+
+async def test_authentik_firebase_jwt_not_misresolved_as_session(monkeypatch):
+    """flag=authentik: a Firebase id_token (dotted JWT) in Authorization is NOT a
+    session key → misses the store → falls through to the Firebase verification."""
+    email = f"dual-fbjwt-{uuid.uuid4()}@t.io"
+    await _cleanup(email)
+    await _add_user(email)  # no sub — only resolvable via Firebase email
+    _enable_authentik(monkeypatch)
+    _patch_firebase(monkeypatch, email)
+    jwt_like = "eyJhbGc.eyJzdWI.sig"  # has dots; never a token_urlsafe session id
+    req = _make_request(headers={"Authorization": f"Bearer {jwt_like}"})
+    async with db_module.async_session_factory() as db:
+        user = await deps.get_current_user(req, authorization=f"Bearer {jwt_like}", db=db)
+    assert user.email == email  # resolved by the Firebase path, not as a session
+    await _cleanup(email)
+
+
+async def test_authentik_bearer_session_post_no_csrf_required(monkeypatch):
+    """A BEARER session is non-ambient, so an unsafe method needs NO CSRF — unlike the
+    cookie session (test_authentik_session_post_requires_csrf), which 403s without it."""
+    email = f"dual-bearer-csrf-{uuid.uuid4()}@t.io"
+    await _cleanup(email)
+    await _add_user(email, sub="sub-bearer-csrf")
+    store = _enable_authentik(monkeypatch)
+    sid = await store.create("sub-bearer-csrf")
+    # POST via bearer, no CSRF header/cookie at all → still resolves.
+    req = _make_request("POST", headers={"Authorization": f"Bearer {sid}"})
+    async with db_module.async_session_factory() as db:
+        user = await deps.get_current_user(req, authorization=f"Bearer {sid}", db=db)
+    assert user.email == email
+    await _cleanup(email)
+
+
+async def test_authentik_invalid_bearer_falls_through_to_firebase(monkeypatch):
+    """flag=authentik: a bearer that is neither a live session nor a valid Firebase
+    token → None → Firebase path; with no email claim that's a 401."""
+    _enable_authentik(monkeypatch)
+    _patch_firebase(monkeypatch, None)  # Firebase yields no email
+    req = _make_request(headers={"Authorization": "Bearer not-a-live-session"})
+    with pytest.raises(HTTPException) as ei:
+        async with db_module.async_session_factory() as db:
+            await deps.get_current_user(req, authorization="Bearer not-a-live-session", db=db)
+    assert ei.value.status_code == 401
+
+
+async def test_firebase_default_ignores_bearer_session(monkeypatch):
+    """flag=firebase: a valid session id presented as a bearer is inert — the Firebase
+    bearer verification runs instead (session store never consulted)."""
+    assert settings.auth_provider == "firebase"  # sanity: default
+    a_email = f"dual-bs-a-{uuid.uuid4()}@t.io"
+    b_email = f"dual-bs-b-{uuid.uuid4()}@t.io"
+    await _cleanup(a_email, b_email)
+    await _add_user(a_email, sub="sub-bs-a")
+    await _add_user(b_email)
+    store = InMemorySessionStore()
+    monkeypatch.setattr(session_module, "_store", store)
+    sid = await store.create("sub-bs-a")  # would resolve A as a session
+    _patch_firebase(monkeypatch, b_email)  # Firebase resolves B
+    req = _make_request(headers={"Authorization": f"Bearer {sid}"})
+    async with db_module.async_session_factory() as db:
+        user = await deps.get_current_user(req, authorization=f"Bearer {sid}", db=db)
+    assert user.email == b_email  # Firebase path won; the session was ignored
+    await _cleanup(a_email, b_email)
+
+
+# ---------------------------------------------------------------------------
 # (c) admin dual path
 # ---------------------------------------------------------------------------
 

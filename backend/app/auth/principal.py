@@ -21,6 +21,15 @@ CSRF: a session cookie is an ambient/automatic credential, so once it authentica
 STATE-CHANGING request we enforce the double-submit CSRF check (X-CSRF-Token header ==
 companion_csrf cookie). Firebase bearer requests are not cookie-ambient and are not
 subject to this check.
+
+MOBILE bearer session: a React Native client cannot use the httpOnly cookie, so it
+presents the SAME opaque session id as ``Authorization: Bearer <session_token>``. Being
+non-ambient (a bearer can't be attached cross-site by a browser), it needs NO CSRF, just
+like a Firebase bearer. The bearer path is tried ONLY when the switch is on and there is
+no valid session cookie. The session store holds opaque ``token_urlsafe`` ids, so a
+Firebase id_token (a dotted JWT) simply misses the lookup → ``None`` → the caller falls
+through to the existing Firebase-bearer verification. A Firebase JWT is therefore never
+mis-resolved as a session, and Firebase verification is untouched.
 """
 
 from __future__ import annotations
@@ -65,6 +74,19 @@ def _enforce_csrf(request: Request) -> None:
         raise HTTPException(status_code=403, detail="CSRF token missing or invalid")
 
 
+def _bearer_session_token(request: Request) -> str | None:
+    """Extract an ``Authorization: Bearer <token>`` value, or ``None``.
+
+    The value may be a Companion session id (opaque ``token_urlsafe``) OR a Firebase
+    id_token (a dotted JWT). We do not distinguish here — the session-store lookup does:
+    a JWT is not a session key and simply misses, so it falls through to Firebase."""
+    header = request.headers.get("authorization") or ""
+    if not header.startswith("Bearer "):
+        return None
+    token = header.removeprefix("Bearer ").strip()
+    return token or None
+
+
 async def resolve_session_subject(request: Request) -> str | None:
     """Return the Authentik subject for a valid BFF session, else ``None``.
 
@@ -72,21 +94,39 @@ async def resolve_session_subject(request: Request) -> str | None:
     Returns ``None`` when:
       * the dual-run switch is off (auth_provider != "authentik") — the branch is
         inert; this is the first check so the Firebase default is untouched, OR
-      * no ``companion_sid`` cookie is present, OR
-      * the cookie does not map to a live session (expired / logged out).
+      * neither a valid ``companion_sid`` cookie NOR a bearer session token is present, OR
+      * neither credential maps to a live session (expired / logged out / a Firebase JWT).
 
-    When the switch is on AND a valid session IS present, the double-submit CSRF check
-    is enforced for state-changing methods before the subject is returned."""
+    Two credential shapes carry the same opaque session id:
+      * COOKIE (``companion_sid``) — ambient, so a state-changing method must also pass
+        the double-submit CSRF check before the subject is returned.
+      * BEARER (``Authorization: Bearer``) — non-ambient (a browser can't attach it
+        cross-site), tried only when there is NO valid session cookie, and — like a
+        Firebase bearer — NOT subject to CSRF.
+
+    The bearer lookup runs only when the switch is on, a bearer is present, and no valid
+    session cookie resolved, so the extra store lookup is off the hot path. A Firebase
+    id_token presented as the bearer is not a session key → misses → ``None`` → the
+    caller uses the existing Firebase verification. Firebase JWTs are never mis-resolved
+    and Firebase verification is not weakened."""
     if not settings.authentik_login_enabled:
         return None
+    store = get_session_store()
+    # 1) Cookie session (ambient → CSRF-enforced on unsafe methods).
     sid = request.cookies.get(settings.session_cookie_name)
-    if not sid:
-        return None
-    subject = await get_session_store().get(sid)
-    if not subject:
-        return None
-    _enforce_csrf(request)
-    return subject
+    if sid:
+        subject = await store.get(sid)
+        if subject:
+            _enforce_csrf(request)
+            return subject
+    # 2) Bearer session (non-ambient → no CSRF). Only reached when no valid cookie
+    #    session resolved. A Firebase JWT misses the store lookup and returns None.
+    token = _bearer_session_token(request)
+    if token:
+        subject = await store.get(token)
+        if subject:
+            return subject
+    return None
 
 
 async def resolve_session_principal(

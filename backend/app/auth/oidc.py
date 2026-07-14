@@ -25,6 +25,10 @@ class VerifiedToken:
     email: str | None
     name: str | None
     claims: dict
+    # OIDC ``email_verified`` claim. Defaults to False when absent so a caller that
+    # trusts ``email`` for identity binding must see an explicit true assertion (the
+    # invite-only / backfill binding relies on this — see auth_authentik.login).
+    email_verified: bool = False
 
 
 class TokenError(Exception):
@@ -79,4 +83,7 @@ class OIDCVerifier:
             email=claims.get("email"),
             name=claims.get("name") or claims.get("preferred_username"),
             claims=claims,
+            # Strict: only a JSON boolean `true` counts as verified. A malformed
+            # string like "false" is truthy in Python, so `is True` fail-closes.
+            email_verified=(claims.get("email_verified") is True),
         )

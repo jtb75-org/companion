@@ -53,7 +53,8 @@ from app.models.user import User  # noqa: E402
 from tests.conftest import requires_db  # noqa: E402
 
 
-def _enable_authentik_with_mocks(monkeypatch, *, sub: str, email: str):
+def _enable_authentik_with_mocks(monkeypatch, *, sub: str, email: str,
+                                 email_verified: bool = True):
     """Flip the flag on and stub the IdP flow + verifier + Redis-backed stores."""
     monkeypatch.setattr("app.api.auth_authentik.settings.auth_provider", "authentik")
 
@@ -65,7 +66,9 @@ def _enable_authentik_with_mocks(monkeypatch, *, sub: str, email: str):
 
     class _FakeVerifier:
         def verify(self, token, *, require_issuer=True):  # noqa: ARG002
-            return VerifiedToken(sub=sub, email=email, name="T", claims={})
+            return VerifiedToken(
+                sub=sub, email=email, name="T", claims={}, email_verified=email_verified
+            )
 
     monkeypatch.setattr("app.api.auth_authentik._authenticator", lambda: _FakeAuthenticator())
     monkeypatch.setattr(
@@ -123,10 +126,14 @@ async def test_login_succeeds_for_invited_stub(monkeypatch):
         await s.commit()
     _, store = _enable_authentik_with_mocks(monkeypatch, sub="sub-invited", email=email)
 
+    # Mobile client (mobile=true): body carries the bearer session token.
     async with _client() as ac:
-        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+        r = await ac.post(
+            _LOGIN, json={"username": email, "password": "pw", "mobile": True}
+        )
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    body = r.json()
+    assert body["status"] == "ok"
     # Session + CSRF cookies set.
     cookie_names = {c for c in r.cookies}
     assert "companion_sid" in cookie_names
@@ -134,6 +141,40 @@ async def test_login_succeeds_for_invited_stub(monkeypatch):
     # The session maps to the opaque Authentik subject (no email/PII stored).
     sid = r.cookies["companion_sid"]
     assert await store.get(sid) == "sub-invited"
+    # Mobile bearer: the body carries the SAME opaque session id (+ csrf for parity).
+    assert body["session_token"] == sid
+    assert body["csrf_token"] == r.cookies["companion_csrf"]
+    await _delete_user(email)
+
+
+@requires_db
+async def test_login_web_omits_session_token_from_body(monkeypatch):
+    """Web clients (mobile not set) get the session ONLY via the httpOnly cookie —
+    the opaque sid must never appear in the JSON body where browser JS could read
+    it, preserving the full httpOnly/XSS posture (safety follow-up)."""
+    email = "authentik-web@example.com"
+    await _delete_user(email)
+    async with db_module.async_session_factory() as s:
+        s.add(
+            User(
+                email=email,
+                preferred_name="W",
+                display_name="W",
+                account_status=AccountStatus.INVITED,
+            )
+        )
+        await s.commit()
+    _enable_authentik_with_mocks(monkeypatch, sub="sub-web", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"status": "ok"}
+    assert "session_token" not in body
+    assert "csrf_token" not in body
+    # The session still exists — delivered via the httpOnly cookie only.
+    assert "companion_sid" in {c for c in r.cookies}
     await _delete_user(email)
 
 
@@ -152,6 +193,33 @@ async def test_login_refuses_deactivated_account(monkeypatch):
         )
         await s.commit()
     _enable_authentik_with_mocks(monkeypatch, sub="sub-deact", email=email)
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
+    assert r.status_code == 403
+    await _delete_user(email)
+
+
+@requires_db
+async def test_login_refuses_unverified_email(monkeypatch):
+    """Cutover gate #5: an id_token whose email is present but NOT verified is refused
+    before any invite-only resolution / backfill / session mint."""
+    email = "authentik-unverified@example.com"
+    await _delete_user(email)
+    async with db_module.async_session_factory() as s:
+        s.add(
+            User(
+                email=email,
+                preferred_name="U",
+                display_name="U",
+                account_status=AccountStatus.ACTIVE,
+                external_subject_id="sub-unverified",
+            )
+        )
+        await s.commit()
+    _enable_authentik_with_mocks(
+        monkeypatch, sub="sub-unverified", email=email, email_verified=False
+    )
 
     async with _client() as ac:
         r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
