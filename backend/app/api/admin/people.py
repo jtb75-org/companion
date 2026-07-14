@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AdminUser, require_admin_role
 from app.db.session import get_maintenance_db
+from app.integrations.authentik_admin import provision_authentik_account
 from app.integrations.email_service import (
     send_assignment_request_notification,
     send_caregiver_invitation,
@@ -265,6 +266,16 @@ async def create_person(
         db.add(admin_record)
         await db.flush()
         admin_id = str(admin_record.id)
+
+    # Provision a matching Authentik account for the person (branded BFF
+    # provisioning, PR 1). Commit first so a provisioning error can never roll
+    # back the row; the call is best-effort + idempotent + inert on the Firebase
+    # default, so it never affects this response.
+    if user_id or admin_id:
+        await db.commit()
+        await provision_authentik_account(
+            email, f"{first_name} {last_name}".strip() or email
+        )
 
     return {
         "created": True,
