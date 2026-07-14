@@ -37,6 +37,7 @@ from app.models.user import User
 from app.schemas.activation import ActivationSetPassword
 from app.services.activation_service import (
     consume_activation_token,
+    release_activation_token,
     resolve_activation_email,
 )
 
@@ -87,30 +88,37 @@ async def set_activation_password(data: ActivationSetPassword):
     password set, so an IdP failure leaves it usable for a retry."""
     _require_authentik_enabled()
 
-    email = await resolve_activation_email(data.token)
+    # Atomically CLAIM the token BEFORE any IdP side effect — this guarded consume is
+    # the single-use serialization point. Two concurrent redemptions of the same token
+    # race here and exactly one wins; the loser sees None → 400 and never reaches
+    # set_authentik_password, so the password can never be set twice. (A non-consuming
+    # check here would leave a window where both requests set the password — the P1 the
+    # earlier ordering had.) On ANY failure below we RELEASE the claim so the holder can
+    # retry, since the password was never actually set.
+    email = await consume_activation_token(data.token)
     if email is None:
         raise HTTPException(400, "Invalid, expired, or already-used activation link")
 
-    # Defensive: a token is only ever issued alongside an account, but confirm one
-    # exists (and get a name for provisioning) before touching the IdP.
-    name = await _lookup_account_name(email)
-    if name is None:
-        raise HTTPException(400, "Invalid, expired, or already-used activation link")
-
-    # Provision-ensure (idempotent self-heal if account-creation provisioning failed),
-    # then set the password. Provisioning is best-effort/never-raises; the password set
-    # is must-succeed and its failure is surfaced as a clean 502 (log the email only,
-    # never the password).
-    await provision_authentik_account(email, name)
     try:
+        # Defensive: a token is only ever issued alongside an account, but confirm one
+        # exists (and get a name for provisioning) before touching the IdP.
+        name = await _lookup_account_name(email)
+        if name is None:
+            raise HTTPException(400, "Invalid, expired, or already-used activation link")
+
+        # Provision-ensure (idempotent self-heal if account-creation provisioning
+        # failed), then set the password. Provisioning is best-effort/never-raises;
+        # the password set is must-succeed (log the email only, never the password).
+        await provision_authentik_account(email, name)
         await set_authentik_password(email, data.password.get_secret_value())
+    except HTTPException:
+        await release_activation_token(data.token)  # keep the token live (e.g. no account)
+        raise
     except Exception:
+        await release_activation_token(data.token)  # IdP failure → retryable
         log.error("failed to set Authentik password for %s", email, exc_info=True)
         raise HTTPException(
             502, "Could not set your password. Please try again."
         ) from None
-
-    # Consume AFTER the password is set so a failed set above leaves the token live.
-    await consume_activation_token(data.token)
 
     return {"ok": True, "email": email}

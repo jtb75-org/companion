@@ -77,6 +77,25 @@ async def resolve_activation_email(token: str) -> str | None:
     return row.email
 
 
+async def release_activation_token(token: str) -> None:
+    """Un-claim a token (``used_at`` → NULL) so a failed redemption can be retried.
+
+    Called ONLY by the set-password endpoint after IT successfully claimed the token
+    (via ``consume_activation_token``) but a later step failed before the password was
+    set. It is safe to restore unconditionally: while this caller holds the claim, a
+    concurrent request's guarded consume returned None (``used_at`` was set), so no one
+    else could have claimed the same token — this row is unambiguously ours to release.
+    An already-expired token stays dead (``resolve``/``consume`` still check expiry).
+    """
+    async with maintenance_session() as mdb:
+        await mdb.execute(
+            update(ActivationToken)
+            .where(ActivationToken.token == token)
+            .values(used_at=None)
+        )
+        await mdb.commit()
+
+
 async def consume_activation_token(token: str) -> str | None:
     """Atomically mark a valid token used and return its email, else None.
 

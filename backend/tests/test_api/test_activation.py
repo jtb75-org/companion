@@ -349,3 +349,87 @@ async def test_create_admin_no_activation_under_firebase(monkeypatch):
         ).scalars().all()
     assert rows == []
     await _delete_admin(email)
+
+
+# ── 9. single-use is enforced BEFORE the IdP side effect (P1 race fix) ───────────
+
+
+@requires_db
+async def test_set_password_claims_token_before_idp_call(monkeypatch):
+    """The token is CLAIMED (consumed) BEFORE set_authentik_password runs, so a
+    concurrent redemption of the same token can't also reach the IdP and set a second
+    password. Proven deterministically: the set-password spy asserts the token no
+    longer resolves by the time the IdP side effect runs."""
+    monkeypatch.setattr(settings, "auth_provider", "authentik")
+    email = f"act-claim-{uuid.uuid4()}@t.io"
+    await _delete_admin(email)
+    await _seed_admin(email)
+    token = await activation_service.issue_activation_token(email)
+
+    seen: dict[str, str | None] = {}
+
+    async def _provision(email_: str, name_: str) -> None:
+        return None
+
+    async def _set_password(email_: str, password_: str) -> None:
+        # By the time the IdP side effect runs, the token must already be claimed.
+        seen["resolved"] = await activation_service.resolve_activation_email(token)
+
+    monkeypatch.setattr("app.api.v1.activation.provision_authentik_account", _provision)
+    monkeypatch.setattr("app.api.v1.activation.set_authentik_password", _set_password)
+
+    async with _client() as ac:
+        r = await ac.post(
+            "/api/v1/activation/set-password",
+            json={"token": token, "password": "brand-new-pw-123"},
+        )
+    assert r.status_code == 200, r.text
+    assert seen["resolved"] is None  # already claimed before the IdP call
+    await _delete_admin(email)
+
+
+# ── 10. an IdP failure RELEASES the token so the holder can retry ────────────────
+
+
+@requires_db
+async def test_set_password_releases_token_on_idp_failure(monkeypatch):
+    """A must-succeed set failure returns 502 AND releases the claim (the password was
+    never set), so a follow-up attempt with a working IdP succeeds on the same token."""
+    monkeypatch.setattr(settings, "auth_provider", "authentik")
+    email = f"act-rel-{uuid.uuid4()}@t.io"
+    password = "brand-new-pw-123"
+    await _delete_admin(email)
+    await _seed_admin(email)
+    token = await activation_service.issue_activation_token(email)
+
+    calls = {"n": 0}
+
+    async def _provision(email_: str, name_: str) -> None:
+        return None
+
+    async def _set_password_flaky(email_: str, password_: str) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("authentik unreachable")
+        # second attempt succeeds (no raise)
+
+    monkeypatch.setattr("app.api.v1.activation.provision_authentik_account", _provision)
+    monkeypatch.setattr(
+        "app.api.v1.activation.set_authentik_password", _set_password_flaky
+    )
+
+    async with _client() as ac:
+        r1 = await ac.post(
+            "/api/v1/activation/set-password",
+            json={"token": token, "password": password},
+        )
+        assert r1.status_code == 502
+        # Released → still valid for a retry.
+        assert await activation_service.resolve_activation_email(token) == email
+        r2 = await ac.post(
+            "/api/v1/activation/set-password",
+            json={"token": token, "password": password},
+        )
+        assert r2.status_code == 200, r2.text
+    assert calls["n"] == 2
+    await _delete_admin(email)
