@@ -20,8 +20,9 @@ idempotent and re-run every deploy on purpose:
 - ``ALTER DEFAULT PRIVILEGES`` makes every FUTURE owner-created table auto-grant
   (without it the app 'permission denied's on the newest table until re-granted).
 
-RLS is NOT enabled here (that is Phase 2); until then ``companion_app`` simply
-has full DML and the app behaves exactly as today.
+``companion_app`` gets full DML on every table EXCEPT the append-only audit tables
+(``caregiver_activity_log``, ``account_audit_log``), which are narrowed back to
+INSERT + SELECT immediately after the broad grant (see ``_REVOKE_STATEMENTS``).
 """
 
 from __future__ import annotations
@@ -54,6 +55,24 @@ _GRANT_STATEMENTS = (
     f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {APP_ROLE}",
     f"ALTER DEFAULT PRIVILEGES IN SCHEMA public "
     f"GRANT USAGE, SELECT ON SEQUENCES TO {APP_ROLE}",
+)
+
+# Append-only audit tables: the runtime role may INSERT + SELECT but must NOT
+# UPDATE/DELETE, so an app bug or a compromised companion_app cannot tamper with or
+# erase the audit trail (docs/caregiver-access-and-privacy.md §5 + Appendix C:
+# "caregiver_activity_log is append-only — no UPDATE or DELETE grants"). Applied AFTER
+# the broad GRANT above, and because this whole step re-runs every deploy the REVOKE is
+# self-healing (a one-shot migration would be re-granted by the next ON ALL TABLES).
+# NOTE on what this does NOT block, by design:
+#  - retention's purge of old signup_refused rows runs under the MAINTENANCE (BYPASSRLS)
+#    role, not companion_app, so it is unaffected (app/workers/retention.py);
+#  - ON DELETE CASCADE from a user/trusted_contact deletion is a referential action run
+#    as the table OWNER, so it bypasses this role-level REVOKE (account deletion still
+#    cascades) — the CASCADE-vs-retention question is tracked separately.
+_APPEND_ONLY_AUDIT_TABLES = ("caregiver_activity_log", "account_audit_log")
+_REVOKE_STATEMENTS = tuple(
+    f"REVOKE UPDATE, DELETE ON {table} FROM {APP_ROLE}"
+    for table in _APPEND_ONLY_AUDIT_TABLES
 )
 
 
@@ -91,7 +110,15 @@ async def apply_grants(
 
             for stmt in _GRANT_STATEMENTS:
                 await conn.execute(text(stmt))
-        logger.info("grants: applied DML + default privileges to %r", APP_ROLE)
+            # Then narrow the audit tables back to append-only (INSERT + SELECT).
+            for stmt in _REVOKE_STATEMENTS:
+                await conn.execute(text(stmt))
+        logger.info(
+            "grants: applied DML + default privileges to %r; audit tables %s are "
+            "append-only (UPDATE/DELETE revoked)",
+            APP_ROLE,
+            list(_APPEND_ONLY_AUDIT_TABLES),
+        )
     finally:
         await engine.dispose()
 
