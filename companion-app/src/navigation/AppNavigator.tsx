@@ -1,16 +1,18 @@
 import React, { useEffect, useState } from 'react'
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs'
 import { NavigationContainer } from '@react-navigation/native'
-import { Text, ActivityIndicator, View } from 'react-native'
+import { Text, ActivityIndicator, View, Linking } from 'react-native'
 import { TodayScreen } from '../screens/TodayScreen'
 import { ChatScreen } from '../screens/ChatScreen'
 import { MyStuffScreen } from '../screens/MyStuffScreen'
 import { ProfileScreen } from '../screens/ProfileScreen'
 import { LoginScreen } from '../auth/LoginScreen'
 import { AuthentikLoginScreen } from '../auth/AuthentikLoginScreen'
+import { AuthentikActivateScreen } from '../auth/AuthentikActivateScreen'
 import { OnboardingScreen } from '../auth/OnboardingScreen'
 import { useAuth } from '../auth/AuthProvider'
 import { AUTH_PROVIDER } from '../auth/authConfig'
+import { parseActivationToken } from './linking'
 import { api } from '../api/client'
 import { usePushNotifications } from '../hooks/usePushNotifications'
 import { colors } from '../theme/colors'
@@ -34,7 +36,36 @@ function TabIcon({ label, focused }: { label: string; focused: boolean }) {
 export function AppNavigator() {
   const { user, isAuthenticated, loading } = useAuth()
   const [profileComplete, setProfileComplete] = useState<boolean | null>(null)
+  // Pending account-activation token from an inbound /activate deep link.
+  // Authentik-only: in Firebase mode this stays null and the screen is never
+  // shown, so the live path is completely unchanged.
+  const [activationToken, setActivationToken] = useState<string | null>(null)
   usePushNotifications(profileComplete === true)
+
+  // Handle the account-activation universal / app link:
+  //   https://app.mydailydignity.com/activate?token=...
+  // Cold start via getInitialURL, warm via the 'url' event. Only acts under
+  // AUTH_PROVIDER === 'authentik'; under firebase the link is ignored (inert).
+  useEffect(() => {
+    if (AUTH_PROVIDER !== 'authentik') return
+    let cancelled = false
+
+    const handleUrl = (url: string | null | undefined) => {
+      const token = parseActivationToken(url)
+      // Only set on a real activation link; leave other deep links alone.
+      if (token && !cancelled) setActivationToken(token)
+    }
+
+    Linking.getInitialURL()
+      .then((url) => handleUrl(url))
+      .catch(() => {})
+    const sub = Linking.addEventListener('url', ({ url }) => handleUrl(url))
+
+    return () => {
+      cancelled = true
+      sub.remove()
+    }
+  }, [])
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -65,6 +96,17 @@ export function AppNavigator() {
   if (loading) return null
 
   if (!isAuthenticated) {
+    // A member who tapped their email link lands on "set your password" first
+    // (Authentik only). After they set it, AuthProvider signs them in and this
+    // branch is left automatically. "Back to Sign In" clears the token.
+    if (AUTH_PROVIDER === 'authentik' && activationToken) {
+      return (
+        <AuthentikActivateScreen
+          token={activationToken}
+          onBackToSignIn={() => setActivationToken(null)}
+        />
+      )
+    }
     return AUTH_PROVIDER === 'authentik' ? <AuthentikLoginScreen /> : <LoginScreen />
   }
 

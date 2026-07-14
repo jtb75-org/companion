@@ -1,0 +1,15 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["2NQD86RATH.com.mydailydignity.companion"],
+        "components": [
+          {
+            "/": "/activate",
+            "comment": "Member account-activation deep link — opens the D.D. app to the set-password screen (token in the ?token= query)."
+          }
+        ]
+      }
+    ]
+  }
+}

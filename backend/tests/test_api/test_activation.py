@@ -247,31 +247,32 @@ async def test_consume_is_single_use(monkeypatch):
     await _delete_admin(email)
 
 
-# ── 7. create_admin_user issues a token + sends activation email under authentik ─
+# ── 7. create_admin_user calls the shared activation helper (+ provision) ────────
 
 
 @requires_db
-async def test_create_admin_issues_activation_under_authentik(monkeypatch):
+async def test_create_admin_calls_activation_helper(monkeypatch):
+    """create_admin_user provisions then calls the shared send_activation_if_enabled
+    helper with the new admin's email + name. (The helper's own inert/active behavior
+    is covered in test 8.)"""
     monkeypatch.setattr(settings, "auth_provider", "authentik")
     from app.api.admin import admin_users as admin_mod
     from app.main import app
 
-    sent: list[tuple[str, str, str]] = []
+    helper_calls: list[tuple[str, str]] = []
     provisioned: list[tuple[str, str]] = []
 
-    async def _send(to_email: str, to_name: str, token: str) -> bool:
-        sent.append((to_email, to_name, token))
-        return True
+    async def _helper(email_: str, name_: str) -> None:
+        helper_calls.append((email_, name_))
 
-    async def _provision(email: str, name: str) -> None:
-        provisioned.append((email, name))
+    async def _provision(email_: str, name_: str) -> None:
+        provisioned.append((email_, name_))
 
-    monkeypatch.setattr(admin_mod, "send_activation_email", _send)
+    monkeypatch.setattr(admin_mod, "send_activation_if_enabled", _helper)
     monkeypatch.setattr(admin_mod, "provision_authentik_account", _provision)
 
     email = f"act-create-{uuid.uuid4()}@t.io"
     await _delete_admin(email)
-    # Bypass admin auth deterministically (no reliance on DB ordering).
     app.dependency_overrides[admin_mod._admin] = lambda: SimpleNamespace(
         role="admin", email="tester@t.io"
     )
@@ -286,61 +287,30 @@ async def test_create_admin_issues_activation_under_authentik(monkeypatch):
         app.dependency_overrides.pop(admin_mod._admin, None)
 
     assert provisioned == [(email, "Created Admin")]
-    assert len(sent) == 1
-    to_email, to_name, token = sent[0]
-    assert (to_email, to_name) == (email, "Created Admin")
-    assert token  # a real token was issued
-    # And the token actually resolves (was persisted).
-    assert await activation_service.resolve_activation_email(token) == email
+    assert helper_calls == [(email, "Created Admin")]
     await _delete_admin(email)
 
 
-# ── 8. create_admin_user does NOT touch activation under firebase ───────────────
+# ── 8. send_activation_if_enabled: inert under firebase, issues+sends on authentik ─
 
 
 @requires_db
-async def test_create_admin_no_activation_under_firebase(monkeypatch):
+async def test_send_activation_if_enabled_inert_under_firebase(monkeypatch):
+    """The shared helper is a no-op on the Firebase default: no email, no token row."""
     monkeypatch.setattr(settings, "auth_provider", "firebase")
-    from app.api.admin import admin_users as admin_mod
-    from app.main import app
-
     sent: list = []
-    issued: list = []
 
     async def _send(to_email: str, to_name: str, token: str) -> bool:
         sent.append((to_email, to_name, token))
         return True
 
-    async def _issue(email: str, *, ttl_hours: int = 72) -> str:
-        issued.append(email)
-        return "should-not-be-called"
-
-    async def _provision(email: str, name: str) -> None:
-        return None
-
-    monkeypatch.setattr(admin_mod, "send_activation_email", _send)
-    monkeypatch.setattr(admin_mod, "issue_activation_token", _issue)
-    monkeypatch.setattr(admin_mod, "provision_authentik_account", _provision)
-
-    email = f"act-fb-create-{uuid.uuid4()}@t.io"
+    monkeypatch.setattr("app.integrations.email_service.send_activation_email", _send)
+    email = f"act-help-fb-{uuid.uuid4()}@t.io"
     await _delete_admin(email)
-    app.dependency_overrides[admin_mod._admin] = lambda: SimpleNamespace(
-        role="admin", email="tester@t.io"
-    )
-    try:
-        async with _client() as ac:
-            r = await ac.post(
-                "/admin/admin-users",
-                json={"email": email, "name": "FB Admin", "role": "editor"},
-            )
-        assert r.status_code == 201, r.text
-    finally:
-        app.dependency_overrides.pop(admin_mod._admin, None)
 
-    # Inert under firebase: no token issued, no email sent.
-    assert issued == []
+    await activation_service.send_activation_if_enabled(email, "No One")
+
     assert sent == []
-    # No activation row was created either.
     async with db_module.async_session_factory() as s:
         rows = (
             await s.execute(
@@ -348,6 +318,29 @@ async def test_create_admin_no_activation_under_firebase(monkeypatch):
             )
         ).scalars().all()
     assert rows == []
+    await _delete_admin(email)
+
+
+@requires_db
+async def test_send_activation_if_enabled_issues_and_sends_under_authentik(monkeypatch):
+    """Under Authentik the helper issues a real token and sends the branded email."""
+    monkeypatch.setattr(settings, "auth_provider", "authentik")
+    sent: list = []
+
+    async def _send(to_email: str, to_name: str, token: str) -> bool:
+        sent.append((to_email, to_name, token))
+        return True
+
+    monkeypatch.setattr("app.integrations.email_service.send_activation_email", _send)
+    email = f"act-help-ak-{uuid.uuid4()}@t.io"
+    await _delete_admin(email)
+
+    await activation_service.send_activation_if_enabled(email, "Ada Admin")
+
+    assert len(sent) == 1
+    to_email, to_name, token = sent[0]
+    assert (to_email, to_name) == (email, "Ada Admin")
+    assert await activation_service.resolve_activation_email(token) == email
     await _delete_admin(email)
 
 

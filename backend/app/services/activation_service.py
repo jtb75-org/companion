@@ -11,13 +11,40 @@ deliberately not under per-user RLS (migration 040). Timezone-naive ``datetime.u
 matches the codebase convention (see invitation_service).
 """
 
+import logging
 import secrets
 from datetime import datetime, timedelta
 
 from sqlalchemy import select, update
 
+from app.config import settings
 from app.db.session import maintenance_session
 from app.models.activation_token import ActivationToken
+
+log = logging.getLogger("companion.activation")
+
+
+async def send_activation_if_enabled(email: str, name: str) -> None:
+    """Under Authentik, issue an activation token + email the branded set-password link.
+
+    Shared by every account-creation seam (admin + member). BEST-EFFORT: a token/mail
+    failure must NEVER fail the already-committed account creation — log and continue
+    (a re-issue on the next admin action recovers). NO-OP on the Firebase default
+    (``authentik_login_enabled`` False), so those accounts keep Google sign-in and the
+    default path stays byte-identical. Call it AFTER the account row is committed."""
+    if not settings.authentik_login_enabled:
+        return
+    try:
+        # Lazy import: email_service pulls integrations that need not load for the
+        # (common) inert path, and keeps this service import-cycle-free.
+        from app.integrations.email_service import send_activation_email
+
+        token = await issue_activation_token(email)
+        await send_activation_email(email, name, token)
+    except Exception:
+        log.error(
+            "failed to issue/send activation email for %s", email, exc_info=True
+        )
 
 
 def generate_activation_token() -> str:

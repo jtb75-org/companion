@@ -71,6 +71,25 @@ extension AppDelegate {
   }
 }
 
+// Universal Links: forward the incoming activation URL
+// (https://app.mydailydignity.com/activate?token=...) to React Native's
+// Linking module so AppNavigator can route to the "set your password" screen.
+// Harmless in Firebase mode: the JS deep-link handler ignores /activate links
+// unless AUTH_PROVIDER === 'authentik'.
+extension AppDelegate {
+  func application(
+    _ application: UIApplication,
+    continue userActivity: NSUserActivity,
+    restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void
+  ) -> Bool {
+    return RCTLinkingManager.application(
+      application,
+      continue: userActivity,
+      restorationHandler: restorationHandler
+    )
+  }
+}
+
 class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
   override func sourceURL(for bridge: RCTBridge) -> URL? {
     self.bundleURL()
