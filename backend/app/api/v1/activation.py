@@ -40,6 +40,7 @@ from app.services.activation_service import (
     release_activation_token,
     resolve_activation_email,
 )
+from app.services.password_policy import PasswordPolicyError, validate_password
 
 log = logging.getLogger("companion.activation")
 
@@ -105,6 +106,16 @@ async def set_activation_password(data: ActivationSetPassword):
         name = await _lookup_account_name(email)
         if name is None:
             raise HTTPException(400, "Invalid, expired, or already-used activation link")
+
+        # Strength-gate BEFORE any IdP side effect. 422 (distinct from the 400
+        # invalid/expired-token contract) carries the plain policy message. Raising an
+        # HTTPException here falls into the ``except HTTPException`` below, which
+        # RELEASES the claimed token — the password was never set, so the holder can
+        # retry with a stronger one. The rejected password is never echoed/logged.
+        try:
+            validate_password(data.password.get_secret_value(), email=email)
+        except PasswordPolicyError as e:
+            raise HTTPException(422, e.message) from None
 
         # Provision-ensure (idempotent self-heal if account-creation provisioning
         # failed), then set the password. Provisioning is best-effort/never-raises;

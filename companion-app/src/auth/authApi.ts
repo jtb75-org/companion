@@ -128,6 +128,17 @@ export async function setActivationPassword(token: string, password: string): Pr
     throw new AuthLoginError(null)
   }
   if (!res.ok) {
+    // 422 = password-policy rejection: surface the backend's plain message so the
+    // screen can tell the member what to fix (distinct from a 400 bad/expired link).
+    if (res.status === 422) {
+      let detail = ''
+      try {
+        detail = ((await res.json()) as { detail?: string })?.detail || ''
+      } catch {
+        // non-JSON body → fall through to a generic 422
+      }
+      throw new AuthLoginError(422, detail || undefined)
+    }
     throw new AuthLoginError(res.status)
   }
   const data = (await res.json()) as { ok: boolean; email: string }

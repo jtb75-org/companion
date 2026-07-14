@@ -203,6 +203,35 @@ async def test_set_password_409_when_stub_active(monkeypatch):
     await _delete_user(cg_email)
 
 
+# ── 3b. 422 on a weak password (policy gate), no IdP side effect ─────────────────
+
+
+@requires_db
+async def test_set_password_422_on_weak_password(monkeypatch):
+    monkeypatch.setattr(settings, "auth_provider", "authentik")
+    spies = _Spies(monkeypatch)
+    member_email = f"sp-weak-member-{uuid.uuid4()}@t.io"
+    cg_email = f"sp-weak-cg-{uuid.uuid4()}@t.io"
+    token = f"tok-{uuid.uuid4().hex}"
+    await _delete_user(member_email)
+    await _delete_user(cg_email)
+    await _seed_member_with_pending_invitee(member_email, cg_email, token=token)
+
+    async with _client() as ac:
+        # "password" is both too short (< 10) and a denylisted common password.
+        r = await ac.post(
+            "/api/v1/invitations/set-password",
+            json={"token": token, "password": "password"},
+        )
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]  # non-empty plain policy message
+    # The password is strength-gated BEFORE the IdP — nothing was provisioned/set.
+    assert spies.provision == []
+    assert spies.set_password == []
+    await _delete_user(member_email)
+    await _delete_user(cg_email)
+
+
 # ── 4. 400 on an invalid/unknown token ──────────────────────────────────────────
 
 

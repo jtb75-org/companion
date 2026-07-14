@@ -192,6 +192,45 @@ async def test_set_password_happy_path(monkeypatch):
     await _delete_admin(email)
 
 
+# ── 4b. weak password → 422 + token RELEASED for retry; strong → 200 ─────────────
+
+
+@requires_db
+async def test_set_password_422_on_weak_then_200_on_strong(monkeypatch):
+    """A policy rejection returns 422 AND releases the claimed token (the password was
+    never set), so a follow-up attempt with a strong password succeeds on the same
+    token."""
+    monkeypatch.setattr(settings, "auth_provider", "authentik")
+    spies = _Spies(monkeypatch)
+    email = f"act-weak-{uuid.uuid4()}@t.io"
+    await _delete_admin(email)
+    await _seed_admin(email, name="Willa Weak")
+    token = await activation_service.issue_activation_token(email)
+
+    async with _client() as ac:
+        # "password" is too short (< 10) AND denylisted.
+        r1 = await ac.post(
+            "/api/v1/activation/set-password",
+            json={"token": token, "password": "password"},
+        )
+        assert r1.status_code == 422, r1.text
+        assert r1.json()["detail"]  # non-empty plain policy message
+        # No IdP side effect on a policy rejection.
+        assert spies.provision == []
+        assert spies.set_password == []
+        # Token was RELEASED — still valid for a retry.
+        assert await activation_service.resolve_activation_email(token) == email
+
+        # A strong password now succeeds on the same token.
+        r2 = await ac.post(
+            "/api/v1/activation/set-password",
+            json={"token": token, "password": "sunny-meadow-lake-42"},
+        )
+        assert r2.status_code == 200, r2.text
+    assert spies.set_password == [(email, "sunny-meadow-lake-42")]
+    await _delete_admin(email)
+
+
 # ── 5. set-password 400 on invalid / expired / used token ───────────────────────
 
 

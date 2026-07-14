@@ -29,6 +29,7 @@ from app.schemas.invitation import (
     SetPasswordRequest,
 )
 from app.services import invitation_service
+from app.services.password_policy import PasswordPolicyError, validate_password
 
 log = logging.getLogger("companion.invitations")
 
@@ -225,6 +226,16 @@ async def set_invitation_password(data: SetPasswordRequest):
         ).scalar_one_or_none()
     if stub is None or stub.account_status != AccountStatus.INVITED:
         raise HTTPException(409, "This account is already set up. Please sign in.")
+
+    # Strength-gate the password BEFORE touching the IdP. 422 (distinct from the 400
+    # "invalid/expired token" the mobile client maps to invalid-link) so clients can
+    # show the plain policy message. The rejected password is never echoed/logged.
+    try:
+        validate_password(
+            data.password.get_secret_value(), email=contact.contact_email
+        )
+    except PasswordPolicyError as e:
+        raise HTTPException(422, e.message) from None
 
     # Provision-ensure (idempotent — self-heals if PR 1 provisioning had failed),
     # then set the password. Provisioning is best-effort/never-raises; the password
