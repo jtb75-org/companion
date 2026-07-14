@@ -44,6 +44,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.session import get_session_store
 from app.config import settings
 from app.db.context import set_login_subject_context, set_user_context
+from app.db.session import maintenance_session
+from app.models.trusted_contact import TrustedContact
 from app.models.user import User
 
 # Mirrors the Firebase path (get_current_user) and auth_authentik.login.
@@ -167,3 +169,51 @@ async def resolve_session_principal(
     # Tenant context for the rest of the request (same as the Firebase path).
     await set_user_context(db, user.id)
     return SessionPrincipal(user=user, email=user.email, subject=subject)
+
+
+async def resolve_caregiver_session(request: Request) -> str | None:
+    """Return the IdP-verified EMAIL for a caregiver's BFF session, else ``None``.
+
+    The caregiver auth path (app/api/caregiver/*, /api/v1/auth/my-charges) is keyed on
+    the verified email — ``trusted_contacts.contact_email`` — NOT a ``users`` row (a
+    pure caregiver has none). This is the caregiver counterpart to
+    ``resolve_session_principal``; it returns just the email so the existing
+    ``caregiver_authorized_for_member(email, user_id)`` gate is unchanged.
+
+    ``None`` means "no Authentik caregiver session — fall back to the Firebase bearer
+    path". Returns ``None`` when the switch is off (inert; first line), there is no
+    session (``resolve_session_subject``), or the subject maps to neither a member nor
+    an active caregiver.
+
+    Resolution runs on the MAINTENANCE (BYPASSRLS) session because caregiver auth runs
+    before any member GUC exists and ``trusted_contacts`` is under per-member RLS (030),
+    so a normal app-role read would fail closed. We resolve the subject to an email via:
+      1) a ``users`` row by subject — a member who is ALSO a caregiver — else
+      2) an ACTIVE ``trusted_contacts`` row by subject — a pure caregiver.
+    The subject was bound at ``/auth/login`` only after ``email_verified``, so the
+    returned email is IdP-verified. CSRF on state-changing methods is already enforced
+    inside ``resolve_session_subject`` for cookie sessions."""
+    if not settings.authentik_login_enabled:
+        return None
+    subject = await resolve_session_subject(request)
+    if subject is None:
+        return None
+    async with maintenance_session() as mdb:
+        member_email = (
+            await mdb.execute(
+                select(User.email).where(User.external_subject_id == subject)
+            )
+        ).scalar_one_or_none()
+        if member_email:
+            return member_email.strip().lower()
+        caregiver_email = (
+            await mdb.execute(
+                select(TrustedContact.contact_email)
+                .where(
+                    TrustedContact.external_subject_id == subject,
+                    TrustedContact.is_active.is_(True),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return caregiver_email.strip().lower() if caregiver_email else None

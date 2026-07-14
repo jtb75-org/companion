@@ -50,7 +50,9 @@ from app.db.context import (
     set_login_subject_context,
     set_user_context,
 )
+from app.db.session import maintenance_session
 from app.models.audit import AccountAuditLog
+from app.models.trusted_contact import TrustedContact
 from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -119,6 +121,68 @@ def _set_cookie(response: Response, name: str, value: str, *, http_only: bool) -
 def _clear_cookie(response: Response, name: str) -> None:
     domain = settings.session_cookie_domain or None
     response.delete_cookie(key=name, path="/", domain=domain)
+
+
+async def _mint_session(response: Response, *, subject: str, mobile: bool) -> dict:
+    """Create a BFF session for ``subject`` and set the auth cookies.
+
+    Stores only the opaque Authentik subject in Redis (no PII). Web clients get the
+    session via the httpOnly cookie alone; a mobile client (``mobile`` true) also
+    receives the opaque session id in the body to store in the Keychain and present as
+    ``Authorization: Bearer``. Shared by the member and caregiver login paths so the
+    cookie/CSRF/mobile-gating behavior is identical."""
+    sid = await get_session_store().create(subject)
+    csrf = secrets.token_urlsafe(32)
+    _set_cookie(response, settings.session_cookie_name, sid, http_only=True)
+    _set_cookie(response, settings.csrf_cookie_name, csrf, http_only=False)
+    result: dict = {"status": "ok"}
+    if mobile:
+        result["session_token"] = sid
+        result["csrf_token"] = csrf
+    return result
+
+
+async def _try_caregiver_login(
+    email: str, subject: str, response: Response, *, mobile: bool
+) -> dict | None:
+    """Mint a caregiver BFF session if ``email`` is an active trusted contact, else None.
+
+    Caregivers have no ``users`` row: they authenticate as the PERSON (the opaque
+    subject) and act for a specific member via the explicit ``user_id`` gate at request
+    time (``caregiver_authorized_for_member``). Here we only admit the person — the
+    verified email must match an ACTIVE ``trusted_contacts`` row — and lazy-backfill the
+    subject on ALL their active rows so subsequent requests resolve by subject
+    (``resolve_caregiver_session``). Returns the login response dict, or ``None`` when
+    the email matches no active caregiver row (the caller then refuses, exactly as
+    before for a non-member email).
+
+    Runs on the MAINTENANCE (BYPASSRLS) session because ``trusted_contacts`` is under
+    per-member RLS (030) and no member GUC exists at login. ``email`` is IdP-verified
+    (email_verified was already asserted above), so binding it is safe."""
+    async with maintenance_session() as mdb:
+        rows = (
+            await mdb.execute(
+                select(TrustedContact).where(
+                    TrustedContact.contact_email == email,
+                    TrustedContact.is_active.is_(True),
+                )
+            )
+        ).scalars().all()
+        if not rows:
+            return None
+        for contact in rows:
+            if contact.external_subject_id is None:
+                contact.external_subject_id = subject
+            elif contact.external_subject_id != subject:
+                # This verified email is already bound to a DIFFERENT subject — a
+                # caregiver's stable identity would be changing under us. Refuse rather
+                # than overwrite (mirrors the member subject-mismatch guard); the raise
+                # rolls back the whole maintenance transaction, so no partial backfill.
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN, "Account identity mismatch"
+                )
+        await mdb.commit()
+    return await _mint_session(response, subject=subject, mobile=mobile)
 
 
 def _client_ip(request: Request) -> str:
@@ -217,7 +281,16 @@ async def login(
             await db.execute(select(User).where(User.email == email))
         ).scalar_one_or_none()
         if user is None:
-            # No row by sub OR email => this email was never invited. Refuse; do NOT
+            # Not a member. Before refusing, admit an invited/active CAREGIVER — a
+            # verified email matching an active trusted_contacts row. Returns a session
+            # response, or None if this email is no caregiver either.
+            caregiver_login = await _try_caregiver_login(
+                email, sub, response, mobile=body.mobile
+            )
+            if caregiver_login is not None:
+                await limiter.reset(user_bucket)  # clear the throttle on success
+                return caregiver_login
+            # No member AND no caregiver => this email was never invited. Refuse; do NOT
             # auto-provision. Audit on its own commit so it survives the 403's
             # request rollback.
             db.add(AccountAuditLog(event="signup_refused", email=email))
@@ -251,22 +324,11 @@ async def login(
 
     await limiter.reset(user_bucket)  # clear the throttle on a successful login
     # Store the opaque Authentik subject (not the email) — no PII in Redis. This is
-    # the same stable subject now persisted as external_subject_id above.
-    sid = await get_session_store().create(sub)
-    csrf = secrets.token_urlsafe(32)
-    _set_cookie(response, settings.session_cookie_name, sid, http_only=True)
-    _set_cookie(response, settings.csrf_cookie_name, csrf, http_only=False)
-    # Web clients use the httpOnly cookie + CSRF cookie above and get NOTHING
-    # sensitive in the body (the sid stays unreadable to browser JS). Only a
-    # mobile client (which set body.mobile) — with no usable cookie jar — receives
-    # the opaque session id to store in the Keychain and present as an
-    # ``Authorization: Bearer <session_token>`` header. Being non-ambient, the
-    # bearer session needs no CSRF (see app/auth/principal.resolve_session_subject).
-    result: dict = {"status": "ok"}
-    if body.mobile:
-        result["session_token"] = sid
-        result["csrf_token"] = csrf
-    return result
+    # the same stable subject now persisted as external_subject_id above. Web clients
+    # get the session via the httpOnly cookie alone; a mobile client (body.mobile)
+    # also receives the opaque sid in the body (Keychain → Authorization: Bearer,
+    # non-ambient → no CSRF; see app/auth/principal.resolve_session_subject).
+    return await _mint_session(response, subject=sub, mobile=body.mobile)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)

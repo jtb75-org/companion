@@ -1,10 +1,11 @@
 """Charges endpoint — returns users assigned to the current admin/caregiver."""
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.firebase import verify_firebase_token
+from app.auth.principal import resolve_caregiver_session
 from app.config import settings
 from app.db.session import get_maintenance_db
 from app.models.trusted_contact import TrustedContact
@@ -15,6 +16,7 @@ router = APIRouter(tags=["Auth"])
 
 @router.get("/api/v1/auth/my-charges")
 async def get_my_charges(
+    request: Request,
     db: AsyncSession = Depends(get_maintenance_db),
     authorization: str | None = Header(None, alias="Authorization"),
 ):
@@ -40,16 +42,20 @@ async def get_my_charges(
                 ]
             }
 
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="No token")
+    # DUAL-RUN: prefer an Authentik caregiver session (inert unless auth_provider ==
+    # "authentik"); else the Firebase bearer path runs UNCHANGED.
+    email = await resolve_caregiver_session(request)
+    if email is None:
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="No token")
 
-    token = authorization.removeprefix("Bearer ").strip()
-    try:
-        decoded = await verify_firebase_token(token)
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e)) from None
+        token = authorization.removeprefix("Bearer ").strip()
+        try:
+            decoded = await verify_firebase_token(token)
+        except ValueError as e:
+            raise HTTPException(status_code=401, detail=str(e)) from None
 
-    email = decoded.get("email")
+        email = decoded.get("email")
     if not email:
         raise HTTPException(status_code=401, detail="No email in token")
 
