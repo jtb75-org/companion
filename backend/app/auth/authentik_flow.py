@@ -33,6 +33,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
+import ssl
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
@@ -93,13 +94,27 @@ class AuthentikFlowAuthenticator:
         # to a CA bundle (PEM) for a private/internal CA. Only meaningful when base_url is
         # https; harmless for http (dev). See settings.authentik_ca_bundle_path (gate #2).
         self._verify = verify
+        self._ssl_context: ssl.SSLContext | None = None
+
+    def _tls_verify(self) -> bool | ssl.SSLContext:
+        """httpx TLS `verify`. A CA bundle PATH is turned into an SSLContext once (httpx
+        deprecates passing a str to `verify`); a bool passes through. Built lazily so the
+        CA file is read only when a private CA is configured (prod) — never in dev/inert."""
+        if isinstance(self._verify, str):
+            if self._ssl_context is None:
+                self._ssl_context = ssl.create_default_context(cafile=self._verify)
+            return self._ssl_context
+        return self._verify
 
     async def authenticate(
         self, username: str, password: str, *, client: httpx.AsyncClient | None = None
     ) -> TokenResult:
         owns = client is None
         client = client or httpx.AsyncClient(
-            base_url=self._base, follow_redirects=True, timeout=10.0, verify=self._verify
+            base_url=self._base,
+            follow_redirects=True,
+            timeout=10.0,
+            verify=self._tls_verify(),
         )
         try:
             await self._run_flow(client, username, password)

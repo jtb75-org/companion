@@ -119,14 +119,44 @@ def test_authenticator_defaults_to_system_cas(monkeypatch):
     assert _authenticator()._verify is True
 
 
-async def test_flow_client_built_with_verify(monkeypatch):
-    """The httpx client the authenticator builds uses its verify value (so a private
-    CA bundle is actually applied to the TLS handshake, not silently dropped)."""
+def _self_signed_ca_pem() -> bytes:
+    """A throwaway self-signed CA PEM, so ssl.create_default_context(cafile=...) loads."""
+    from datetime import datetime, timedelta, timezone
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test-ca")])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM)
+
+
+async def test_flow_client_uses_ssl_context_for_ca_bundle(monkeypatch, tmp_path):
+    """A configured CA bundle PATH is turned into an ssl.SSLContext for the httpx client
+    (httpx deprecates verify=<str>), and that context is actually applied — not dropped."""
     import contextlib
+    import ssl
 
     import httpx
 
     from app.auth.authentik_flow import AuthentikFlowAuthenticator
+
+    ca_file = tmp_path / "ca.crt"
+    ca_file.write_bytes(_self_signed_ca_pem())
 
     captured: dict = {}
     real_client = httpx.AsyncClient
@@ -141,10 +171,19 @@ async def test_flow_client_built_with_verify(monkeypatch):
         auth_flow_slug="f",
         client_id="c",
         redirect_uri="r",
-        verify="/etc/authentik-ca/ca.crt",
+        verify=str(ca_file),
     )
-    # It will fail to connect (no server), but the client is constructed first — which
-    # is all we assert.
+    # It will fail to connect (no server), but the client is constructed first.
     with contextlib.suppress(Exception):
         await auth.authenticate("u", "p")
-    assert captured.get("verify") == "/etc/authentik-ca/ca.crt"
+    assert isinstance(captured.get("verify"), ssl.SSLContext)
+
+
+def test_tls_verify_passes_bool_through():
+    """verify=True (system CAs) passes through unchanged — no SSLContext, no file read."""
+    from app.auth.authentik_flow import AuthentikFlowAuthenticator
+
+    auth = AuthentikFlowAuthenticator(
+        base_url="https://x", auth_flow_slug="f", client_id="c", redirect_uri="r"
+    )
+    assert auth._tls_verify() is True
