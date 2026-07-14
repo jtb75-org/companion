@@ -66,10 +66,12 @@ export async function loadSessionToken(): Promise<string | null> {
   return cachedToken
 }
 
-/** Store the token after a successful login (memory + keychain). */
+/** Store the token after a successful login (keychain first, then memory). */
 export async function persistSessionToken(token: string): Promise<void> {
-  cachedToken = token
+  // Write to the keychain BEFORE caching in memory: if the write throws, we do
+  // not want the in-memory cache holding a sid that was never persisted.
   await backend.set(token)
+  cachedToken = token
 }
 
 /** Clear the token on logout (memory + keychain). */

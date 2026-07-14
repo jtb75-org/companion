@@ -40,6 +40,7 @@ from app.auth.authentik_flow import (
     MfaRequired,
 )
 from app.auth.oidc import OIDCVerifier, TokenError
+from app.auth.principal import _bearer_session_token
 from app.auth.ratelimit import get_login_rate_limiter
 from app.auth.session import get_session_store
 from app.config import settings
@@ -270,11 +271,19 @@ async def login(
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(request: Request, response: Response) -> Response:
-    """Revoke the session and clear cookies."""
+    """Revoke the session (server-side) and clear cookies.
+
+    Web clients present the session via the ``companion_sid`` cookie; mobile
+    clients present it as ``Authorization: Bearer <sid>`` and have no cookie jar.
+    We must revoke BOTH so logout actually kills the Redis session — otherwise a
+    copied/stolen bearer would survive logout until its TTL. A Firebase id_token
+    passed as the bearer is not a session key, so its delete simply misses."""
     _require_authentik_enabled()
-    sid = request.cookies.get(settings.session_cookie_name)
-    if sid:
-        await get_session_store().delete(sid)
+    store = get_session_store()
+    cookie_sid = request.cookies.get(settings.session_cookie_name)
+    bearer_sid = _bearer_session_token(request)
+    for sid in {s for s in (cookie_sid, bearer_sid) if s}:
+        await store.delete(sid)
     _clear_cookie(response, settings.session_cookie_name)
     _clear_cookie(response, settings.csrf_cookie_name)
     response.status_code = status.HTTP_204_NO_CONTENT
