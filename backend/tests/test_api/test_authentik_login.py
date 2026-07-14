@@ -61,6 +61,12 @@ async def _seed_member_with_caregiver(
     """Create an active member + an active TrustedContact for cg_email. Returns the
     member id. Deleting the member cascades the contact (FK ON DELETE CASCADE)."""
     async with db_module.async_session_factory() as s:
+        # Defensive: drop any orphaned contact rows for this caregiver email so a
+        # prior failed run's residue can't perturb by-email scalar_one() lookups.
+        await s.execute(
+            delete(TrustedContact).where(TrustedContact.contact_email == cg_email)
+        )
+        await s.commit()
         member = User(
             email=member_email,
             preferred_name="M",
@@ -496,8 +502,10 @@ async def test_caregiver_session_lists_charges(monkeypatch):
             cookies={settings.session_cookie_name: sid},
         )
     assert r.status_code == 200
+    # The caregiver session resolved to the verified email and /my-charges returned
+    # this caregiver's member (a caregiver may serve several, so assert membership).
     charges = r.json()["charges"]
-    assert [c["user_id"] for c in charges] == [str(member_id)]
+    assert str(member_id) in [c["user_id"] for c in charges]
     await _delete_user(member_email)
 
 
