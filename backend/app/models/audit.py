@@ -15,10 +15,14 @@ class CaregiverActivityLog(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    trusted_contact_id: Mapped[uuid.UUID] = mapped_column(
+    # SET NULL (not CASCADE): revoking/deleting a caregiver RETAINS their activity
+    # history — the row keeps user_id + action + occurred_at, only the contact link is
+    # nulled — so Sam can still view the full log (docs §5). Nullable only for that
+    # post-revocation state; every INSERT sets it (log_caregiver_action).
+    trusted_contact_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("trusted_contacts.id", ondelete="CASCADE"),
-        nullable=False,
+        ForeignKey("trusted_contacts.id", ondelete="SET NULL"),
+        nullable=True,
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

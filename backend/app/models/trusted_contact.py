@@ -61,9 +61,10 @@ class TrustedContact(Base):
     activity_logs = relationship(
         "CaregiverActivityLog",
         back_populates="trusted_contact",
-        cascade="all, delete-orphan",
-        # Defer child deletion to the DB ON DELETE CASCADE (owner-run) so deleting a
-        # trusted_contact (incl. via a user delete that cascades to contacts) does not
-        # emit an ORM DELETE on the append-only log as companion_app. See app/db/grants.py.
+        # NOT delete/delete-orphan: deleting a trusted_contact (revoking a caregiver)
+        # RETAINS its activity log — the FK is ON DELETE SET NULL, so the history stays
+        # for Sam (docs §5). passive_deletes=True so SQLAlchemy defers to that DB SET
+        # NULL instead of emitting an ORM UPDATE on the append-only log (companion_app
+        # lacks UPDATE); default cascade (save-update, merge) keeps normal association.
         passive_deletes=True,
     )

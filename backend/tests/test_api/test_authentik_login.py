@@ -720,6 +720,61 @@ async def test_caregiver_dashboard_view_is_logged(monkeypatch):
     await _delete_user(member_email)
 
 
+@requires_db
+async def test_caregiver_log_retained_when_contact_deleted(monkeypatch):
+    """Revoking a caregiver (deleting the trusted_contact) RETAINS their activity log —
+    the row survives with trusted_contact_id NULL + user_id intact (ON DELETE SET NULL,
+    docs §5 "Sam can view the full activity log")."""
+    member_email = "retain-owner@example.com"
+    cg_email = "retain-cg@example.com"
+    await _delete_user(member_email)
+    member_id = await _seed_member_with_caregiver(
+        member_email, cg_email, cg_subject="sub-retain"
+    )
+    # Write one activity row for (contact, member).
+    async with db_module.async_session_factory() as s:
+        contact = (
+            await s.execute(
+                select(TrustedContact).where(TrustedContact.contact_email == cg_email)
+            )
+        ).scalar_one()
+        contact_id = contact.id
+        s.add(
+            CaregiverActivityLog(
+                trusted_contact_id=contact_id,
+                user_id=member_id,
+                action=CaregiverAction.VIEWED_DASHBOARD,
+                details={"surface": "dashboard"},
+            )
+        )
+        await s.commit()
+
+    # Revoke the caregiver: delete the contact via the ORM (exercises the relationship).
+    async with db_module.async_session_factory() as s:
+        contact = (
+            await s.execute(
+                select(TrustedContact).where(TrustedContact.id == contact_id)
+            )
+        ).scalar_one()
+        await s.delete(contact)
+        await s.commit()
+
+    # The log row is RETAINED with the contact link nulled — not cascade-erased.
+    async with db_module.async_session_factory() as s:
+        logs = (
+            await s.execute(
+                select(CaregiverActivityLog).where(
+                    CaregiverActivityLog.user_id == member_id
+                )
+            )
+        ).scalars().all()
+    assert len(logs) == 1
+    assert logs[0].trusted_contact_id is None
+    assert logs[0].user_id == member_id
+    assert logs[0].action == CaregiverAction.VIEWED_DASHBOARD
+    await _delete_user(member_email)
+
+
 # ── pre-PHI: BFF login audit ──
 
 

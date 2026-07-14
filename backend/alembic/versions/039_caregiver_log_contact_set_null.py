@@ -1,0 +1,64 @@
+"""caregiver_activity_log.trusted_contact_id: ON DELETE CASCADE -> SET NULL
+
+Revision ID: 039
+Revises: 038
+
+Retain caregiver activity history when a trusted_contact is deleted (a revoked
+caregiver): instead of CASCADE-erasing the log rows, the FK now SET NULLs the contact
+link, so the row keeps user_id + action + occurred_at and Sam can still view the full
+log (docs/caregiver-access-and-privacy.md §5). Owner decision 2026-07-14.
+
+The column becomes nullable (only for that post-revocation state; every INSERT still
+sets it). The user_id FK is intentionally left ON DELETE CASCADE — a MEMBER's own
+deletion (right-to-erasure) still removes their audit rows. Pairs with
+passive_deletes=True on the ORM relationships so companion_app (which lacks UPDATE on
+the append-only table, PR #83) never emits an ORM UPDATE — the DB SET NULL, run as the
+table owner, does it.
+"""
+
+from sqlalchemy.dialects.postgresql import UUID
+
+from alembic import op
+
+revision = "039"
+down_revision = "038"
+
+_FK = "caregiver_activity_log_trusted_contact_id_fkey"
+
+
+def upgrade() -> None:
+    op.alter_column(
+        "caregiver_activity_log",
+        "trusted_contact_id",
+        existing_type=UUID(as_uuid=True),
+        nullable=True,
+    )
+    op.drop_constraint(_FK, "caregiver_activity_log", type_="foreignkey")
+    op.create_foreign_key(
+        _FK,
+        "caregiver_activity_log",
+        "trusted_contacts",
+        ["trusted_contact_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+
+
+def downgrade() -> None:
+    # NOTE: rows whose contact was deleted now hold NULL trusted_contact_id; restoring
+    # NOT NULL would fail while any exist. Best-effort structural revert.
+    op.drop_constraint(_FK, "caregiver_activity_log", type_="foreignkey")
+    op.create_foreign_key(
+        _FK,
+        "caregiver_activity_log",
+        "trusted_contacts",
+        ["trusted_contact_id"],
+        ["id"],
+        ondelete="CASCADE",
+    )
+    op.alter_column(
+        "caregiver_activity_log",
+        "trusted_contact_id",
+        existing_type=UUID(as_uuid=True),
+        nullable=False,
+    )
