@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    activation,
     appointments,
     assignments,
     bills,
@@ -23,6 +24,7 @@ from app.api.v1 import (
 router = APIRouter(prefix="/api/v1")
 
 router.include_router(users.router)
+router.include_router(activation.router)
 router.include_router(documents.router)
 router.include_router(sections.router)
 router.include_router(medications.router)

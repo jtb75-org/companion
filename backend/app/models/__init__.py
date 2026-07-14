@@ -1,3 +1,4 @@
+from app.models.activation_token import ActivationToken
 from app.models.admin_user import AdminUser
 from app.models.appointment import Appointment
 from app.models.assignment_request import CaregiverAssignmentRequest
@@ -101,4 +102,5 @@ __all__ = [
     "DeviceToken",
     "PendingReview",
     "UserEncryptionKey",
+    "ActivationToken",
 ]
