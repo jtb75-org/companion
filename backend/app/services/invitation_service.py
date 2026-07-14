@@ -7,8 +7,10 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db.context import set_user_context
 from app.db.session import maintenance_session
+from app.integrations.authentik_admin import provision_authentik_account
 from app.models.enums import AccountStatus, InvitationStatus
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
@@ -37,18 +39,27 @@ async def get_or_create_stub_user(
         result = await mdb.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
         if user:
-            return user, False
+            created = False
+        else:
+            user = User(
+                email=email,
+                preferred_name=name,
+                display_name=name,
+                account_status=AccountStatus.INVITED,
+            )
+            mdb.add(user)
+            await mdb.flush()
+            await mdb.commit()
+            created = True
 
-        user = User(
-            email=email,
-            preferred_name=name,
-            display_name=name,
-            account_status=AccountStatus.INVITED,
-        )
-        mdb.add(user)
-        await mdb.flush()
-        await mdb.commit()
-        return user, True
+    # Provision the matching Authentik account (branded BFF provisioning, PR 1).
+    # Gated on the master switch here so the Firebase default stays byte-identical;
+    # the call is itself best-effort + idempotent (no-op if the account exists, or
+    # if Authentik is unreachable), so it can neither fail nor roll back the stub.
+    # Runs after the commit / outside the maintenance session — it is HTTP-only.
+    if settings.authentik_enabled:
+        await provision_authentik_account(email, name)
+    return user, created
 
 
 async def create_member_invitation(

@@ -116,6 +116,12 @@ class Settings(BaseSettings):
     # provider is re-created. The client_secret stays env/SealedSecret-driven.
     authentik_oidc_client_id: str = "Jc9eGA2hKkQatYjpDfr0Q0zt9k3RrUHGNYxrukut"
     authentik_oidc_client_secret: str = ""  # noqa: S105
+    # Authentik ADMIN API token, used ONLY to provision Authentik user accounts
+    # (see app/integrations/authentik_admin.py) at Companion account-creation
+    # seams. Supplied from OpenBao via the companion-secrets Sealed Secret as
+    # COMPANION_AUTHENTIK_API_TOKEN; empty ⇒ provisioning is inert (no HTTP). It
+    # reuses authentik_internal_url + authentik_ca_bundle_path for the channel.
+    authentik_api_token: str = ""  # noqa: S105
     # Public issuer + JWKS (for the future browser bearer path, verified with
     # require_issuer=True). BFF-fetched in-cluster id_tokens are verified with
     # require_issuer=False because issuer_mode=per_provider stamps the internal

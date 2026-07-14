@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AdminUser, require_admin_role
 from app.db import get_db
+from app.integrations.authentik_admin import provision_authentik_account
 from app.models.admin_user import AdminUser as AdminUserModel
 from app.schemas.admin import AdminUserCreate
 
@@ -56,6 +57,11 @@ async def create_admin_user(
     )
     db.add(new_user)
     await db.flush()
+    # Provision a matching Authentik account (branded BFF provisioning, PR 1).
+    # Commit first so a provisioning error can never roll back the row; the call
+    # is best-effort + idempotent + inert on the Firebase default.
+    await db.commit()
+    await provision_authentik_account(new_user.email, new_user.name)
     return new_user
 
 

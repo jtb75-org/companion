@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AdminUser, require_admin_role
 from app.db.session import get_maintenance_db
+from app.integrations.authentik_admin import provision_authentik_account
 from app.integrations.email_service import (
     send_account_deactivated,
     send_account_deleted_to_caregiver,
@@ -93,6 +94,11 @@ async def create_companion_user(
         from app.services.field_crypto import set_user_profile_pii
         await set_user_profile_pii(db, user, phone=data["phone"])
         await db.flush()
+    # Provision a matching Authentik account (branded BFF provisioning, PR 1).
+    # Commit first so a provisioning error can never roll back the row; the call
+    # is best-effort + idempotent + inert on the Firebase default.
+    await db.commit()
+    await provision_authentik_account(user.email, user.display_name or user.email)
     return {"id": str(user.id), "created": True}
 
 
