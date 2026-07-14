@@ -7,10 +7,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.appointment import Appointment
 from app.models.audit import CaregiverActivityLog
 from app.models.bill import Bill
-from app.models.enums import PaymentStatus
+from app.models.enums import CaregiverAction, PaymentStatus
 from app.models.medication import Medication, MedicationConfirmation
 from app.models.todo import Todo
 from app.models.trusted_contact import TrustedContact
+
+
+async def log_caregiver_action(
+    db: AsyncSession,
+    *,
+    trusted_contact_id: UUID,
+    user_id: UUID,
+    action: CaregiverAction,
+    details: dict | None = None,
+) -> None:
+    """Append an immutable caregiver-activity record (docs §5: every caregiver
+    interaction with the member's data is logged).
+
+    Written on the request session AFTER ``set_user_context(user_id)`` so the
+    per-member RLS (028) WITH CHECK (user_id = current_user_id) admits it, and it
+    commits in the same transaction as the read — so a returned view always has a
+    committed audit record (no unaudited access). ``details`` is structured
+    metadata only, NEVER raw member data / document contents / financial figures.
+    """
+    db.add(
+        CaregiverActivityLog(
+            trusted_contact_id=trusted_contact_id,
+            user_id=user_id,
+            action=action,
+            details=details,
+        )
+    )
+    await db.flush()
 
 
 async def list_contacts(

@@ -8,6 +8,7 @@ what access the user has (authorization) by looking up their email in:
 """
 
 import logging
+import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -20,17 +21,17 @@ from app.models.trusted_contact import TrustedContact
 logger = logging.getLogger(__name__)
 
 
-async def caregiver_authorized_for_member(email: str, user_id) -> bool:
-    """True if ``email`` is an active trusted contact for member ``user_id``.
+async def authorized_caregiver_contact_id(email: str, user_id) -> uuid.UUID | None:
+    """Return the ACTIVE ``trusted_contacts.id`` for (email, member), else ``None``.
 
-    Caregiver authorization runs BEFORE any member GUC exists, so under
-    trusted_contacts RLS a normal companion_app session fails closed to 0 rows.
-    This narrow (email, user_id, is_active) existence check is the real access
-    gate, so it runs on the maintenance (BYPASSRLS) session — it reveals only
-    whether this specific pair is an active relationship, no cross-member fan-out.
+    This is the access gate PLUS the identity needed to write the append-only
+    ``caregiver_activity_log`` (which requires ``trusted_contact_id``). Narrow
+    (email, user_id, is_active) lookup on the maintenance (BYPASSRLS) session —
+    caregiver auth runs before any member GUC, so a normal app-role read fails
+    closed; it reveals only whether this one pair is an active relationship.
     """
     if not email:
-        return False
+        return None
     async with maintenance_session() as mdb:
         result = await mdb.execute(
             select(TrustedContact.id).where(
@@ -39,7 +40,16 @@ async def caregiver_authorized_for_member(email: str, user_id) -> bool:
                 TrustedContact.is_active.is_(True),
             )
         )
-        return result.scalar_one_or_none() is not None
+        return result.scalar_one_or_none()
+
+
+async def caregiver_authorized_for_member(email: str, user_id) -> bool:
+    """True if ``email`` is an active trusted contact for member ``user_id``.
+
+    Thin bool wrapper over ``authorized_caregiver_contact_id`` for the endpoints
+    that only gate (activity/alerts) and don't need the contact id.
+    """
+    return await authorized_caregiver_contact_id(email, user_id) is not None
 
 
 @dataclass
