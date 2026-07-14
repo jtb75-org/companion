@@ -1,10 +1,11 @@
 """App API — Invitation routes (member-initiated caregiver invitations)."""
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import User, _extract_bearer_token, require_complete_profile
+from app.auth.principal import resolve_caregiver_session
 from app.db import get_db
 from app.db.session import maintenance_session
 from app.integrations.email_service import (
@@ -54,14 +55,27 @@ async def create_invitation(
 @router.post("/accept")
 async def accept_invitation(
     data: InvitationAccept,
+    request: Request,
     authorization: str | None = Header(None, alias="Authorization"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Caregiver accepts an invitation by token. Requires Firebase auth."""
-    decoded = await _extract_bearer_token(authorization)
-    email = decoded.get("email")
-    if not email:
-        raise HTTPException(401, "Firebase token missing email claim")
+    """Caregiver (incl. a not-yet-active invitee) accepts an invitation by token.
+
+    DUAL-RUN: under Authentik the web sends an ambient cookie session (no bearer), so we
+    resolve the session holder's IdP-verified email via ``resolve_caregiver_session``. An
+    invitee resolves even before they are an active caregiver because
+    ``create_member_invitation`` seeds an INVITED ``users`` stub for their email, which
+    Authentik ``/auth/login`` admits and binds to their subject — ``_email_for_subject``
+    then recovers the email from that stub. When the switch is off/firebase or there is no
+    session this returns None and the Firebase bearer path runs UNCHANGED (byte-identical).
+    The real authorization is still the token + ``contact_email`` match inside
+    ``accept_invitation``."""
+    email = await resolve_caregiver_session(request)
+    if email is None:
+        decoded = await _extract_bearer_token(authorization)
+        email = decoded.get("email")
+        if not email:
+            raise HTTPException(401, "Firebase token missing email claim")
 
     contact = await invitation_service.accept_invitation(db, data.token, email)
     if contact is None:
@@ -95,14 +109,23 @@ async def accept_invitation(
 @router.post("/decline")
 async def decline_invitation(
     data: InvitationAccept,
+    request: Request,
     authorization: str | None = Header(None, alias="Authorization"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Caregiver declines an invitation."""
-    decoded = await _extract_bearer_token(authorization)
-    email = decoded.get("email")
-    if not email:
-        raise HTTPException(401, "Firebase token missing email claim")
+    """Caregiver (incl. a not-yet-active invitee) declines an invitation.
+
+    DUAL-RUN mirror of ``accept_invitation``: resolve the session holder's IdP-verified
+    email via ``resolve_caregiver_session`` (an invitee resolves through their seeded
+    INVITED ``users`` stub); otherwise fall back to the Firebase bearer path UNCHANGED.
+    The token + ``contact_email`` match inside ``decline_invitation`` remains the real
+    authorization."""
+    email = await resolve_caregiver_session(request)
+    if email is None:
+        decoded = await _extract_bearer_token(authorization)
+        email = decoded.get("email")
+        if not email:
+            raise HTTPException(401, "Firebase token missing email claim")
 
     contact = await invitation_service.decline_invitation(db, data.token, email)
     if contact is None:
