@@ -48,7 +48,6 @@ from sqlalchemy import delete, select  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.db import session as db_module  # noqa: E402
-from app.db.context import set_user_context  # noqa: E402
 from app.models.admin_user import AdminUser  # noqa: E402
 from app.models.audit import AccountAuditLog, CaregiverActivityLog  # noqa: E402
 from app.models.enums import (  # noqa: E402
@@ -691,6 +690,10 @@ async def test_caregiver_dashboard_view_is_logged(monkeypatch):
         member_email, cg_email, cg_subject="sub-log-cg"
     )
     _, store = _enable_authentik_with_mocks(monkeypatch, sub="sub-log-cg", email=cg_email)
+    # Force the REAL caregiver-session path: CI sets dev_auth_bypass=true, and the
+    # dashboard dev-bypass branch (no Authorization header) returns the summary WITHOUT
+    # logging. We need the authenticated path that actually writes the audit record.
+    monkeypatch.setattr(settings, "dev_auth_bypass", False)
     sid = await store.create("sub-log-cg")
 
     async with _client() as ac:
@@ -699,10 +702,9 @@ async def test_caregiver_dashboard_view_is_logged(monkeypatch):
             cookies={settings.session_cookie_name: sid},
         )
     assert r.status_code == 200
-    # caregiver_activity_log is under per-member RLS (028): read under the member's
-    # tenant context so the USING policy admits the row (CI enforces RLS; local may not).
-    async with db_module.async_session_factory() as s:
-        await set_user_context(s, member_id)
+    # Read the audit row on the maintenance (BYPASSRLS) session so per-member RLS (028)
+    # can't hide it from a context-less assertion read.
+    async with db_module.maintenance_session() as s:
         logs = (
             await s.execute(
                 select(CaregiverActivityLog).where(
