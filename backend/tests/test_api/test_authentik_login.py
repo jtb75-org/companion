@@ -49,8 +49,13 @@ from sqlalchemy import delete, select  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db import session as db_module  # noqa: E402
 from app.models.admin_user import AdminUser  # noqa: E402
-from app.models.audit import AccountAuditLog  # noqa: E402
-from app.models.enums import AccessTier, AccountStatus, RelationshipType  # noqa: E402
+from app.models.audit import AccountAuditLog, CaregiverActivityLog  # noqa: E402
+from app.models.enums import (  # noqa: E402
+    AccessTier,
+    AccountStatus,
+    CaregiverAction,
+    RelationshipType,
+)
 from app.models.trusted_contact import TrustedContact  # noqa: E402
 from app.models.user import User  # noqa: E402
 from tests.conftest import requires_db  # noqa: E402
@@ -667,4 +672,49 @@ async def test_role_overlap_admin_resolves_via_caregiver_subject(monkeypatch):
         )
     assert r.status_code == 200
     await _delete_admin(email)
+    await _delete_user(member_email)
+
+
+# ── pre-PHI: caregiver activity logging (docs §5) ──
+
+
+@requires_db
+async def test_caregiver_dashboard_view_is_logged(monkeypatch):
+    """A Tier-2 dashboard view writes an append-only CaregiverActivityLog with the
+    VIEWED_DASHBOARD action and the caregiver's contact id (docs §5). The seeded
+    member has no prior activity, so exactly one row must appear."""
+    member_email = "log-owner@example.com"
+    cg_email = "log-caregiver@example.com"
+    await _delete_user(member_email)
+    member_id = await _seed_member_with_caregiver(
+        member_email, cg_email, cg_subject="sub-log-cg"
+    )
+    _, store = _enable_authentik_with_mocks(monkeypatch, sub="sub-log-cg", email=cg_email)
+    # Force the REAL caregiver-session path: CI sets dev_auth_bypass=true, and the
+    # dashboard dev-bypass branch (no Authorization header) returns the summary WITHOUT
+    # logging. We need the authenticated path that actually writes the audit record.
+    monkeypatch.setattr(settings, "dev_auth_bypass", False)
+    sid = await store.create("sub-log-cg")
+
+    async with _client() as ac:
+        r = await ac.get(
+            f"/api/v1/caregiver/dashboard?user_id={member_id}",
+            cookies={settings.session_cookie_name: sid},
+        )
+    assert r.status_code == 200
+    # Read the audit row on the maintenance (BYPASSRLS) session so per-member RLS (028)
+    # can't hide it from a context-less assertion read.
+    async with db_module.maintenance_session() as s:
+        logs = (
+            await s.execute(
+                select(CaregiverActivityLog).where(
+                    CaregiverActivityLog.user_id == member_id
+                )
+            )
+        ).scalars().all()
+    assert len(logs) == 1
+    assert logs[0].action == CaregiverAction.VIEWED_DASHBOARD
+    assert logs[0].trusted_contact_id is not None
+    # details is structured metadata only — never raw member data.
+    assert logs[0].details == {"surface": "dashboard"}
     await _delete_user(member_email)
