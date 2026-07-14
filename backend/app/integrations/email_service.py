@@ -137,6 +137,44 @@ async def send_caregiver_invitation(
 
 
 # ---------------------------------------------------------------------------
+# Account activation (branded set-password — admin now, members later)
+# ---------------------------------------------------------------------------
+
+async def send_activation_email(
+    to_email: str,
+    to_name: str,
+    token: str,
+) -> bool:
+    """Send an account-activation email with a link to set a password.
+
+    Generic across cohorts (an admin created under Authentik now, members later): the
+    token is email-keyed. The CTA lands on the branded /activate page where the person
+    chooses their password, then signs in."""
+    subject = f"Set up your {BRAND_MID} account"
+
+    activate_url = f"{APP_URL}/activate?token={token}"
+
+    text_body = (
+        f"Hi {to_name},\n\n"
+        f"An account has been created for you on {BRAND_MID}.\n\n"
+        f"To finish setting up, choose a password using the link below:\n\n"
+        f"{activate_url}\n\n"
+        f"Once your password is set, you can sign in any time.\n\n"
+        f"— The {BRAND_SHORT} Team"
+    )
+
+    html_body = _email_wrapper(
+        f"<p>Hi {to_name},</p>"
+        f"<p>An account has been created for you on {BRAND_MID}.</p>"
+        f"<p>To finish setting up, choose a password. Once it's set, you can sign in any time.</p>"
+        + _cta_button(activate_url, "Set your password")
+        + '<p style="color: #888; font-size: 13px;">If you weren\'t expecting this, you can safely ignore this email.</p>'
+    )
+
+    return await send_email(to_email, to_name, subject, text_body, html_body)
+
+
+# ---------------------------------------------------------------------------
 # Platform invitation (admin-initiated, Part 1 only — no member assignment)
 # ---------------------------------------------------------------------------
 
