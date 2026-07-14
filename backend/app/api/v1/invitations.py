@@ -231,7 +231,9 @@ async def set_invitation_password(data: SetPasswordRequest):
     # set is must-succeed and its failure is surfaced as a clean 502.
     await provision_authentik_account(contact.contact_email, contact.contact_name)
     try:
-        await set_authentik_password(contact.contact_email, data.password)
+        await set_authentik_password(
+            contact.contact_email, data.password.get_secret_value()
+        )
     except Exception:
         log.error(
             "failed to set Authentik password for invitee %s",

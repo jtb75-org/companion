@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from app.models.enums import AccessTier, RelationshipType
 
@@ -24,7 +24,10 @@ class SetPasswordRequest(BaseModel):
     # 8 is the enforced floor: the Authentik admin set_password API bypasses the
     # flow password policy, so this schema is the ONLY password-strength gate today.
     # Enforcing the Authentik policy on this seam is a follow-up.
-    password: str = Field(min_length=8, max_length=512)
+    # SecretStr so a rejected value (e.g. a too-short password) is masked in the
+    # default 422 body / any repr — the secret is never echoed back. Read at use
+    # with .get_secret_value().
+    password: SecretStr = Field(min_length=8, max_length=512)
 
 
 class InvitationResponse(BaseModel):
