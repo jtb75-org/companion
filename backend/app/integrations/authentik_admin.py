@@ -49,6 +49,22 @@ def _tls_verify() -> bool | ssl.SSLContext:
     return True
 
 
+def _admin_client() -> httpx.AsyncClient:
+    """A CA-verified, Bearer-authenticated httpx client for the Authentik admin API.
+
+    Shared by ``provision_authentik_account`` (best-effort) and
+    ``set_authentik_password`` (must-succeed) so the TLS + auth channel is defined
+    once. Callers own the gating (``authentik_enabled`` + token) and the
+    raise-vs-swallow error policy.
+    """
+    return httpx.AsyncClient(
+        base_url=settings.authentik_internal_url,
+        verify=_tls_verify(),
+        timeout=10.0,
+        headers={"Authorization": f"Bearer {settings.authentik_api_token}"},
+    )
+
+
 async def provision_authentik_account(email: str, name: str) -> None:
     """Best-effort, idempotent creation of an Authentik user for ``email``.
 
@@ -60,12 +76,7 @@ async def provision_authentik_account(email: str, name: str) -> None:
         return
 
     try:
-        async with httpx.AsyncClient(
-            base_url=settings.authentik_internal_url,
-            verify=_tls_verify(),
-            timeout=10.0,
-            headers={"Authorization": f"Bearer {settings.authentik_api_token}"},
-        ) as client:
+        async with _admin_client() as client:
             # Idempotent: an existing account (matched by unique email) is a no-op.
             found = await client.get("/api/v3/core/users/", params={"email": email})
             found.raise_for_status()
@@ -92,3 +103,39 @@ async def provision_authentik_account(email: str, name: str) -> None:
         # follows — log loudly and continue; a re-invite retries (idempotent).
         log.error("failed to provision Authentik account for %s", email, exc_info=True)
         return
+
+
+async def set_authentik_password(email: str, password: str) -> None:
+    """Set the Authentik password for an EXISTING account (branded activation, PR 2).
+
+    Unlike ``provision_authentik_account`` this is NOT best-effort: the caller (the
+    set-password endpoint) surfaces failure to the user, so any problem RAISES.
+
+    Requires configuration: only ever called from the Authentik-gated endpoint, so a
+    missing switch/token is a programming error → ``RuntimeError``. The account must
+    already exist (the endpoint provision-ensures first); if the lookup finds none, or
+    the set_password call is non-2xx, or transport fails, this raises.
+
+    Never logs the password — only the email.
+    """
+    if not settings.authentik_enabled or not settings.authentik_api_token:
+        raise RuntimeError(
+            "set_authentik_password called without Authentik enabled + admin token"
+        )
+
+    async with _admin_client() as client:
+        found = await client.get("/api/v3/core/users/", params={"email": email})
+        found.raise_for_status()
+        results = found.json().get("results") or []
+        if not results:
+            raise RuntimeError(f"no Authentik account found for {email}")
+        pk = results[0]["pk"]
+
+        # The admin set_password endpoint bypasses the flow password policy (that
+        # enforcement is a follow-up); the schema min-length is the current floor.
+        resp = await client.post(
+            f"/api/v3/core/users/{pk}/set_password/",
+            json={"password": password},
+        )
+        resp.raise_for_status()
+    log.info("set Authentik password for %s", email)
