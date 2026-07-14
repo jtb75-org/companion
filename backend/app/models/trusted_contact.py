@@ -62,4 +62,8 @@ class TrustedContact(Base):
         "CaregiverActivityLog",
         back_populates="trusted_contact",
         cascade="all, delete-orphan",
+        # Defer child deletion to the DB ON DELETE CASCADE (owner-run) so deleting a
+        # trusted_contact (incl. via a user delete that cascades to contacts) does not
+        # emit an ORM DELETE on the append-only log as companion_app. See app/db/grants.py.
+        passive_deletes=True,
     )

@@ -66,9 +66,13 @@ _GRANT_STATEMENTS = (
 # NOTE on what this does NOT block, by design:
 #  - retention's purge of old signup_refused rows runs under the MAINTENANCE (BYPASSRLS)
 #    role, not companion_app, so it is unaffected (app/workers/retention.py);
-#  - ON DELETE CASCADE from a user/trusted_contact deletion is a referential action run
-#    as the table OWNER, so it bypasses this role-level REVOKE (account deletion still
-#    cascades) — the CASCADE-vs-retention question is tracked separately.
+#  - a user/trusted_contact deletion erases caregiver_activity_log via the FK's DB-level
+#    ON DELETE CASCADE — a referential action run as the table OWNER, so it bypasses this
+#    role-level REVOKE. This holds ONLY because the ORM relationships to
+#    caregiver_activity_log set passive_deletes=True (User.caregiver_activity_logs,
+#    TrustedContact.activity_logs), which makes SQLAlchemy defer to the DB cascade
+#    instead of emitting an ORM DELETE as companion_app. Without passive_deletes the
+#    grace=0 member self-serve deletion would 500 on permission-denied.
 _APPEND_ONLY_AUDIT_TABLES = ("caregiver_activity_log", "account_audit_log")
 _REVOKE_STATEMENTS = tuple(
     f"REVOKE UPDATE, DELETE ON {table} FROM {APP_ROLE}"

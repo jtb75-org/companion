@@ -28,6 +28,23 @@ def test_revoke_statements_cover_both_audit_tables():
     assert any(_BROAD_GRANT in s for s in grants._GRANT_STATEMENTS)
 
 
+def test_caregiver_activity_log_relationships_defer_to_db_cascade():
+    """Append-only requires that a user/contact deletion NOT emit an ORM DELETE on
+    caregiver_activity_log as companion_app (which now lacks DELETE). Both ORM
+    relationships to that table MUST set passive_deletes=True so SQLAlchemy defers to
+    the FK's DB-level ON DELETE CASCADE (owner-run). Guards against re-introducing the
+    grace=0 member-self-serve-deletion permission-denied break (PR #83 / safety BLOCK)."""
+    from app.models.trusted_contact import TrustedContact
+    from app.models.user import User
+
+    assert (
+        User.__mapper__.relationships["caregiver_activity_logs"].passive_deletes is True
+    )
+    assert (
+        TrustedContact.__mapper__.relationships["activity_logs"].passive_deletes is True
+    )
+
+
 async def test_apply_grants_revokes_after_granting(monkeypatch):
     """The broad GRANTs run first, then the audit-table REVOKEs — order matters, since a
     REVOKE before ``GRANT ... ON ALL TABLES`` would be undone by that grant."""
