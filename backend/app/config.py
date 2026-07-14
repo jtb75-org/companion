@@ -132,6 +132,12 @@ class Settings(BaseSettings):
     # Login throttle (per username + per client IP, fixed window).
     login_max_attempts: int = 10
     login_window_seconds: int = 300
+    # Whether to trust the raw X-Forwarded-For chain for the login rate-limit client
+    # IP. cf-connecting-ip (set by Cloudflare, unspoofable via the cloudflared tunnel)
+    # is always trusted; XFF is client-injectable unless a trusted proxy owns it, so it
+    # is only consulted when this is True. Default False → a spoofed XFF cannot evade or
+    # poison the throttle (cutover gate #3).
+    trust_forwarded_for: bool = False
 
     # LLM
     anthropic_api_key: str = ""

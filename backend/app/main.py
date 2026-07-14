@@ -86,7 +86,11 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    # X-CSRF-Token: the Authentik BFF double-submit CSRF header a browser SPA sends on
+    # unsafe (state-changing) session requests. Without it in allow_headers the CORS
+    # preflight fails and the request never reaches the app (cutover gate #6). Additive
+    # and inert — no client sends it until the Authentik session flow is live.
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
 )
 
 # Mount API routers

@@ -191,12 +191,22 @@ async def _try_caregiver_login(
 
 
 def _client_ip(request: Request) -> str:
-    # Behind Cloudflare + traefik; prefer the edge-provided client IP.
-    return (
-        request.headers.get("cf-connecting-ip")
-        or request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        or (request.client.host if request.client else "unknown")
-    )
+    """Best-effort client IP for the login rate-limit bucket (cutover gate #3).
+
+    ``cf-connecting-ip`` is set by Cloudflare and — because the origin is reachable
+    only through the cloudflared tunnel — cannot be spoofed by a client, so it is
+    always trusted. The raw ``X-Forwarded-For`` chain CAN be client-injected unless a
+    trusted proxy owns it, so it is consulted ONLY when ``trust_forwarded_for`` is
+    enabled; otherwise we fall back to the direct peer. This keeps a spoofed XFF from
+    evading or poisoning the brute-force throttle."""
+    cf = request.headers.get("cf-connecting-ip")
+    if cf:
+        return cf.strip()
+    if settings.trust_forwarded_for:
+        xff = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if xff:
+            return xff
+    return request.client.host if request.client else "unknown"
 
 
 @router.post("/login")
