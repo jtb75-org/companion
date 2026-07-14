@@ -70,6 +70,9 @@ def test_too_common_is_case_insensitive(monkeypatch):
         "abcdefghij",
         "9876543210",  # descending run
         "jihgfedcba",
+        "Abcdefghij",  # mixed-case ascending run (case-normalized)
+        "aBcDeFgHiJ",
+        "Zyxwvutsrq",  # mixed-case descending run
     ],
 )
 def test_too_predictable(monkeypatch, pw):

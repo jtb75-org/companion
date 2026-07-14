@@ -50,14 +50,18 @@ class PasswordPolicyError(Exception):
 def _is_predictable(password: str) -> bool:
     """True if the password is a single repeated character or a straight
     ascending/descending run of consecutive code points over its whole length
-    (e.g. "0000000000", "1234567890", "abcdefghij", "9876543210")."""
+    (e.g. "0000000000", "1234567890", "abcdefghij", "9876543210").
+
+    Case-normalized first, so mixed-case dressings of a sequence ("Abcdefghij",
+    "aBcDeFgHiJ", "Zyxwvutsrq") are caught too — they're no less predictable."""
     if len(password) < 2:
         return True
+    p = password.lower()
     # All the same character.
-    if len(set(password)) == 1:
+    if len(set(p)) == 1:
         return True
     # Whole-length monotonic run of consecutive characters (asc or desc).
-    diffs = {ord(b) - ord(a) for a, b in zip(password, password[1:], strict=False)}
+    diffs = {ord(b) - ord(a) for a, b in zip(p, p[1:], strict=False)}
     return diffs in ({1}, {-1})
 
 

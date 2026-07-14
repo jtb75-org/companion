@@ -31,7 +31,7 @@ import { colors, brand } from '../theme/colors'
  * All copy comes from `authStrings`. The password is never logged.
  */
 
-const MIN_PASSWORD_LENGTH = 8
+const MIN_PASSWORD_LENGTH = 10
 
 type Phase = 'checking' | 'ready' | 'invalid'
 

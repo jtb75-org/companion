@@ -58,8 +58,9 @@ export const authStrings = {
   // The button that saves the new password. Same verb ("Make") as the prompt
   // above, so one action reads consistently for the member (guidelines §3.3).
   activateCreateButton: 'Make Password',
-  // Client-side check before we send: password too short.
-  activateTooShort: 'Please use at least 8 letters or numbers.',
+  // Client-side check before we send: password too short. Matches the backend
+  // floor (config password_min_length, default 10) so the guidance is consistent.
+  activateTooShort: 'Please use at least 10 letters or numbers.',
   // The link is old or wrong (bad token on check OR on save). Calm, no blame.
   activateInvalidTitle: 'This link did not work',
   activateInvalidBody:
