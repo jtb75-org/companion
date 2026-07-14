@@ -63,8 +63,10 @@ class TrustedContact(Base):
         back_populates="trusted_contact",
         # NOT delete/delete-orphan: deleting a trusted_contact (revoking a caregiver)
         # RETAINS its activity log — the FK is ON DELETE SET NULL, so the history stays
-        # for Sam (docs §5). passive_deletes=True so SQLAlchemy defers to that DB SET
-        # NULL instead of emitting an ORM UPDATE on the append-only log (companion_app
-        # lacks UPDATE); default cascade (save-update, merge) keeps normal association.
-        passive_deletes=True,
+        # for Sam (docs §5). passive_deletes="all" (not True): True still emits an ORM
+        # UPDATE ... SET trusted_contact_id=NULL when the collection is ALREADY LOADED,
+        # which would 500 under the append-only REVOKE (companion_app lacks UPDATE on
+        # this table, #83). "all" fully defers the FK-nulling to the DB ON DELETE SET
+        # NULL (run as the table owner), loaded or not.
+        passive_deletes="all",
     )

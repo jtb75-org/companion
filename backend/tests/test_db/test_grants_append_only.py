@@ -37,11 +37,18 @@ def test_caregiver_activity_log_relationships_defer_to_db_cascade():
     from app.models.trusted_contact import TrustedContact
     from app.models.user import User
 
+    # User.caregiver_activity_logs (user_id FK, ON DELETE CASCADE): True defers the
+    # cascade DELETE to the DB.
     assert (
         User.__mapper__.relationships["caregiver_activity_logs"].passive_deletes is True
     )
+    # TrustedContact.activity_logs (trusted_contact_id FK, ON DELETE SET NULL): must be
+    # "all", not True — True still emits an ORM UPDATE ... SET NULL on a LOADED
+    # collection, which would 500 under the append-only REVOKE (companion_app lacks
+    # UPDATE). "all" fully defers the FK-nulling to the owner-run DB SET NULL.
     assert (
-        TrustedContact.__mapper__.relationships["activity_logs"].passive_deletes is True
+        TrustedContact.__mapper__.relationships["activity_logs"].passive_deletes
+        == "all"
     )
 
 

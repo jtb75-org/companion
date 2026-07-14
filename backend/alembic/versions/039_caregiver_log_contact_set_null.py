@@ -45,8 +45,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # NOTE: rows whose contact was deleted now hold NULL trusted_contact_id; restoring
-    # NOT NULL would fail while any exist. Best-effort structural revert.
+    # Retained NULL-contact rows (a revoked caregiver's history) CANNOT be represented
+    # by the restored NOT NULL + CASCADE schema. Downgrade explicitly DISCARDS that
+    # history so the revert is executable regardless of data state (they'd have been
+    # CASCADE-erased under the old schema anyway).
+    op.execute(
+        "DELETE FROM caregiver_activity_log WHERE trusted_contact_id IS NULL"
+    )
     op.drop_constraint(_FK, "caregiver_activity_log", type_="foreignkey")
     op.create_foreign_key(
         _FK,
