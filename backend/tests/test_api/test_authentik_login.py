@@ -499,3 +499,30 @@ async def test_caregiver_session_lists_charges(monkeypatch):
     charges = r.json()["charges"]
     assert [c["user_id"] for c in charges] == [str(member_id)]
     await _delete_user(member_email)
+
+
+@requires_db
+async def test_login_refuses_unverified_caregiver_email(monkeypatch):
+    """An UNVERIFIED email that matches an active caregiver row is refused before the
+    caregiver branch runs (the email_verified gate precedes admission), and no subject
+    is bound (safety follow-up)."""
+    member_email = "cg-owner5@example.com"
+    cg_email = "caregiver-unverified@example.com"
+    await _delete_user(member_email)
+    await _seed_member_with_caregiver(member_email, cg_email)
+    _enable_authentik_with_mocks(
+        monkeypatch, sub="sub-cg-unverif", email=cg_email, email_verified=False
+    )
+
+    async with _client() as ac:
+        r = await ac.post(_LOGIN, json={"username": cg_email, "password": "pw"})
+    assert r.status_code == 403
+    # The email_verified gate fired first — no subject was bound to the caregiver row.
+    async with db_module.async_session_factory() as s:
+        tc = (
+            await s.execute(
+                select(TrustedContact).where(TrustedContact.contact_email == cg_email)
+            )
+        ).scalar_one()
+        assert tc.external_subject_id is None
+    await _delete_user(member_email)

@@ -178,6 +178,11 @@ async def _try_caregiver_login(
                 # caregiver's stable identity would be changing under us. Refuse rather
                 # than overwrite (mirrors the member subject-mismatch guard); the raise
                 # rolls back the whole maintenance transaction, so no partial backfill.
+                log.warning(
+                    "BFF caregiver login subject mismatch for contact %s: "
+                    "token sub != stored subject",
+                    contact.id,
+                )
                 raise HTTPException(
                     status.HTTP_403_FORBIDDEN, "Account identity mismatch"
                 )
