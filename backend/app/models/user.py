@@ -103,5 +103,13 @@ class User(TimestampMixin, Base):
         "FunctionalMemory", back_populates="user", cascade="all, delete-orphan"
     )
     caregiver_activity_logs = relationship(
-        "CaregiverActivityLog", back_populates="user", cascade="all, delete-orphan"
+        "CaregiverActivityLog",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        # Defer child deletion to the DB ON DELETE CASCADE (FK on caregiver_activity_log),
+        # which runs as the table OWNER — so deleting a user does NOT emit an ORM
+        # DELETE on the append-only log as companion_app (which lacks DELETE). Without
+        # this, the grace=0 member self-serve deletion (runs as companion_app) would 500
+        # on permission-denied. See app/db/grants.py.
+        passive_deletes=True,
     )

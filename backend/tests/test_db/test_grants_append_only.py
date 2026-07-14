@@ -1,0 +1,85 @@
+"""app.db.grants: the audit tables are append-only for the runtime role (PR C, §5).
+
+No live DB / no companion_app role needed (CI connects as the owner and does not run
+grants.py) — we assert the statement set and that apply_grants REVOKEs UPDATE/DELETE on
+the audit tables AFTER the broad GRANT, via a mocked engine.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock
+
+from app.db import grants
+
+_BROAD_GRANT = "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES"
+
+
+def test_revoke_statements_cover_both_audit_tables():
+    assert grants._APPEND_ONLY_AUDIT_TABLES == (
+        "caregiver_activity_log",
+        "account_audit_log",
+    )
+    for table in grants._APPEND_ONLY_AUDIT_TABLES:
+        assert (
+            f"REVOKE UPDATE, DELETE ON {table} FROM {grants.APP_ROLE}"
+            in grants._REVOKE_STATEMENTS
+        )
+    # Append-only is a REVOKE layered on top of the still-present broad DML grant.
+    assert any(_BROAD_GRANT in s for s in grants._GRANT_STATEMENTS)
+
+
+def test_caregiver_activity_log_relationships_defer_to_db_cascade():
+    """Append-only requires that a user/contact deletion NOT emit an ORM DELETE on
+    caregiver_activity_log as companion_app (which now lacks DELETE). Both ORM
+    relationships to that table MUST set passive_deletes=True so SQLAlchemy defers to
+    the FK's DB-level ON DELETE CASCADE (owner-run). Guards against re-introducing the
+    grace=0 member-self-serve-deletion permission-denied break (PR #83 / safety BLOCK)."""
+    from app.models.trusted_contact import TrustedContact
+    from app.models.user import User
+
+    assert (
+        User.__mapper__.relationships["caregiver_activity_logs"].passive_deletes is True
+    )
+    assert (
+        TrustedContact.__mapper__.relationships["activity_logs"].passive_deletes is True
+    )
+
+
+async def test_apply_grants_revokes_after_granting(monkeypatch):
+    """The broad GRANTs run first, then the audit-table REVOKEs — order matters, since a
+    REVOKE before ``GRANT ... ON ALL TABLES`` would be undone by that grant."""
+    executed: list[str] = []
+
+    class _Conn:
+        async def execute(self, stmt, *args, **kwargs):
+            executed.append(str(stmt))
+
+    class _Begin:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _Engine:
+        def begin(self):
+            return _Begin()
+
+        async def dispose(self):
+            return None
+
+    monkeypatch.setattr(grants, "create_async_engine", lambda *a, **k: _Engine())
+    monkeypatch.setattr(grants, "_role_exists", AsyncMock(return_value=True))
+
+    await grants.apply_grants(retries=1, delay=0)
+
+    grant_idx = next(i for i, s in enumerate(executed) if _BROAD_GRANT in s)
+    revoke_idxs = [
+        i for i, s in enumerate(executed) if s.startswith("REVOKE UPDATE, DELETE ON")
+    ]
+    assert len(revoke_idxs) == 2
+    assert all(ri > grant_idx for ri in revoke_idxs), "REVOKE must run after the grant"
+    for table in grants._APPEND_ONLY_AUDIT_TABLES:
+        assert (
+            f"REVOKE UPDATE, DELETE ON {table} FROM {grants.APP_ROLE}" in executed
+        )
