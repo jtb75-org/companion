@@ -21,13 +21,13 @@ class InvitationAccept(BaseModel):
 
 class SetPasswordRequest(BaseModel):
     token: str = Field(description="Invitation token from the email link")
-    # 8 is the enforced floor: the Authentik admin set_password API bypasses the
-    # flow password policy, so this schema is the ONLY password-strength gate today.
-    # Enforcing the Authentik policy on this seam is a follow-up.
-    # SecretStr so a rejected value (e.g. a too-short password) is masked in the
-    # default 422 body / any repr — the secret is never echoed back. Read at use
-    # with .get_secret_value().
-    password: SecretStr = Field(min_length=8, max_length=512)
+    # Length is enforced by app.services.password_policy.validate_password at the
+    # endpoint (the single length gate, tunable via settings.password_min_length),
+    # so NO min_length here — a too-short password returns the plain 422 policy
+    # message rather than a 422 schema-validation error. max_length caps abuse.
+    # SecretStr so a rejected value is masked in the default 422 body / any repr —
+    # the secret is never echoed back. Read at use with .get_secret_value().
+    password: SecretStr = Field(max_length=512)
 
 
 class InvitationResponse(BaseModel):

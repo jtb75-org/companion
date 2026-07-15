@@ -141,6 +141,12 @@ class Settings(BaseSettings):
     session_cookie_domain: str = ""  # empty → host-only cookie
     session_ttl_seconds: int = 60 * 60 * 8  # 8h sliding
 
+    # Password-strength floor enforced on the branded set-password seams
+    # (/invitations/set-password, /activation/set-password). The Authentik admin
+    # set_password API bypasses Authentik's own flow password policy, so this — plus
+    # the app-side denylist/predictability screen — is the strength gate. Tunable.
+    password_min_length: int = 10
+
     # Login throttle (per username + per client IP, fixed window).
     login_max_attempts: int = 10
     login_window_seconds: int = 300

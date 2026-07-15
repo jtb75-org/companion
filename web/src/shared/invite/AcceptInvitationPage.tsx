@@ -158,7 +158,7 @@ export default function AcceptInvitationPage() {
                 placeholder="Create a password"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
-                minLength={8}
+                minLength={10}
                 className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-companion-blue focus:outline-none transition"
               />
               {setupError && (

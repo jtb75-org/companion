@@ -117,7 +117,7 @@ export default function ActivatePage() {
             placeholder="Create a password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            minLength={8}
+            minLength={10}
             className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-companion-blue focus:outline-none transition"
           />
           {error && <p className="text-red-500 text-sm">{error}</p>}

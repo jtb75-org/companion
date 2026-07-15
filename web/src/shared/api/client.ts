@@ -72,7 +72,21 @@ export async function api<T>(
   }
 
   if (!res.ok) {
-    throw new Error(`API error: ${res.status}`)
+    // Surface the backend's `detail` (e.g. a plain password-policy message on a
+    // 422) so callers can show it directly, rather than a generic "API error".
+    // Fall back to the status when there's no JSON detail. Attach the status for
+    // callers that branch on it.
+    let detail = ''
+    try {
+      detail = ((await res.json()) as { detail?: string })?.detail || ''
+    } catch {
+      // non-JSON body → keep the generic message
+    }
+    const err = new Error(detail || `API error: ${res.status}`) as Error & {
+      status?: number
+    }
+    err.status = res.status
+    throw err
   }
 
   if (res.status === 204) {
