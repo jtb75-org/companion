@@ -87,31 +87,26 @@ _REVOKE_STATEMENTS = tuple(
 )
 
 # The BYPASSRLS maintenance role (gitops db-cluster.yaml managed.roles; a member of
-# APP_ROLE). It needs DELETE on account_audit_log ONLY so the cross-user retention
-# worker can purge transient signup_refused rows (app/workers/retention.py); the app
-# WHERE-clause scopes the deletion to those rows. caregiver_activity_log is deliberately
-# NOT re-granted here — it is only ever purged via the owner-run FK ON DELETE CASCADE,
-# never a maintenance DELETE — so it stays fully immutable for every runtime role.
-# SECURITY NOTE: companion_maintenance is NOT cron-only — it also backs the admin HTTP
-# surface via get_maintenance_db (app/api/admin/*). So this table-level grant makes the
-# signup_refused scope enforced SOLELY by the app WHERE-clause, not the DB: under a bug
-# in any admin-session path the role could delete account_activated (real-member) audit
-# rows. This is the pragmatic fix that unblocks the deploy deadlock; the REQUIRED pre-PHI
-# hardening is to replace it with a table-owner SECURITY DEFINER function scoped to
-# event='signup_refused' + REVOKE table-level DELETE from every runtime role, so the
-# scope is DB-enforced. Tracked as the account_audit_log half of the audit-immutability
-# launch gate. Do NOT onboard real PHI members with this table-level grant still in place.
+# APP_ROLE, so it inherits the append-only REVOKE above). The retention worker runs as
+# this role and purges transient signup_refused rows EXCLUSIVELY via the SECURITY DEFINER
+# function purge_signup_refused_audit() (migration 041) — owned by the table owner and
+# hardcoding event='signup_refused', so the purge scope is enforced by the DATABASE.
+#
+# So NO runtime role holds table-level DELETE on account_audit_log: the app role is
+# append-only (REVOKE above) and the maintenance role is explicitly REVOKEd here too
+# (undoing the transitional grant from the prior step + any manual break-glass grant;
+# REVOKE of an absent privilege is a harmless no-op). The function's EXECUTE (revoked from
+# PUBLIC in the migration) is granted only to the maintenance role. Net: the function is
+# the SOLE path any row can leave account_audit_log, so even a bug in an admin-session path
+# (companion_maintenance also backs the admin HTTP surface via get_maintenance_db) cannot
+# delete account_activated (real-member) audit rows. caregiver_activity_log holds no
+# maintenance grant at all — it is only ever purged via the owner-run FK ON DELETE CASCADE.
 MAINT_ROLE = "companion_maintenance"
-_MAINT_REGRANT_STATEMENTS = (
-    # PR1 (transitional): keep the table-level DELETE as a fallback while retention.py
-    # cuts over to the scoped SECURITY DEFINER function. PR2 replaces this line with a
-    # REVOKE so the function becomes the sole path any row can leave account_audit_log.
-    f"GRANT DELETE ON account_audit_log TO {MAINT_ROLE}",
-    # The DB-enforced scoped purge function (migration 041): owned by the table owner,
-    # hardcodes event='signup_refused', SECURITY DEFINER. The retention worker (running
-    # as MAINT_ROLE) executes it; EXECUTE was revoked from PUBLIC in the migration, so
-    # only this explicit grant lets the maintenance role call it. This is the path that
-    # survives PR2's REVOKE of the table-level DELETE above.
+_MAINT_STATEMENTS = (
+    # No table-level DELETE for the maintenance role — purges go through the function only.
+    f"REVOKE DELETE ON account_audit_log FROM {MAINT_ROLE}",
+    # EXECUTE on the scoped SECURITY DEFINER purge function (migration 041). This is the
+    # sole mechanism the retention worker uses to remove signup_refused rows.
     f"GRANT EXECUTE ON FUNCTION purge_signup_refused_audit(timestamptz) TO {MAINT_ROLE}",
 )
 
@@ -153,21 +148,21 @@ async def apply_grants(
             # Then narrow the audit tables back to append-only (INSERT + SELECT).
             for stmt in _REVOKE_STATEMENTS:
                 await conn.execute(text(stmt))
-            # Re-grant the maintenance role DELETE on account_audit_log so the retention
-            # purge works despite inheriting the append-only REVOKE from APP_ROLE. Guarded
-            # on role existence — absent in dev/test, where retention falls back to the
-            # app session and no maintenance role exists.
-            maint_regranted = await _role_exists(conn, MAINT_ROLE)
-            if maint_regranted:
-                for stmt in _MAINT_REGRANT_STATEMENTS:
+            # Maintenance role: REVOKE any table-level DELETE on account_audit_log and
+            # grant EXECUTE on the scoped purge function instead (the function is the sole
+            # exit path for audit rows). Guarded on role existence — absent in dev/test,
+            # where retention falls back to the app session and no maintenance role exists.
+            maint_applied = await _role_exists(conn, MAINT_ROLE)
+            if maint_applied:
+                for stmt in _MAINT_STATEMENTS:
                     await conn.execute(text(stmt))
         logger.info(
             "grants: applied DML + default privileges to %r; audit tables %s are "
             "append-only (UPDATE/DELETE revoked)%s",
             APP_ROLE,
             list(_APPEND_ONLY_AUDIT_TABLES),
-            f"; re-granted DELETE on account_audit_log to {MAINT_ROLE}"
-            if maint_regranted
+            f"; {MAINT_ROLE} table-level DELETE revoked + purge-function EXECUTE granted"
+            if maint_applied
             else "",
         )
     finally:

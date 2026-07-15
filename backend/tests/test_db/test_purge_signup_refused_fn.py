@@ -13,9 +13,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pytest
 from sqlalchemy import DateTime, bindparam, delete, select, text
+from sqlalchemy.exc import ProgrammingError
 
+from app.config import settings
 from app.db import session as db_module
+from app.db.session import maintenance_session
 from app.models.audit import AccountAuditLog
 from tests.conftest import requires_db
 
@@ -81,3 +85,42 @@ async def test_purge_function_scopes_to_old_signup_refused_only():
     # remain — the DB-enforced scope never deletes real-member audit rows.
     assert await _events(_EMAIL) == ["account_activated", "signup_refused"]
     await _cleanup(_EMAIL)
+
+
+async def test_maintenance_role_purges_via_function_not_raw_delete():
+    """Post-PR2 posture (the audit-immutability gate): running AS companion_maintenance,
+    the retention purge works ONLY through the SECURITY DEFINER function — the role holds
+    no table-level DELETE on account_audit_log, so a raw DELETE is permission-denied.
+
+    Skipped where no maintenance role is configured (CI connects as the owner and does not
+    provision the RLS roles); it runs in role-provisioned envs and is the regression guard
+    that a broken EXECUTE grant or a re-added table grant would trip. Verified manually in
+    prod after PR2 deploys."""
+    if not settings.maintenance_database_url:
+        pytest.skip("maintenance role not configured in this environment")
+
+    cutoff = datetime.utcnow() - timedelta(days=90)
+
+    # The function path succeeds as the maintenance role (EXECUTE granted by grants.py):
+    # it returns a row count, no permission error.
+    async with maintenance_session() as db:
+        res = await db.execute(
+            text("SELECT purge_signup_refused_audit(:cutoff)").bindparams(
+                bindparam("cutoff", type_=DateTime(timezone=True))
+            ),
+            {"cutoff": cutoff},
+        )
+        assert res.scalar() is not None
+        await db.commit()
+
+    # A raw table-level DELETE is denied — the function is the sole exit path. (Postgres
+    # checks DELETE privilege before matching rows, so this fails regardless of the WHERE.)
+    async with maintenance_session() as db:
+        with pytest.raises(ProgrammingError):
+            await db.execute(
+                text(
+                    "DELETE FROM account_audit_log "
+                    "WHERE event = 'signup_refused' AND occurred_at < :cutoff"
+                ).bindparams(bindparam("cutoff", type_=DateTime(timezone=True))),
+                {"cutoff": cutoff},
+            )
