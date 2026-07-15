@@ -66,12 +66,13 @@ _GRANT_STATEMENTS = (
 # NOTE on the maintenance role: companion_maintenance is a MEMBER of companion_app
 # (gitops db-cluster.yaml managed.roles -> inRoles), so it INHERITS this append-only
 # REVOKE — it is NOT automatically exempt. retention's purge of old signup_refused rows
-# runs under that role (app/workers/retention.py), so it DOES need DELETE on
-# account_audit_log; we re-grant that directly below (see _MAINT_REGRANT_STATEMENTS).
-# A direct grant is the UNION with the inherited set, so companion_app itself stays
-# append-only (INSERT + SELECT only) while only the server-side maintenance role can
-# purge. (An earlier version of this comment wrongly assumed the maintenance role was
-# unaffected; the membership inheritance made retention 500 on permission-denied.)
+# runs under that role (app/workers/retention.py), but it does NOT get table-level DELETE:
+# it purges EXCLUSIVELY through the SECURITY DEFINER function purge_signup_refused_audit()
+# (migration 041), whose scope is DB-enforced. The maintenance role is explicitly REVOKEd
+# any table-level DELETE and granted only the function's EXECUTE (see _MAINT_STATEMENTS
+# below), so NO runtime role can delete arbitrary account_audit_log rows. (Earlier
+# revisions handed the maintenance role a direct table-level DELETE — first a wrong
+# assume-exempt comment, then a transitional grant; both are superseded here.)
 # NOTE on what this does NOT block, by design:
 #  - a user/trusted_contact deletion erases caregiver_activity_log via the FK's DB-level
 #    ON DELETE CASCADE — a referential action run as the table OWNER, so it bypasses this
