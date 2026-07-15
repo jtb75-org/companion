@@ -28,6 +28,20 @@ def test_revoke_statements_cover_both_audit_tables():
     assert any(_BROAD_GRANT in s for s in grants._GRANT_STATEMENTS)
 
 
+def test_maintenance_regrant_covers_only_account_audit_log():
+    """The BYPASSRLS maintenance role inherits the append-only REVOKE (it is a member of
+    APP_ROLE), so it must be re-granted DELETE on account_audit_log for the retention
+    purge — but NOT on caregiver_activity_log, which stays immutable for every role."""
+    assert grants._MAINT_REGRANT_STATEMENTS == (
+        f"GRANT DELETE ON account_audit_log TO {grants.MAINT_ROLE}",
+    )
+    # Guard the invariant that we never hand the maintenance role DELETE on the other
+    # append-only table.
+    assert not any(
+        "caregiver_activity_log" in s for s in grants._MAINT_REGRANT_STATEMENTS
+    )
+
+
 def test_caregiver_activity_log_relationships_defer_to_db_cascade():
     """Append-only requires that a user/contact deletion NOT emit an ORM DELETE on
     caregiver_activity_log as companion_app (which now lacks DELETE). Both ORM
@@ -90,3 +104,10 @@ async def test_apply_grants_revokes_after_granting(monkeypatch):
         assert (
             f"REVOKE UPDATE, DELETE ON {table} FROM {grants.APP_ROLE}" in executed
         )
+    # The maintenance re-grant must run AFTER the append-only REVOKE (a re-grant before
+    # the REVOKE would be a no-op/undone), restoring the retention purge for that role.
+    regrant = f"GRANT DELETE ON account_audit_log TO {grants.MAINT_ROLE}"
+    assert regrant in executed
+    assert executed.index(regrant) > max(revoke_idxs), (
+        "maintenance re-grant must run after the append-only REVOKE"
+    )

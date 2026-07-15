@@ -63,9 +63,16 @@ _GRANT_STATEMENTS = (
 # "caregiver_activity_log is append-only — no UPDATE or DELETE grants"). Applied AFTER
 # the broad GRANT above, and because this whole step re-runs every deploy the REVOKE is
 # self-healing (a one-shot migration would be re-granted by the next ON ALL TABLES).
+# NOTE on the maintenance role: companion_maintenance is a MEMBER of companion_app
+# (gitops db-cluster.yaml managed.roles -> inRoles), so it INHERITS this append-only
+# REVOKE — it is NOT automatically exempt. retention's purge of old signup_refused rows
+# runs under that role (app/workers/retention.py), so it DOES need DELETE on
+# account_audit_log; we re-grant that directly below (see _MAINT_REGRANT_STATEMENTS).
+# A direct grant is the UNION with the inherited set, so companion_app itself stays
+# append-only (INSERT + SELECT only) while only the server-side maintenance role can
+# purge. (An earlier version of this comment wrongly assumed the maintenance role was
+# unaffected; the membership inheritance made retention 500 on permission-denied.)
 # NOTE on what this does NOT block, by design:
-#  - retention's purge of old signup_refused rows runs under the MAINTENANCE (BYPASSRLS)
-#    role, not companion_app, so it is unaffected (app/workers/retention.py);
 #  - a user/trusted_contact deletion erases caregiver_activity_log via the FK's DB-level
 #    ON DELETE CASCADE — a referential action run as the table OWNER, so it bypasses this
 #    role-level REVOKE. This holds ONLY because the ORM relationships to
@@ -77,6 +84,26 @@ _APPEND_ONLY_AUDIT_TABLES = ("caregiver_activity_log", "account_audit_log")
 _REVOKE_STATEMENTS = tuple(
     f"REVOKE UPDATE, DELETE ON {table} FROM {APP_ROLE}"
     for table in _APPEND_ONLY_AUDIT_TABLES
+)
+
+# The BYPASSRLS maintenance role (gitops db-cluster.yaml managed.roles; a member of
+# APP_ROLE). It needs DELETE on account_audit_log ONLY so the cross-user retention
+# worker can purge transient signup_refused rows (app/workers/retention.py); the app
+# WHERE-clause scopes the deletion to those rows. caregiver_activity_log is deliberately
+# NOT re-granted here — it is only ever purged via the owner-run FK ON DELETE CASCADE,
+# never a maintenance DELETE — so it stays fully immutable for every runtime role.
+# SECURITY NOTE: companion_maintenance is NOT cron-only — it also backs the admin HTTP
+# surface via get_maintenance_db (app/api/admin/*). So this table-level grant makes the
+# signup_refused scope enforced SOLELY by the app WHERE-clause, not the DB: under a bug
+# in any admin-session path the role could delete account_activated (real-member) audit
+# rows. This is the pragmatic fix that unblocks the deploy deadlock; the REQUIRED pre-PHI
+# hardening is to replace it with a table-owner SECURITY DEFINER function scoped to
+# event='signup_refused' + REVOKE table-level DELETE from every runtime role, so the
+# scope is DB-enforced. Tracked as the account_audit_log half of the audit-immutability
+# launch gate. Do NOT onboard real PHI members with this table-level grant still in place.
+MAINT_ROLE = "companion_maintenance"
+_MAINT_REGRANT_STATEMENTS = (
+    f"GRANT DELETE ON account_audit_log TO {MAINT_ROLE}",
 )
 
 
@@ -117,11 +144,22 @@ async def apply_grants(
             # Then narrow the audit tables back to append-only (INSERT + SELECT).
             for stmt in _REVOKE_STATEMENTS:
                 await conn.execute(text(stmt))
+            # Re-grant the maintenance role DELETE on account_audit_log so the retention
+            # purge works despite inheriting the append-only REVOKE from APP_ROLE. Guarded
+            # on role existence — absent in dev/test, where retention falls back to the
+            # app session and no maintenance role exists.
+            maint_regranted = await _role_exists(conn, MAINT_ROLE)
+            if maint_regranted:
+                for stmt in _MAINT_REGRANT_STATEMENTS:
+                    await conn.execute(text(stmt))
         logger.info(
             "grants: applied DML + default privileges to %r; audit tables %s are "
-            "append-only (UPDATE/DELETE revoked)",
+            "append-only (UPDATE/DELETE revoked)%s",
             APP_ROLE,
             list(_APPEND_ONLY_AUDIT_TABLES),
+            f"; re-granted DELETE on account_audit_log to {MAINT_ROLE}"
+            if maint_regranted
+            else "",
         )
     finally:
         await engine.dispose()
