@@ -5,8 +5,7 @@
  * request, so it does NOT go through the shared `api()` client (which would try
  * to attach a bearer we do not have yet). Logout does carry the bearer.
  *
- * Contract (shipped by backend-core, currently inert while the backend runs
- * auth_provider=firebase — /auth/login returns 404 until the flip):
+ * Contract (backend is dual-run; /auth/login is live):
  *   POST /auth/login  body {username, password, mobile: true}
  *     200 -> {status: 'ok', session_token: '<opaque sid>', csrf_token: '<...>'}
  *     401 -> bad username/password
@@ -78,8 +77,8 @@ export async function authentikLogin(username: string, password: string): Promis
  *     400 -> invalid / expired token
  *     502 -> the identity system failed (retryable)
  *
- * Under auth_provider=firebase the backend returns 404 for both, so this whole
- * flow is inert (the app never routes to the screen in Firebase mode anyway).
+ * The backend is dual-run; these endpoints are live. (In the legacy 'firebase'
+ * rollback mode the app never routes to this screen anyway.)
  *
  * Like login, these are PRE-auth requests, so they do NOT go through the shared
  * `api()` client (there is no bearer yet). The password is never logged.

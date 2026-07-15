@@ -11,8 +11,7 @@ import {
   NativeModules,
 } from 'react-native'
 import { launchImageLibrary, Asset } from 'react-native-image-picker'
-import auth from '@react-native-firebase/auth'
-import { API_BASE } from '../api/client'
+import { API_BASE, getAuthHeader } from '../api/client'
 import { colors } from '../theme/colors'
 
 const { DocumentScannerModule } = NativeModules
@@ -99,14 +98,12 @@ export function ScanButton() {
     setStatus('uploading')
 
     try {
-      const user = auth().currentUser
-      if (!user) {
+      const authHeader = await getAuthHeader()
+      if (!authHeader.Authorization) {
         Alert.alert('Error', 'You must be signed in to scan documents')
         setStatus('idle')
         return
       }
-
-      const token = await user.getIdToken()
 
       const formData = new FormData()
       for (const asset of assets) {
@@ -120,9 +117,8 @@ export function ScanButton() {
 
       const response = await fetch(`${API_BASE}/api/v1/documents/scan`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        // No Content-Type — let fetch set the multipart/form-data boundary.
+        headers: authHeader,
         body: formData,
       })
 
@@ -153,7 +149,7 @@ export function ScanButton() {
         Alert.alert('Success', `${pageLabel} uploaded! We'll notify you when it's processed.`)
         setTimeout(() => setStatus('idle'), 2000)
       }, 1000)
-    } catch (err) {
+    } catch {
       setStatus('error')
       Alert.alert('Upload Failed', 'Could not upload the document. Please try again.')
       setTimeout(() => setStatus('idle'), 2000)
