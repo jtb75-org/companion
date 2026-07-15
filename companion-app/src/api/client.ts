@@ -8,24 +8,30 @@ export const API_BASE = __DEV__
   ? 'https://api.mydailydignity.com'
   : 'https://api.mydailydignity.com'
 
-export async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  }
-
+/**
+ * The dual-run Authorization header for an authenticated request. Under Authentik it is
+ * the opaque session bearer (Keychain); under Firebase the ID token. Returns {} when
+ * unauthenticated. This is the SINGLE place the auth scheme is chosen, so every caller —
+ * including the multipart document-scan endpoints that can't use api() (they send
+ * FormData, not JSON) — stays correct across the cutover.
+ */
+export async function getAuthHeader(): Promise<Record<string, string>> {
   if (AUTH_PROVIDER === 'authentik') {
     // Self-hosted BFF: attach the opaque session token as a non-ambient bearer.
     const sessionToken = getSessionTokenSync()
-    if (sessionToken) {
-      headers.Authorization = `Bearer ${sessionToken}`
-    }
-  } else {
-    // Firebase (default, live path) — unchanged behavior.
-    const user = auth().currentUser
-    if (user) {
-      const token = await user.getIdToken()
-      headers.Authorization = `Bearer ${token}`
-    }
+    return sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}
+  }
+  // Firebase (legacy path) — unchanged behavior.
+  const user = auth().currentUser
+  if (!user) return {}
+  const token = await user.getIdToken()
+  return { Authorization: `Bearer ${token}` }
+}
+
+export async function api<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(await getAuthHeader()),
   }
 
   const res = await fetch(`${API_BASE}${path}`, {
