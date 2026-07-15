@@ -103,7 +103,16 @@ _REVOKE_STATEMENTS = tuple(
 # launch gate. Do NOT onboard real PHI members with this table-level grant still in place.
 MAINT_ROLE = "companion_maintenance"
 _MAINT_REGRANT_STATEMENTS = (
+    # PR1 (transitional): keep the table-level DELETE as a fallback while retention.py
+    # cuts over to the scoped SECURITY DEFINER function. PR2 replaces this line with a
+    # REVOKE so the function becomes the sole path any row can leave account_audit_log.
     f"GRANT DELETE ON account_audit_log TO {MAINT_ROLE}",
+    # The DB-enforced scoped purge function (migration 041): owned by the table owner,
+    # hardcodes event='signup_refused', SECURITY DEFINER. The retention worker (running
+    # as MAINT_ROLE) executes it; EXECUTE was revoked from PUBLIC in the migration, so
+    # only this explicit grant lets the maintenance role call it. This is the path that
+    # survives PR2's REVOKE of the table-level DELETE above.
+    f"GRANT EXECUTE ON FUNCTION purge_signup_refused_audit(timestamptz) TO {MAINT_ROLE}",
 )
 
 

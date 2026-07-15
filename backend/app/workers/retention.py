@@ -11,11 +11,11 @@ Logs all deletions to deletion_audit_log.
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import DateTime, bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import maintenance_session
-from app.models.audit import AccountAuditLog, DeletionAuditLog
+from app.models.audit import DeletionAuditLog
 from app.models.document import Document
 from app.models.enums import (
     DeletionReason,
@@ -34,6 +34,9 @@ JUNK_RETENTION_DAYS = 30
 # (the rejected email), so they are purged on a 90-day window. Rows for
 # real members (e.g. `account_activated`) are retained.
 SIGNUP_REFUSED_RETENTION_DAYS = 90
+# The event value scoped for purge. NOTE: this is documentation only — the actual
+# scope is hardcoded inside the purge_signup_refused_audit() SQL function (migration
+# 041) so it is DB-enforced. Keep the two in sync.
 SIGNUP_REFUSED_EVENT = "signup_refused"
 
 
@@ -107,16 +110,27 @@ async def _purge_refused_signup_audit(db: AsyncSession) -> int:
     These rows hold a rejected email address (non-user PII) with no member
     row behind them, so they are not retained long-term. `account_activated`
     rows reference real members and are intentionally left untouched.
+
+    The delete goes through the ``purge_signup_refused_audit(timestamptz)`` SECURITY
+    DEFINER function (migration 041), NOT a raw DELETE: the function is owned by the
+    table owner and hardcodes ``event = 'signup_refused'``, so the scope is enforced
+    by the DATABASE. This is the sole purge path — once the table-level DELETE grant is
+    removed from every runtime role, the function is the only way any row can leave
+    account_audit_log, so even a compromised session cannot erase real-member
+    (`account_activated`) audit rows.
     """
     cutoff = datetime.utcnow() - timedelta(days=SIGNUP_REFUSED_RETENTION_DAYS)
 
+    # Type the bind param as timestamptz (matching account_audit_log.occurred_at) so
+    # Postgres can resolve the purge_signup_refused_audit(timestamptz) overload — an
+    # untyped param is seen as `unknown` and fails function resolution.
     result = await db.execute(
-        delete(AccountAuditLog).where(
-            AccountAuditLog.event == SIGNUP_REFUSED_EVENT,
-            AccountAuditLog.occurred_at < cutoff,
-        )
+        text("SELECT purge_signup_refused_audit(:cutoff)").bindparams(
+            bindparam("cutoff", type_=DateTime(timezone=True))
+        ),
+        {"cutoff": cutoff},
     )
-    return result.rowcount or 0
+    return result.scalar() or 0
 
 
 async def _transition_full_to_important(db: AsyncSession) -> int:

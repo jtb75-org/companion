@@ -30,10 +30,13 @@ def test_revoke_statements_cover_both_audit_tables():
 
 def test_maintenance_regrant_covers_only_account_audit_log():
     """The BYPASSRLS maintenance role inherits the append-only REVOKE (it is a member of
-    APP_ROLE), so it must be re-granted DELETE on account_audit_log for the retention
-    purge — but NOT on caregiver_activity_log, which stays immutable for every role."""
+    APP_ROLE), so it is re-granted DELETE on account_audit_log for the retention purge
+    (PR1 transitional fallback) AND EXECUTE on the scoped SECURITY DEFINER purge function
+    — but NOTHING on caregiver_activity_log, which stays immutable for every role."""
     assert grants._MAINT_REGRANT_STATEMENTS == (
         f"GRANT DELETE ON account_audit_log TO {grants.MAINT_ROLE}",
+        "GRANT EXECUTE ON FUNCTION purge_signup_refused_audit(timestamptz) TO "
+        f"{grants.MAINT_ROLE}",
     )
     # Guard the invariant that we never hand the maintenance role DELETE on the other
     # append-only table.
