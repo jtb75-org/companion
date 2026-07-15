@@ -5,6 +5,7 @@ import {
 } from 'react-native'
 import { useAuth } from './AuthProvider'
 import { AuthLoginError } from './authApi'
+import { AuthentikSignupScreen } from './AuthentikSignupScreen'
 import { authStrings } from './authStrings'
 import { colors, brand } from '../theme/colors'
 
@@ -23,6 +24,10 @@ export function AuthentikLoginScreen() {
   const [password, setPassword] = React.useState('')
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
+  // New members create their own account here. This toggle swaps the login form
+  // for the self-signup screen without needing a navigator (these pre-auth
+  // screens are rendered directly by AppNavigator, not inside a container).
+  const [showSignup, setShowSignup] = React.useState(false)
 
   const messageForStatus = (status: number | null): string => {
     switch (status) {
@@ -62,6 +67,10 @@ export function AuthentikLoginScreen() {
         <ActivityIndicator size="large" color={colors.blue} />
       </View>
     )
+  }
+
+  if (showSignup) {
+    return <AuthentikSignupScreen onBackToSignIn={() => setShowSignup(false)} />
   }
 
   return (
@@ -114,6 +123,16 @@ export function AuthentikLoginScreen() {
             {error}
           </Text>
         ) : null}
+
+        <TouchableOpacity
+          style={styles.linkButton}
+          onPress={() => setShowSignup(true)}
+          disabled={busy}
+          accessibilityRole="button"
+          accessibilityLabel={authStrings.signupLink}
+        >
+          <Text style={styles.linkText}>{authStrings.signupLink}</Text>
+        </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
   )
@@ -170,4 +189,6 @@ const styles = StyleSheet.create({
   },
   buttonText: { color: colors.white, fontSize: 17, fontWeight: '600' },
   error: { color: colors.rose, fontSize: 14, marginTop: 14, textAlign: 'center', lineHeight: 20 },
+  linkButton: { marginTop: 18, paddingVertical: 4 },
+  linkText: { color: colors.blue, fontSize: 15, fontWeight: '600' },
 })

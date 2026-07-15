@@ -149,6 +149,43 @@ export async function setActivationPassword(token: string, password: string): Pr
 }
 
 /**
+ * Member self-signup (self-hosted / Authentik path only).
+ *
+ *   POST /auth/signup  body {email, name}   (UNAUTHENTICATED — no bearer)
+ *     2xx -> we have sent (or will send) a link. The body is intentionally
+ *            generic for anti-enumeration, so we NEVER branch on it.
+ *     429 -> too many signups from this network — ask them to wait.
+ *     404 -> only under firebase mode (won't happen here) — generic error.
+ *     other non-2xx -> generic error.
+ *
+ * The member finishes via the emailed link, which opens the existing /activate
+ * "set your password" screen. This call's job ends at "we've sent you an email".
+ *
+ * Like login/activation, this is a PRE-auth request, so it does NOT go through
+ * the shared `api()` client (there is no bearer yet). Nothing sensitive is
+ * logged: on failure we throw `AuthLoginError` carrying only the HTTP status.
+ */
+export async function signup(email: string, name: string): Promise<void> {
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, name }),
+    })
+  } catch {
+    // Network error (offline, DNS, TLS). No HTTP status available.
+    throw new AuthLoginError(null)
+  }
+  if (!res.ok) {
+    // Any non-2xx (429 rate-limit, 404 wrong-mode, or other) — carry the status
+    // so the screen can special-case 429 and fall back to a generic message.
+    throw new AuthLoginError(res.status)
+  }
+  // 2xx: body is intentionally generic; do not read or branch on it.
+}
+
+/**
  * POST /auth/logout. Best-effort: invalidates the session server-side.
  * The caller clears local storage regardless of the result.
  */

@@ -25,11 +25,12 @@ Companion adaptations vs the HealthCostClarity original:
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,13 +54,22 @@ from app.db.context import (
 from app.db.session import async_session_factory, maintenance_session
 from app.models.admin_user import AdminUser
 from app.models.audit import AccountAuditLog
+from app.models.enums import AccountStatus
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
+from app.services.activation_service import send_activation_if_enabled
+from app.services.invitation_service import get_or_create_stub_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 log = logging.getLogger("companion.auth")
 
 _INACTIVE_STATUSES = ("deactivated", "pending_deletion")
+
+# Light plausibility check only (no email-validator dep in the tree). The real
+# email-ownership proof is the activation link — a self-registrant cannot get a
+# password (and thus cannot log in) without receiving the email at that inbox — so
+# this regex just rejects obvious garbage before we provision + send mail.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 _verifier: OIDCVerifier | None = None
 
@@ -105,6 +115,29 @@ class LoginIn(BaseModel):
     # SOLELY on the httpOnly companion_sid cookie — so the sid is never exposed to
     # browser JS, preserving the full httpOnly/XSS posture (safety follow-up).
     mobile: bool = False
+
+
+class SignupRequest(BaseModel):
+    """Body for the unauthenticated POST /auth/signup (member self-signup)."""
+
+    email: str = Field(min_length=3, max_length=320)
+    name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("email")
+    @classmethod
+    def _plausible_email(cls, v: str) -> str:
+        v = v.strip()
+        if not _EMAIL_RE.match(v):
+            raise ValueError("enter a valid email address")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def _trim_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("name is required")
+        return v
 
 
 def _set_cookie(response: Response, name: str, value: str, *, http_only: bool) -> None:
@@ -301,6 +334,87 @@ def _client_ip(request: Request) -> str:
         if xff:
             return xff
     return request.client.host if request.client else "unknown"
+
+
+@router.post("/signup")
+async def signup(
+    body: SignupRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    """Member self-signup: open self-registration for the individual/family track.
+
+    UNAUTHENTICATED and Authentik-only (404 under firebase). A self-registrant supplies
+    an email + name; we create an INVITED, self_directed member stub, provision the
+    matching Authentik account, and email the branded activation link. The activation
+    link IS the email-ownership proof — the registrant cannot set a password (and thus
+    cannot log in) without receiving the mail at that inbox — so no separate email
+    verification is needed, and activation flips them INVITED -> ACTIVE.
+
+    Security envelope:
+      * IP rate limit (distinct ``signup:ip`` bucket, tighter ``signup_max_attempts``):
+        the primary abuse control for unauthenticated account creation + outbound email.
+      * Anti-enumeration: the response is byte-identical whether or not the email
+        already exists. We NEVER reveal account existence — an existing ACTIVE email and
+        a brand-new email both return ``200 {"status": "ok"}``.
+    """
+    _require_authentik_enabled()
+
+    # Rate-limit by IP FIRST (the #1 abuse control here). Distinct bucket from login so a
+    # user's own login attempts and sign-ups don't share a counter. Over threshold → 429.
+    limiter = get_login_rate_limiter()
+    ip_bucket = f"signup:ip:{_client_ip(request)}"
+    if await limiter.hit(ip_bucket) > settings.signup_max_attempts:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "too many sign-up attempts — try again later",
+            headers={"Retry-After": str(settings.login_window_seconds)},
+        )
+
+    email = body.email.strip().lower()
+    name = body.name.strip()
+
+    # Second bound, keyed on the EMAIL (not IP): cap how many activation mails an address
+    # can receive per window, so an attacker rotating IPs still can't bomb one victim.
+    # When over, we skip the SEND but keep the branch/response identical (anti-enumeration).
+    async def _send_activation_capped() -> None:
+        if await limiter.hit(f"signup:email:{email}") <= settings.signup_email_max_per_window:
+            await send_activation_if_enabled(email, name)
+
+    # Look up any existing row by email on the maintenance (BYPASSRLS) session — users is
+    # per-user RLS-fenced and there is no tenant GUC pre-auth. We branch on status but the
+    # HTTP response is identical in every branch (anti-enumeration).
+    async with maintenance_session() as mdb:
+        existing = (
+            await mdb.execute(select(User).where(User.email == email))
+        ).scalar_one_or_none()
+        existing_status = existing.account_status if existing else None
+
+    if existing is None:
+        # Brand-new: create an INVITED, self_directed member stub (care_model
+        # server-defaults to self_directed, correct for a self-directed signup) +
+        # provision the Authentik account, then send the branded activation email.
+        await get_or_create_stub_user(db, email, name)
+        await _send_activation_capped()
+        result = "created"
+    elif existing_status == AccountStatus.INVITED:
+        # A not-yet-activated account (prior self-signup or an invited stub). Re-fire the
+        # activation email so a stuck user can recover; issue_activation_token supersedes
+        # any prior token. Create NO second row. Bounded against email-bombing by BOTH the
+        # per-IP limit above and the per-email cap in _send_activation_capped.
+        await _send_activation_capped()
+        result = "resent"
+    else:
+        # Already ACTIVE (or deactivated/pending_deletion): they have a usable account —
+        # do NOTHING and send no email. They should sign in / reset, not re-signup.
+        result = "noop"
+
+    # Best-effort audit in its own transaction (mirrors _audit_login_event): server-side
+    # only, so an audit hiccup never fails the request and the response stays uniform.
+    await _audit_login_event(
+        "signup_requested", email, details={"result": result}, best_effort=True
+    )
+    return {"status": "ok"}
 
 
 @router.post("/login")

@@ -71,6 +71,43 @@ export const authStrings = {
   activateSavedGoSignIn: 'Your password is saved. Please go back and sign in.',
   // Button that returns to the Sign In screen from the invalid/saved states.
   activateBackButton: 'Back to Sign In',
+
+  // --- Create-account screen (member self-signup) --------------------------
+  // A new member makes their own account here. We only take a name + email;
+  // they finish by tapping a link we email them (the /activate screen above).
+  // MEMBER-facing — keep it warm, short, and plain. Avoid the words
+  // "activation", "credentials", "verify", "account setup".
+
+  // Small text button under Sign In that opens this screen.
+  signupLink: 'New here? Create an account',
+  // Form header.
+  signupTitle: 'Create your account',
+  // Under the title — tells them what happens next.
+  signupSubtitle: "We'll email you a link to finish setting up.",
+  // Field placeholders.
+  signupNamePlaceholder: 'Your name',
+  signupEmailPlaceholder: 'Your email',
+  // The button that sends the request.
+  signupButton: 'Create Account',
+  // Client-side checks (before we send anything).
+  signupMissingName: 'Please type your name.',
+  signupMissingEmail: 'Please type your email.',
+  signupBadEmail: 'Please check your email and try again.',
+  // 429 = too many signups from this network right now.
+  signupTooManyTries: 'Too many tries right now. Please wait a minute and try again.',
+  // Network / unknown / anything else.
+  signupError: 'Something went wrong. Please try again.',
+  // Confirmation screen (after a successful send). The member's email is added
+  // after this line in the app, so end the body with a space + <email>.
+  signupSentTitle: 'Check your email',
+  // Shown before the email address on the confirmation card.
+  signupSentBodyPrefix: 'We sent a link to',
+  // Shown after the email address on the confirmation card.
+  signupSentBodySuffix: 'Tap it to finish setting up your account.',
+  // Button that returns to the Sign In screen from the form or confirmation.
+  signupBackButton: 'Back to Sign In',
+  // On the "check your email" card: go back to the form to send the link again.
+  signupResendLink: "Didn't get the email? Try again.",
 } as const
 
 export type AuthStringKey = keyof typeof authStrings
