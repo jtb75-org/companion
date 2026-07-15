@@ -125,6 +125,11 @@ jobs:
         env:
           COREPACK_ENABLE_STRICT: "0"
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          # Auth provider baked into the web bundle. Empty/unset ⇒ 'firebase'
+          # (AuthProvider default). Cutover lever: set the repo var to 'authentik'
+          # to ship the Authentik BFF cookie login; set back to 'firebase' + rebuild
+          # to roll back. Backend is authentik dual-run, so the flip is client-only.
+          VITE_AUTH_PROVIDER: ${{ vars.VITE_AUTH_PROVIDER }}
           VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
           VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
           VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
