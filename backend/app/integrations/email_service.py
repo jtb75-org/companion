@@ -8,6 +8,7 @@ Sends transactional emails for:
 - Safety alerts to caregivers
 """
 
+import html
 import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -154,17 +155,25 @@ async def send_activation_email(
 
     activate_url = f"{APP_URL}/activate?token={token}"
 
+    # ``to_name`` can be attacker-controlled on the open self-signup path (an
+    # unauthenticated registrant picks both the name AND the recipient address), so it
+    # must never carry markup into a brand-trusted email. HTML-escape it for the HTML
+    # part; the plaintext part gets the raw (already whitespace-collapsed at the API
+    # boundary) name — no markup executes there.
+    safe_name = html.escape(to_name)
+
     text_body = (
         f"Hi {to_name},\n\n"
         f"An account has been created for you on {BRAND_MID}.\n\n"
         f"To finish setting up, choose a password using the link below:\n\n"
         f"{activate_url}\n\n"
         f"Once your password is set, you can sign in any time.\n\n"
+        f"If you weren't expecting this, you can safely ignore this email.\n\n"
         f"— The {BRAND_SHORT} Team"
     )
 
     html_body = _email_wrapper(
-        f"<p>Hi {to_name},</p>"
+        f"<p>Hi {safe_name},</p>"
         f"<p>An account has been created for you on {BRAND_MID}.</p>"
         f"<p>To finish setting up, choose a password. Once it's set, you can sign in any time.</p>"
         + _cta_button(activate_url, "Set your password")

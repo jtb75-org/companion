@@ -8,6 +8,7 @@ import { parseActivationToken } from '../src/navigation/linking'
 import {
   validateActivationToken,
   setActivationPassword,
+  signup,
   AuthLoginError,
 } from '../src/auth/authApi'
 
@@ -119,5 +120,45 @@ describe('setActivationPassword', () => {
       name: 'AuthLoginError',
       status,
     })
+  })
+})
+
+describe('signup', () => {
+  afterEach(() => {
+    // @ts-ignore
+    global.fetch = undefined
+  })
+
+  it('POSTs {email, name} and resolves on a 2xx (generic body ignored)', async () => {
+    const fetchMock = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        // Intentionally generic body — signup() must not read or branch on it.
+        json: () => Promise.resolve({ message: 'ok' }),
+      }),
+    )
+    // @ts-ignore
+    global.fetch = fetchMock
+
+    await expect(signup('m@x.com', 'Mia')).resolves.toBeUndefined()
+
+    const init = (fetchMock.mock.calls[0] as unknown[])[1] as { body: string }
+    expect(JSON.parse(init.body)).toEqual({ email: 'm@x.com', name: 'Mia' })
+  })
+
+  it('throws AuthLoginError(429) when rate-limited', async () => {
+    // @ts-ignore
+    global.fetch = jest.fn(() => Promise.resolve({ ok: false, status: 429 }))
+    await expect(signup('m@x.com', 'Mia')).rejects.toMatchObject({
+      name: 'AuthLoginError',
+      status: 429,
+    })
+  })
+
+  it('reports a null status on network failure', async () => {
+    // @ts-ignore
+    global.fetch = jest.fn(() => Promise.reject(new Error('offline')))
+    await expect(signup('m@x.com', 'Mia')).rejects.toBeInstanceOf(AuthLoginError)
   })
 })

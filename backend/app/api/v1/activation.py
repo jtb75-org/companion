@@ -33,6 +33,8 @@ from app.integrations.authentik_admin import (
     set_authentik_password,
 )
 from app.models.admin_user import AdminUser
+from app.models.audit import AccountAuditLog
+from app.models.enums import AccountStatus
 from app.models.user import User
 from app.schemas.activation import ActivationSetPassword
 from app.services.activation_service import (
@@ -65,6 +67,42 @@ async def _lookup_account_name(email: str) -> str | None:
         if user is not None:
             return user.preferred_name or user.display_name or email
     return None
+
+
+async def _activate_member_if_invited(email: str) -> None:
+    """Flip a member's ``users`` row INVITED -> ACTIVE once they've proven email
+    ownership by redeeming the activation token AND setting a password.
+
+    This is what makes a self-signup member fully active: they arrive INVITED (from
+    /auth/signup or an invite), and only receiving the emailed activation link lets them
+    set a password here — so this flip is gated on that proof. Best-effort / no-op
+    otherwise: admins have no ``users`` row, already-ACTIVE members and deactivated/
+    pending_deletion accounts are left untouched, and caregivers activate via the
+    separate invitation-accept flow. Runs on the maintenance (BYPASSRLS) session — this
+    is pre-auth (no tenant GUC) and ``users`` is per-user RLS-fenced. A failure here must
+    NOT fail the request: the password is already set by the time we call this, so we log
+    and continue (the member can still be activated on a later action)."""
+    try:
+        async with maintenance_session() as mdb:
+            user = (
+                await mdb.execute(select(User).where(User.email == email))
+            ).scalar_one_or_none()
+            if user is not None and user.account_status == AccountStatus.INVITED:
+                user.account_status = AccountStatus.ACTIVE
+                # Lifecycle traceability — same event the profile-completion
+                # activation path records; written in this same transaction.
+                mdb.add(
+                    AccountAuditLog(
+                        event="account_activated", email=email, user_id=user.id
+                    )
+                )
+                await mdb.commit()
+    except Exception:
+        log.error(
+            "failed to activate member %s after set-password (best-effort)",
+            email,
+            exc_info=True,
+        )
 
 
 @router.get("/validate")
@@ -131,5 +169,10 @@ async def set_activation_password(data: ActivationSetPassword):
         raise HTTPException(
             502, "Could not set your password. Please try again."
         ) from None
+
+    # Password is now set (email ownership proven via the redeemed token) — activate a
+    # self-signup / invited member. Best-effort: it must not fail an already-succeeded
+    # password set (see helper). No-op for admins (no users row) and already-active rows.
+    await _activate_member_if_invited(email)
 
     return {"ok": True, "email": email}

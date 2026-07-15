@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -48,9 +49,20 @@ async def get_or_create_stub_user(
                 account_status=AccountStatus.INVITED,
             )
             mdb.add(user)
-            await mdb.flush()
-            await mdb.commit()
-            created = True
+            try:
+                await mdb.flush()
+                await mdb.commit()
+                created = True
+            except IntegrityError:
+                # Concurrent request won the unique(email) race — reachable now that the
+                # OPEN /auth/signup path drives this. Roll back and re-select the row the
+                # other insert committed, so this stays a clean get-or-create (no 500,
+                # which would also break /auth/signup's uniform anti-enumeration response).
+                await mdb.rollback()
+                user = (
+                    await mdb.execute(select(User).where(User.email == email))
+                ).scalar_one()
+                created = False
 
     # Provision the matching Authentik account (branded BFF provisioning, PR 1).
     # Gated on the master switch here so the Firebase default stays byte-identical;

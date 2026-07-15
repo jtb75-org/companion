@@ -150,6 +150,17 @@ class Settings(BaseSettings):
     # Login throttle (per username + per client IP, fixed window).
     login_max_attempts: int = 10
     login_window_seconds: int = 300
+    # Self-signup throttle (per client IP, reuses login_window_seconds). Tighter than
+    # login: an unauthenticated account-creation + outbound-email endpoint is the #1
+    # abuse surface, so cap sign-up attempts per IP/window lower. This bounds both
+    # bulk account creation AND email-bombing an existing INVITED address (each
+    # re-fire costs one hit against this counter).
+    signup_max_attempts: int = 5
+    # Per-EMAIL activation-mail cap (per window). A second, address-keyed bound so an
+    # attacker rotating IPs can't trickle activation emails at one victim's address:
+    # once this many sends fire for an email in a window, further signups for it become
+    # silent no-ops (the response stays byte-identical — anti-enumeration is preserved).
+    signup_email_max_per_window: int = 3
     # Whether to trust the raw X-Forwarded-For chain for the login rate-limit client
     # IP. cf-connecting-ip (set by Cloudflare, unspoofable via the cloudflared tunnel)
     # is always trusted; XFF is client-injectable unless a trusted proxy owns it, so it
