@@ -93,15 +93,32 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        release {
+            // Owner-supplied release/UPLOAD keystore. Set these four properties in
+            // ~/.gradle/gradle.properties (or via ORG_GRADLE_PROJECT_* env vars) —
+            // NEVER commit the keystore file or its passwords:
+            //   RELEASE_STORE_FILE=/abs/path/companion-upload.keystore
+            //   RELEASE_STORE_PASSWORD=...   RELEASE_KEY_ALIAS=...   RELEASE_KEY_PASSWORD=...
+            // Generate one with:
+            //   keytool -genkeypair -v -keystore companion-upload.keystore \
+            //     -alias companion-upload -keyalg RSA -keysize 2048 -validity 10000
+            if (project.hasProperty('RELEASE_STORE_FILE')) {
+                storeFile file(RELEASE_STORE_FILE)
+                storePassword RELEASE_STORE_PASSWORD
+                keyAlias RELEASE_KEY_ALIAS
+                keyPassword RELEASE_KEY_PASSWORD
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            // Sign with the release/upload keystore when configured; otherwise fall
+            // back to the debug key so existing dev/CI release builds still work.
+            // A Play upload REQUIRES the release keystore (never the debug key).
+            signingConfig project.hasProperty('RELEASE_STORE_FILE') ? signingConfigs.release : signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }

@@ -9,12 +9,26 @@ instead of the web page. They must be served from the site root of
 - **`apple-app-site-association`** (iOS) — no file extension by design. `appID` =
   `<TeamID>.<bundleID>` = `2NQD86RATH.com.mydailydignity.companion`; claims the
   `/activate` path. Complete — no owner value needed.
-- **`assetlinks.json`** (Android) — `package_name` = `com.companionapp`.
-  **OWNER TODO:** replace `REPLACE_WITH_RELEASE_SIGNING_SHA256` with the SHA-256
-  fingerprint of the **release** signing certificate (Play App Signing key if
-  enrolled), e.g. `keytool -list -v -keystore <release.keystore> -alias <alias>` →
-  the `SHA256:` line (colon-separated hex). Multiple entries allowed (upload + Play
-  signing keys).
+- **`assetlinks.json`** (Android) — `package_name` = `com.companionapp` (matches the
+  `applicationId`). Ships the placeholder `REPLACE_WITH_RELEASE_SIGNING_SHA256`.
+
+  **OWNER STEPS to fill it (staged 2026-07-15):**
+  1. **Set up release signing** — the release build no longer hard-codes the debug key;
+     it reads an UPLOAD keystore from gradle properties (with a debug fallback). Generate
+     one + set `RELEASE_STORE_FILE / RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS /
+     RELEASE_KEY_PASSWORD` in `~/.gradle/gradle.properties` (see the comment in
+     `companion-app/android/app/build.gradle`; NEVER commit the keystore or passwords).
+  2. **Build a signed AAB + upload to Play (internal track)** — this enrolls **Play App
+     Signing**, so Google holds the key that actually signs installed apps.
+  3. **Get the SHA-256** — Play Console → your app → *Test and release → App integrity →
+     App signing key certificate → SHA-256*. (The **app-signing** key, not the upload key,
+     is what App Links verify against. You may also add the upload key's SHA — get it with
+     `keytool -list -v -keystore <upload.keystore> -alias <alias>` → the `SHA256:` line.)
+  4. **Fill it in with one command:**
+     `scripts/android-fill-assetlinks-sha.sh <SHA256> [<SHA256> ...]`
+     (validates colon-hex format; rewrites this file's `sha256_cert_fingerprints`.)
+  5. **Commit + push to main** so the web bundle rebuilds and serves it, then verify with
+     the Digital Asset Links generator / `curl .../.well-known/assetlinks.json`.
 
 ### Android App Link verification is DEFERRED (status)
 The manifest ships `android:autoVerify="true"`, but Android verification **cannot
