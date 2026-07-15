@@ -12,10 +12,14 @@
  *                            stored on device, `Authorization: Bearer` on every
  *                            request.
  *
- * KEEP THIS ON 'firebase' until the backend is flipped to `auth_provider=authentik`.
- * While the backend runs Firebase, POST /auth/login returns 404, so the
- * Authentik path must never be the default.
+ * The backend is DUAL-RUN (Authentik BFF live + validated end-to-end on web for
+ * admin, member self-signup, and caregiver invite/accept as of 2026-07-15), so
+ * POST /auth/login is live. The mobile app is now cut over to Authentik.
+ *
+ * ROLLBACK: set this back to 'firebase' and re-ship (app-store round-trip) — the
+ * backend never moves, so the flip is client-only. Validate hard in TestFlight /
+ * Play internal before promoting to production.
  */
 export type AuthProvider = 'firebase' | 'authentik'
 
-export const AUTH_PROVIDER: AuthProvider = 'firebase'
+export const AUTH_PROVIDER: AuthProvider = 'authentik'
