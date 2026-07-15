@@ -28,21 +28,22 @@ def test_revoke_statements_cover_both_audit_tables():
     assert any(_BROAD_GRANT in s for s in grants._GRANT_STATEMENTS)
 
 
-def test_maintenance_regrant_covers_only_account_audit_log():
-    """The BYPASSRLS maintenance role inherits the append-only REVOKE (it is a member of
-    APP_ROLE), so it is re-granted DELETE on account_audit_log for the retention purge
-    (PR1 transitional fallback) AND EXECUTE on the scoped SECURITY DEFINER purge function
-    — but NOTHING on caregiver_activity_log, which stays immutable for every role."""
-    assert grants._MAINT_REGRANT_STATEMENTS == (
-        f"GRANT DELETE ON account_audit_log TO {grants.MAINT_ROLE}",
+def test_maintenance_statements_revoke_delete_and_grant_only_execute():
+    """The maintenance role holds NO table-level DELETE on account_audit_log — it is
+    explicitly REVOKEd (undoing the transitional grant + any manual break-glass grant) so
+    the SECURITY DEFINER function is the sole exit path. It gets EXECUTE on that function
+    and NOTHING on caregiver_activity_log."""
+    assert grants._MAINT_STATEMENTS == (
+        f"REVOKE DELETE ON account_audit_log FROM {grants.MAINT_ROLE}",
         "GRANT EXECUTE ON FUNCTION purge_signup_refused_audit(timestamptz) TO "
         f"{grants.MAINT_ROLE}",
     )
-    # Guard the invariant that we never hand the maintenance role DELETE on the other
-    # append-only table.
+    # No GRANT of table-level DELETE to any runtime role survives here.
     assert not any(
-        "caregiver_activity_log" in s for s in grants._MAINT_REGRANT_STATEMENTS
+        s.startswith("GRANT DELETE") for s in grants._MAINT_STATEMENTS
     )
+    # And nothing touches the other append-only table.
+    assert not any("caregiver_activity_log" in s for s in grants._MAINT_STATEMENTS)
 
 
 def test_caregiver_activity_log_relationships_defer_to_db_cascade():
@@ -107,10 +108,14 @@ async def test_apply_grants_revokes_after_granting(monkeypatch):
         assert (
             f"REVOKE UPDATE, DELETE ON {table} FROM {grants.APP_ROLE}" in executed
         )
-    # The maintenance re-grant must run AFTER the append-only REVOKE (a re-grant before
-    # the REVOKE would be a no-op/undone), restoring the retention purge for that role.
-    regrant = f"GRANT DELETE ON account_audit_log TO {grants.MAINT_ROLE}"
-    assert regrant in executed
-    assert executed.index(regrant) > max(revoke_idxs), (
-        "maintenance re-grant must run after the append-only REVOKE"
+    # The maintenance role gets NO table-level DELETE — it is explicitly REVOKEd, and only
+    # the purge-function EXECUTE is granted. Both run after the app-role append-only REVOKEs.
+    maint_revoke = f"REVOKE DELETE ON account_audit_log FROM {grants.MAINT_ROLE}"
+    maint_exec = (
+        "GRANT EXECUTE ON FUNCTION purge_signup_refused_audit(timestamptz) TO "
+        f"{grants.MAINT_ROLE}"
     )
+    assert maint_revoke in executed and maint_exec in executed
+    assert executed.index(maint_revoke) > max(revoke_idxs)
+    # No GRANT DELETE to any runtime role is ever issued.
+    assert not any(s.startswith("GRANT DELETE ON account_audit_log") for s in executed)
