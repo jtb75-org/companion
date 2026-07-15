@@ -13,6 +13,7 @@ test_authentik_login.py / test_activation.py). ``auth_provider`` is set via monk
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 from sqlalchemy import delete, select
@@ -258,6 +259,55 @@ async def test_signup_per_email_cap_across_ips(monkeypatch):
     await _delete_user(email)
 
 
+@requires_db
+async def test_signup_rejects_markup_name(monkeypatch):
+    """A name carrying HTML/markup is rejected at the boundary (422). Otherwise it would
+    be interpolated into a brand-trusted activation email on this OPEN endpoint (the
+    email-injection / phishing-amplification vector safety flagged)."""
+    _enable_authentik(monkeypatch)
+    spies = _Spies(monkeypatch)
+    async with _client() as ac:
+        r = await ac.post(
+            _SIGNUP,
+            json={"email": "mk@t.io", "name": '<a href="https://evil">click</a>'},
+        )
+    assert r.status_code == 422
+    assert spies.provision == []
+    assert spies.activation == []
+
+
+@requires_db
+async def test_signup_concurrent_same_email(monkeypatch):
+    """Concurrent signups for the same NEW email all return 200 and yield exactly ONE
+    users row — get_or_create_stub_user is race-safe against the unique(email) constraint,
+    so a lost insert re-selects instead of surfacing a 500 (which would both break the
+    uniform anti-enumeration response and be a public DoS edge)."""
+    _enable_authentik(monkeypatch)
+    _Spies(monkeypatch)
+    monkeypatch.setattr(settings, "signup_max_attempts", 100)  # keep per-IP out of the way
+    email = f"su-race-{uuid.uuid4()}@t.io"
+    await _delete_user(email)
+
+    async with _client() as ac:
+        results = await asyncio.gather(
+            *[
+                ac.post(
+                    _SIGNUP,
+                    json={"email": email, "name": "Race"},
+                    headers={"cf-connecting-ip": f"7.7.7.{i}"},  # dodge the per-IP bucket
+                )
+                for i in range(4)
+            ]
+        )
+    assert all(r.status_code == 200 for r in results)
+    async with db_module.async_session_factory() as s:
+        rows = (
+            await s.execute(select(User).where(User.email == email))
+        ).scalars().all()
+    assert len(rows) == 1  # exactly one, despite the concurrent creates
+    await _delete_user(email)
+
+
 # ── 6. invalid email → 422 (schema plausibility gate) ───────────────────────────
 
 
@@ -306,4 +356,15 @@ async def test_activation_flips_member_invited_to_active(monkeypatch):
     row = await _get_user(email)
     assert row is not None
     assert row.account_status == AccountStatus.ACTIVE
+    # Lifecycle traceability: the flip writes an account_activated audit event.
+    async with db_module.async_session_factory() as s:
+        events = (
+            await s.execute(
+                select(AccountAuditLog).where(
+                    AccountAuditLog.email == email,
+                    AccountAuditLog.event == "account_activated",
+                )
+            )
+        ).scalars().all()
+    assert len(events) == 1
     await _delete_user(email)

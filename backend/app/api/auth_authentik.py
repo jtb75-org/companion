@@ -134,9 +134,16 @@ class SignupRequest(BaseModel):
     @field_validator("name")
     @classmethod
     def _trim_name(cls, v: str) -> str:
-        v = v.strip()
+        # Boundary hardening: this name is interpolated into a branded activation email
+        # sent to a possibly-non-consenting address on an OPEN endpoint. Collapse all
+        # whitespace (kills newline injection into the plaintext body) and reject markup
+        # chars so a hostile name can't smuggle a link/HTML into either MIME part. The
+        # email builder also HTML-escapes, so this is defense-in-depth.
+        v = re.sub(r"\s+", " ", v).strip()
         if not v:
             raise ValueError("name is required")
+        if "<" in v or ">" in v:
+            raise ValueError("name contains invalid characters")
         return v
 
 
