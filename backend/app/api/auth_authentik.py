@@ -369,11 +369,73 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+async def _process_signup_request(email: str, name: str) -> None:
+    """Resolve the account, create the stub, provision + send — OFF the request path.
+
+    Every branch here varies by whether the address already has an account, which is why
+    it must not run inline: see ``signup``. Dispatched via ``BackgroundTasks``, so it
+    runs only after the response has been written to the client.
+
+    Fully defensive. The response is already gone, so a failure can only ever be logged —
+    it must never escape into the background-task runner.
+    """
+    try:
+        limiter = get_login_rate_limiter()
+
+        # Bound, keyed on the EMAIL (not IP): cap how many activation mails an address can
+        # receive per window, so an attacker rotating IPs still can't bomb one victim.
+        async def _send_activation_capped() -> None:
+            if (
+                await limiter.hit(f"signup:email:{email}")
+                <= settings.signup_email_max_per_window
+            ):
+                await send_activation_if_enabled(email, name)
+
+        # Look up any existing row by email on the maintenance (BYPASSRLS) session — users
+        # is per-user RLS-fenced and there is no tenant GUC pre-auth.
+        async with maintenance_session() as mdb:
+            existing = (
+                await mdb.execute(select(User).where(User.email == email))
+            ).scalar_one_or_none()
+            existing_status = existing.account_status if existing else None
+
+        if existing is None:
+            # Brand-new: create an INVITED, self_directed member stub (care_model
+            # server-defaults to self_directed, correct for a self-directed signup) +
+            # provision the Authentik account, then send the branded activation email.
+            # get_or_create_stub_user opens its own maintenance session, so it needs no
+            # request-scoped session and is safe to call from here.
+            await get_or_create_stub_user(email, name)
+            await _send_activation_capped()
+            result = "created"
+        elif existing_status == AccountStatus.INVITED:
+            # A not-yet-activated account (prior self-signup or an invited stub). Re-fire
+            # the activation email so a stuck user can recover; issue_activation_token
+            # supersedes any prior token. Create NO second row.
+            await _send_activation_capped()
+            result = "resent"
+        else:
+            # Already ACTIVE (or deactivated/pending_deletion): they have a usable account
+            # — do NOTHING and send no email. They should sign in / reset, not re-signup.
+            result = "noop"
+
+        # Best-effort audit in its own transaction (mirrors _audit_login_event).
+        await _audit_login_event(
+            "signup_requested", email, details={"result": result}, best_effort=True
+        )
+    except Exception:
+        log.error(
+            "signup background processing failed for %s (best-effort)",
+            email,
+            exc_info=True,
+        )
+
+
 @router.post("/signup")
 async def signup(
     body: SignupRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    background: BackgroundTasks,
 ) -> dict[str, str]:
     """Member self-signup: open self-registration for the individual/family track.
 
@@ -407,46 +469,14 @@ async def signup(
     email = body.email.strip().lower()
     name = body.name.strip()
 
-    # Second bound, keyed on the EMAIL (not IP): cap how many activation mails an address
-    # can receive per window, so an attacker rotating IPs still can't bomb one victim.
-    # When over, we skip the SEND but keep the branch/response identical (anti-enumeration).
-    async def _send_activation_capped() -> None:
-        if await limiter.hit(f"signup:email:{email}") <= settings.signup_email_max_per_window:
-            await send_activation_if_enabled(email, name)
-
-    # Look up any existing row by email on the maintenance (BYPASSRLS) session — users is
-    # per-user RLS-fenced and there is no tenant GUC pre-auth. We branch on status but the
-    # HTTP response is identical in every branch (anti-enumeration).
-    async with maintenance_session() as mdb:
-        existing = (
-            await mdb.execute(select(User).where(User.email == email))
-        ).scalar_one_or_none()
-        existing_status = existing.account_status if existing else None
-
-    if existing is None:
-        # Brand-new: create an INVITED, self_directed member stub (care_model
-        # server-defaults to self_directed, correct for a self-directed signup) +
-        # provision the Authentik account, then send the branded activation email.
-        await get_or_create_stub_user(db, email, name)
-        await _send_activation_capped()
-        result = "created"
-    elif existing_status == AccountStatus.INVITED:
-        # A not-yet-activated account (prior self-signup or an invited stub). Re-fire the
-        # activation email so a stuck user can recover; issue_activation_token supersedes
-        # any prior token. Create NO second row. Bounded against email-bombing by BOTH the
-        # per-IP limit above and the per-email cap in _send_activation_capped.
-        await _send_activation_capped()
-        result = "resent"
-    else:
-        # Already ACTIVE (or deactivated/pending_deletion): they have a usable account —
-        # do NOTHING and send no email. They should sign in / reset, not re-signup.
-        result = "noop"
-
-    # Best-effort audit in its own transaction (mirrors _audit_login_event): server-side
-    # only, so an audit hiccup never fails the request and the response stays uniform.
-    await _audit_login_event(
-        "signup_requested", email, details={"result": result}, best_effort=True
-    )
+    # EVERYTHING that depends on whether the account exists happens AFTER the response is
+    # sent. A byte-identical body is not enough on its own: run inline, the brand-new
+    # branch pays a stub INSERT + an Authentik provisioning round-trip + the SMTP send,
+    # while an already-ACTIVE address returns almost immediately — a timing oracle that
+    # re-leaks exactly what the identical body is there to hide (the same defect measured
+    # at 35ms on /auth/forgot-password). The handler now does the same constant work for
+    # every address: validate, IP-limit, schedule, return.
+    background.add_task(_process_signup_request, email, name)
     return {"status": "ok"}
 
 
