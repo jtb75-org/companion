@@ -175,6 +175,19 @@ async def _revoke_sessions_for_email(email: str) -> None:
             email,
             exc_info=True,
         )
+        # This is the branch that MATTERS for forensics: the password changed but the
+        # eviction did not, so a stolen session survived a reset — the security control
+        # failed OPEN. An app-log line alone is the wrong record for that; a control that
+        # can fail open must fail loudly AND durably. Alert on this event.
+        try:
+            await _audit_login_event(
+                "sessions_revoke_failed",
+                email,
+                details={"reason": "password_set"},
+                best_effort=True,
+            )
+        except Exception:  # pragma: no cover — audit is itself best-effort
+            log.error("failed to audit the session-revocation failure for %s", email)
 
 
 async def _activate_member_if_invited(email: str) -> None:

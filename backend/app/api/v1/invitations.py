@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth_authentik import _require_authentik_enabled
+from app.api.v1.activation import _revoke_sessions_for_email
 from app.auth.dependencies import User, _extract_bearer_token, require_complete_profile
 from app.auth.principal import resolve_caregiver_session
 from app.config import settings
@@ -254,5 +255,14 @@ async def set_invitation_password(data: SetPasswordRequest):
         raise HTTPException(
             502, "Could not set your password. Please try again."
         ) from None
+
+    # Defense-in-depth: this is the SECOND path that sets a password, so it gets the same
+    # revocation as /activation/set-password. Today it is a guaranteed no-op — the guard
+    # above 409s unless the stub is still INVITED, and an INVITED stub has never had a
+    # password, so it cannot have a live session. But that safety rests ENTIRELY on that
+    # 409, which is a different invariant than activation's; if it is ever relaxed, this
+    # path would silently start leaving live sessions behind a password change. One query
+    # to make that impossible. Best-effort, like the activation hook.
+    await _revoke_sessions_for_email(contact.contact_email)
 
     return {"ok": True, "email": contact.contact_email}

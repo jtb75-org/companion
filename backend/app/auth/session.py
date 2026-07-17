@@ -17,6 +17,19 @@ so ``get_current_user`` will resolve the principal by matching the stored ``sub`
 against ``users.external_subject_id`` at cutover; this store keeps holding that
 opaque subject. Today it is minted but unconsumed.
 
+!! INFRA DEPENDENCY — REDIS MUST NOT EVICT !!
+The revocation epoch below is the ONE key here whose ABSENCE is fail-OPEN: if
+``companion:sess:epoch:<subject>`` is evicted while a session key survives, a session
+that was revoked by a password reset silently comes back to life. Every other key in
+this store fails safe — losing it is just a logout. Under an LRU policy both keys go
+cold together after a revoke, so which one is evicted is a coin flip.
+``companion-gitops/base/redis.yaml`` therefore pins ``--maxmemory-policy noeviction``.
+Do not "tune" that to allkeys-lru (as the local docker-compose and the legacy Terraform
+module do) without redesigning this: it would reopen pre-PHI gate #3.
+Also load-bearing there: ``--save "" --appendonly no`` means a restart flushes
+EVERYTHING, so sessions die together with their epochs (fail-safe). Only PARTIAL loss
+is dangerous.
+
 REVOCATION (pre-PHI gate #3 — session invalidation on password reset)
 ---------------------------------------------------------------------
 A password reset must evict every live session of that account: the whole point of
@@ -75,6 +88,20 @@ def _decode(raw: str) -> tuple[str, float] | None:
     return subject, iat
 
 
+def _parse_epoch(raw: str) -> float:
+    """Parse a stored epoch, FAILING CLOSED for symmetry with ``_decode``.
+
+    The only writer is ``repr(time.time())``, so a bad value should be impossible — but
+    an unhandled ``ValueError`` here would escape ``get()`` and 500 every request by that
+    subject. An unreadable epoch means we cannot prove a session predates a revocation,
+    so we must assume it does: ``inf`` makes every session for that subject fail the
+    ``iat < epoch`` check and be evicted. Denies access rather than granting it."""
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float("inf")
+
+
 @runtime_checkable
 class SessionStore(Protocol):
     async def create(self, subject: str) -> str: ...
@@ -107,7 +134,7 @@ class RedisSessionStore:
             return None
         subject, iat = parsed
         epoch = await self._r.get(_EPOCH_KEY + subject)
-        if epoch is not None and iat < float(epoch):
+        if epoch is not None and iat < _parse_epoch(epoch):
             await self._r.delete(_KEY + sid)  # revoked (e.g. password reset)
             return None
         await self._r.expire(_KEY + sid, self._ttl)  # sliding
