@@ -34,6 +34,7 @@ mis-resolved as a session, and Firebase verification is untouched.
 
 from __future__ import annotations
 
+import logging
 import secrets
 from dataclasses import dataclass
 
@@ -48,6 +49,8 @@ from app.db.session import maintenance_session
 from app.models.admin_user import AdminUser
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
+
+log = logging.getLogger("companion.auth.principal")
 
 # Mirrors the Firebase path (get_current_user) and auth_authentik.login.
 _INACTIVE_STATUSES = ("deactivated", "pending_deletion")
@@ -227,7 +230,17 @@ async def resolve_session_email(request: Request) -> str | None:
     if subject is None:
         return None
     async with maintenance_session() as mdb:
-        return await _email_for_subject(mdb, subject)
+        email = await _email_for_subject(mdb, subject)
+    if email is None:
+        # Keep this signal. A LIVE session whose subject binds to no account is an
+        # anomaly worth seeing (a row deleted post-login, or an un-backfilled subject).
+        # resolve_session_principal used to surface it as a distinct 401 "Session does
+        # not map to a known member"; resolving role-agnostically returns None instead,
+        # which falls silently through to the Firebase branch and a generic 401 — losing
+        # the signal entirely unless we log it here. No PII: the subject is opaque and
+        # is not logged.
+        log.warning("BFF session subject maps to no known account")
+    return email
 
 
 async def resolve_caregiver_session(request: Request) -> str | None:
