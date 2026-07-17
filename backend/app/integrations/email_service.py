@@ -25,9 +25,6 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
-
 APP_URL = settings.app_url or f"https://app.{BRAND_DOMAIN}"
 
 
@@ -58,9 +55,15 @@ def _cta_button(url: str, label: str) -> str:
 
 
 def _send_smtp(to_email: str, to_name: str, subject: str, text_body: str, html_body: str | None) -> bool:
-    """Send a single email via Gmail SMTP."""
-    if not settings.gmail_smtp_password:
-        logger.warning("Gmail SMTP not configured — emails will be logged only")
+    """Send a single email via the configured SMTP transport.
+
+    Prod points ``smtp_host`` at the in-cluster mail relay (plain SMTP on :25, no client
+    AUTH, no TLS on the hop — the relay authenticates upstream to SES itself). When
+    ``smtp_host`` is empty (dev/test), we log-only and pretend success so no mail is sent.
+    ``starttls()`` runs only when ``smtp_use_tls``; ``login()`` only when ``smtp_username``
+    is set — so the same client serves both the plain relay and an authenticated TLS MTA."""
+    if not settings.smtp_host:
+        logger.warning("SMTP not configured — emails will be logged only")
         logger.info(f"Email (no smtp): to={to_email} subject=\"{subject}\"")
         return True  # Pretend success in dev
 
@@ -74,9 +77,11 @@ def _send_smtp(to_email: str, to_name: str, subject: str, text_body: str, html_b
         msg.attach(MIMEText(html_body, "html"))
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(settings.gmail_smtp_user, settings.gmail_smtp_password)
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
+            if settings.smtp_use_tls:
+                server.starttls()
+            if settings.smtp_username:
+                server.login(settings.smtp_username, settings.smtp_password)
             server.sendmail(BRAND_EMAIL_FROM_ADDRESS, to_email, msg.as_string())
         logger.info(f"Email sent: to={to_email} subject=\"{subject}\"")
         return True
@@ -178,6 +183,53 @@ async def send_activation_email(
         f"<p>To finish setting up, choose a password. Once it's set, you can sign in any time.</p>"
         + _cta_button(activate_url, "Set your password")
         + '<p style="color: #888; font-size: 13px;">If you weren\'t expecting this, you can safely ignore this email.</p>'
+    )
+
+    return await send_email(to_email, to_name, subject, text_body, html_body)
+
+
+# ---------------------------------------------------------------------------
+# Password reset (self-service — member, caregiver, or admin)
+# ---------------------------------------------------------------------------
+
+async def send_password_reset_email(
+    to_email: str,
+    to_name: str,
+    reset_url: str,
+) -> bool:
+    """Send a self-service password-reset email with a link to choose a new password.
+
+    Generic across cohorts (member, caregiver, admin): the underlying token is
+    email-keyed and lands on the same branded /activate page (``reset=1``) where the
+    person sets a new password. Only ever sent when an account for ``to_email`` actually
+    exists, so echoing the account's name back is safe — it goes to the account's own
+    inbox."""
+    subject = f"Reset your {BRAND_SHORT} password"
+
+    # ``to_name`` originates from stored account data, but HTML-escape it anyway
+    # (defense-in-depth, mirrors send_activation_email) so no stored value can smuggle
+    # markup into a brand-trusted email. The plaintext part gets the raw name — no
+    # markup executes there.
+    safe_name = html.escape(to_name)
+
+    text_body = (
+        f"Hi {to_name},\n\n"
+        f"We received a request to reset the password for your {BRAND_MID} account.\n\n"
+        f"To choose a new password, use the link below:\n\n"
+        f"{reset_url}\n\n"
+        f"Once your new password is set, you can sign in any time.\n\n"
+        f"If you didn't ask to reset your password, you can ignore this email — "
+        f"your password will stay the same.\n\n"
+        f"— The {BRAND_SHORT} Team"
+    )
+
+    html_body = _email_wrapper(
+        f"<p>Hi {safe_name},</p>"
+        f"<p>We received a request to reset the password for your {BRAND_MID} account.</p>"
+        f"<p>To choose a new password, tap the button below. Once it's set, you can sign in any time.</p>"
+        + _cta_button(reset_url, "Reset your password")
+        + '<p style="color: #888; font-size: 13px;">If you didn\'t ask to reset your '
+        "password, you can ignore this email — your password will stay the same.</p>"
     )
 
     return await send_email(to_email, to_name, subject, text_body, html_body)
