@@ -13,7 +13,14 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
+
 from app.conversation import retrieval
+
+# Exercises retrieve_relevant_chunks itself (HNSW GUCs, user prefilter) against a
+# fake DB and a patched _embed_query, so the autouse stub in conftest would replace
+# the function under test. Opt out — this module is already offline.
+pytestmark = pytest.mark.real_ai
 
 
 class _FakeResult:

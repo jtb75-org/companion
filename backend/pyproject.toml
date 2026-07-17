@@ -61,6 +61,9 @@ dev = [
     # decode_responses) rather than a hand-rolled stub that could quietly disagree.
     "fakeredis>=2.26.0",
     "httpx>=0.27.0",
+    # A hung test (network call with no timeout) otherwise runs until the CI job's
+    # 6-hour limit. Bounds every test at 60s — see [tool.pytest.ini_options].
+    "pytest-timeout>=2.3.0",
     "ruff>=0.7.0",
 ]
 
@@ -91,3 +94,13 @@ ignore = ["B008", "UP017"]  # B008: Depends() in defaults; UP017: datetime.utcno
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 testpaths = ["tests"]
+# No single test in this suite legitimately runs for a minute — the slowest real work is
+# a migration + a handful of DB round-trips. A test that hangs is almost always blocked
+# on the network (the Vertex call this suite used to make took 184s in CI, and a hung
+# SMTP relay would do the same), and the default failure mode is to burn the job's
+# 6-hour limit while looking "in progress". Fail loudly at 60s instead. Raise this for a
+# specific test with @pytest.mark.timeout(N) rather than lifting the global bound.
+timeout = 60
+markers = [
+    "real_ai: opt OUT of the autouse AI stubs (LLM/TTS/STT/embeddings/RAG) — for tests that exercise those boundaries and mock their own network (see tests/conftest.py)",
+]
