@@ -12,7 +12,7 @@ import { AuthentikActivateScreen } from '../auth/AuthentikActivateScreen'
 import { OnboardingScreen } from '../auth/OnboardingScreen'
 import { useAuth } from '../auth/AuthProvider'
 import { AUTH_PROVIDER } from '../auth/authConfig'
-import { parseActivationToken } from './linking'
+import { ActivationLink, parseActivationLink } from './linking'
 import { api } from '../api/client'
 import { usePushNotifications } from '../hooks/usePushNotifications'
 import { colors } from '../theme/colors'
@@ -36,24 +36,25 @@ function TabIcon({ label, focused }: { label: string; focused: boolean }) {
 export function AppNavigator() {
   const { user, isAuthenticated, loading } = useAuth()
   const [profileComplete, setProfileComplete] = useState<boolean | null>(null)
-  // Pending account-activation token from an inbound /activate deep link.
-  // Authentik-only: in Firebase mode this stays null and the screen is never
-  // shown, so the live path is completely unchanged.
-  const [activationToken, setActivationToken] = useState<string | null>(null)
+  // Pending account-activation link ({token, reset}) from an inbound /activate
+  // deep link. Authentik-only: in Firebase mode this stays null and the screen is
+  // never shown, so the live path is completely unchanged.
+  const [activationLink, setActivationLink] = useState<ActivationLink | null>(null)
   usePushNotifications(profileComplete === true)
 
-  // Handle the account-activation universal / app link:
-  //   https://app.mydailydignity.com/activate?token=...
+  // Handle the account-activation / password-reset universal / app link:
+  //   https://app.mydailydignity.com/activate?token=...[&reset=1]
   // Cold start via getInitialURL, warm via the 'url' event. Only acts under
   // AUTH_PROVIDER === 'authentik'; under firebase the link is ignored (inert).
+  // `reset` only picks the screen's wording — both flavors route the same way.
   useEffect(() => {
     if (AUTH_PROVIDER !== 'authentik') return
     let cancelled = false
 
     const handleUrl = (url: string | null | undefined) => {
-      const token = parseActivationToken(url)
+      const link = parseActivationLink(url)
       // Only set on a real activation link; leave other deep links alone.
-      if (token && !cancelled) setActivationToken(token)
+      if (link && !cancelled) setActivationLink(link)
     }
 
     Linking.getInitialURL()
@@ -97,13 +98,16 @@ export function AppNavigator() {
 
   if (!isAuthenticated) {
     // A member who tapped their email link lands on "set your password" first
-    // (Authentik only). After they set it, AuthProvider signs them in and this
-    // branch is left automatically. "Back to Sign In" clears the token.
-    if (AUTH_PROVIDER === 'authentik' && activationToken) {
+    // (Authentik only) — for a first-time invite OR a password reset, which is
+    // the same screen with reset-flavored copy. After they set it, AuthProvider
+    // signs them in and this branch is left automatically. "Back to Sign In"
+    // clears the link.
+    if (AUTH_PROVIDER === 'authentik' && activationLink) {
       return (
         <AuthentikActivateScreen
-          token={activationToken}
-          onBackToSignIn={() => setActivationToken(null)}
+          token={activationLink.token}
+          reset={activationLink.reset}
+          onBackToSignIn={() => setActivationLink(null)}
         />
       )
     }

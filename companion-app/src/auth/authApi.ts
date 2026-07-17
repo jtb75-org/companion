@@ -185,6 +185,47 @@ export async function signup(email: string, name: string): Promise<void> {
 }
 
 /**
+ * Self-service password reset — step 1 (self-hosted / Authentik path only).
+ *
+ *   POST /auth/forgot-password  body {email}   (UNAUTHENTICATED — no bearer)
+ *     200 -> ALWAYS, whether or not an account exists. The body is intentionally
+ *            generic ({"status": "ok"}) for anti-enumeration, so we NEVER read or
+ *            branch on it — and the screen must show the same card either way.
+ *     429 -> too many reset tries from this network — ask them to wait.
+ *     422 -> the email failed the backend's format check — generic error.
+ *     other non-2xx -> generic error.
+ *
+ * Step 2 is unchanged: if an account exists, the emailed link opens the existing
+ * /activate screen (with a `reset=1` marker that only swaps copy) and redeems via
+ * `setActivationPassword` above. This call's job ends at "check your email".
+ *
+ * Like login/signup/activation, this is a PRE-auth request, so it does NOT go
+ * through the shared `api()` client (there is no bearer yet). Nothing sensitive
+ * is logged: on failure we throw `AuthLoginError` carrying only the HTTP status.
+ */
+export async function forgotPassword(email: string): Promise<void> {
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}/auth/forgot-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    })
+  } catch {
+    // Network error (offline, DNS, TLS). No HTTP status available.
+    throw new AuthLoginError(null)
+  }
+  if (!res.ok) {
+    // Any non-2xx (429 rate-limit, 422 bad email, 404 wrong-mode, or other) —
+    // carry the status so the screen can special-case 429 and otherwise fall
+    // back to a generic message.
+    throw new AuthLoginError(res.status)
+  }
+  // 2xx: body is intentionally generic; do not read or branch on it. Doing so
+  // would break the anti-enumeration guarantee.
+}
+
+/**
  * POST /auth/logout. Best-effort: invalidates the session server-side.
  * The caller clears local storage regardless of the result.
  */

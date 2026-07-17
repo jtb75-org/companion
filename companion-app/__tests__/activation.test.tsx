@@ -4,7 +4,7 @@
  * their status-to-copy mapping. These exercise the JS logic directly (no
  * native modules).
  */
-import { parseActivationToken } from '../src/navigation/linking'
+import { parseActivationLink, parseActivationToken } from '../src/navigation/linking'
 import {
   validateActivationToken,
   setActivationPassword,
@@ -51,6 +51,40 @@ describe('parseActivationToken', () => {
     'https://evil.example.com/x?to=app.mydailydignity.com/activate&token=t',
   ])('returns null for a bad, unrelated, or lookalike link: %s', (input) => {
     expect(parseActivationToken(input as string | null)).toBeNull()
+  })
+})
+
+describe('parseActivationLink (reset flavor)', () => {
+  it('flags reset=1 from a password-reset link', () => {
+    expect(
+      parseActivationLink('https://app.mydailydignity.com/activate?token=abc&reset=1'),
+    ).toEqual({ token: 'abc', reset: true })
+  })
+
+  it('defaults reset to false on a plain activation link', () => {
+    expect(parseActivationLink('https://app.mydailydignity.com/activate?token=abc')).toEqual({
+      token: 'abc',
+      reset: false,
+    })
+  })
+
+  it('reads reset regardless of param order', () => {
+    expect(
+      parseActivationLink('https://app.mydailydignity.com/activate?reset=1&token=abc'),
+    ).toEqual({ token: 'abc', reset: true })
+  })
+
+  it.each(['reset=0', 'reset=', 'reset=true', 'reset=yes'])(
+    'treats a non-"1" reset value (%s) as not-a-reset',
+    (param) => {
+      expect(
+        parseActivationLink(`https://app.mydailydignity.com/activate?token=abc&${param}`),
+      ).toEqual({ token: 'abc', reset: false })
+    },
+  )
+
+  it('still requires a token: reset alone is not a usable link', () => {
+    expect(parseActivationLink('https://app.mydailydignity.com/activate?reset=1')).toBeNull()
   })
 })
 
