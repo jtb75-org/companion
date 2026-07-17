@@ -165,9 +165,11 @@ export function AuthentikActivateScreen({
       ? `${authStrings.activateHello} ${details.name}`
       : authStrings.activateHello
 
-  // Reset flavor: a returning member does not need a "welcome" greeting — they
-  // need to know this is the screen where they replace their password.
-  const heading = reset ? authStrings.activateResetTitle : greeting
+  // The greeting is kept on BOTH flavors. Suppressing the name on reset would
+  // protect nothing (this screen already shows the account's email below) and a
+  // member who just forgot their password is at a stress moment — recognition
+  // helps and costs nothing. Only the prompt + button change for reset.
+  const heading = greeting
   const prompt = reset ? authStrings.activateResetPrompt : authStrings.activatePrompt
   const submitLabel = reset
     ? authStrings.activateResetCreateButton

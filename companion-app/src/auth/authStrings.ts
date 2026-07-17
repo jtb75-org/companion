@@ -132,7 +132,10 @@ export const authStrings = {
   forgotButton: 'Send Link',
   // Client-side checks (before we send anything).
   forgotMissingEmail: 'Please type your email.',
-  forgotBadEmail: 'Please check your email and try again.',
+  // NOTE: must NOT reuse "Check your email" — that is `forgotSentTitle` (the
+  // SUCCESS card, meaning "go look in your inbox"). The same words one screen
+  // away meaning "what you typed is wrong" is a comprehension trap.
+  forgotBadEmail: 'That email does not look right. Please try again.',
   // 429 = too many reset tries from this network right now.
   forgotTooManyTries: 'Too many tries right now. Please wait a minute and try again.',
   // Network / unknown / anything else.
@@ -154,8 +157,9 @@ export const authStrings = {
   // member resetting a password they already have is not told to "start using
   // D.D." as if they were brand new.
 
-  // Replaces the "Hi <name>" greeting as the header.
-  activateResetTitle: 'Set a new password',
+  // The "Hi <name>" greeting is KEPT on the reset path — this screen already
+  // shows the account's email below, so dropping the name protects nothing and
+  // only reads colder at a stressful moment. Only the prompt + button change.
   // Replaces `activatePrompt`.
   activateResetPrompt: 'Make a new password for your account.',
   // Replaces `activateCreateButton`. Same verb ("Make") as the prompt above so
