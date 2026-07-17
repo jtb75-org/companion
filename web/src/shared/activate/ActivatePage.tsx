@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useSearchParams, useNavigate } from 'react-router-dom'
+import { useSearchParams, useNavigate, Link } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
 import { api } from '../api/client'
 import { BRAND_MID, BRAND_EMOJI } from '../branding'
@@ -89,6 +89,16 @@ export default function ActivatePage() {
               ? RESET_PASSWORD_COPY.invalidLink
               : 'This activation link is invalid or has expired. Please ask an administrator to send you a new one.'}
           </p>
+          {/* A dead reset link MUST offer a way out — the copy tells the member
+              they can ask for a new link, so the screen has to let them. */}
+          {isReset && (
+            <Link
+              to="/forgot-password"
+              className="inline-block mt-4 text-companion-blue font-medium hover:underline"
+            >
+              {RESET_PASSWORD_COPY.invalidLinkAction}
+            </Link>
+          )}
         </div>
       </div>
     )
@@ -101,14 +111,17 @@ export default function ActivatePage() {
           <div className="text-4xl mb-2">{BRAND_EMOJI}</div>
           <h1 className="text-2xl font-bold text-companion-blue">{BRAND_MID}</h1>
           <p className="text-gray-500 text-sm mt-2">
-            {isReset ? RESET_PASSWORD_COPY.subtitle : 'Set up your account'}
+            {isReset ? RESET_PASSWORD_COPY.title : 'Set up your account'}
           </p>
         </div>
 
         {info && (
           <p className="text-gray-600 text-sm text-center mb-4">
             {isReset ? (
-              RESET_PASSWORD_COPY.prompt
+              <>
+                {RESET_PASSWORD_COPY.greetingPrefix} <strong>{info.name}</strong>.{' '}
+                {RESET_PASSWORD_COPY.promptSuffix}
+              </>
             ) : (
               <>
                 Welcome, <strong>{info.name}</strong>. Create a password to finish
