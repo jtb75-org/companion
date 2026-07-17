@@ -78,11 +78,15 @@ async def _seed_admin(email: str, *, name: str = "Ada Admin") -> None:
         await s.commit()
 
 
-async def _seed_caregiver(cg_email: str, *, name: str = "Cara Giver") -> None:
-    """An ACTIVE trusted_contacts row (its member has no bearing on the reset lookup)."""
+async def _seed_caregiver(cg_email: str, *, name: str = "Cara Giver") -> str:
+    """An ACTIVE trusted_contacts row (its member has no bearing on the reset lookup).
+
+    Returns the member email so callers can clean it up. The caregiver has NO ``users``
+    stub — a caregiver-only account authenticates as the person via trusted_contacts."""
+    member_email = f"m-{uuid.uuid4()}@t.io"
     async with db_module.async_session_factory() as s:
         member = User(
-            email=f"m-{uuid.uuid4()}@t.io",
+            email=member_email,
             preferred_name="M",
             display_name="M",
             account_status=AccountStatus.ACTIVE,
@@ -101,6 +105,7 @@ async def _seed_caregiver(cg_email: str, *, name: str = "Cara Giver") -> None:
             )
         )
         await s.commit()
+    return member_email
 
 
 async def _tokens_for(email: str) -> list[ActivationToken]:
@@ -342,3 +347,61 @@ async def test_reset_token_sets_password_for_active_account(monkeypatch):
     # sanity: the send seam was exercised on the request leg
     assert spies.reset and spies.reset[0][0] == email
     await _delete_user(email)
+
+
+# ── 8. an ACTIVE caregiver (no users stub) can redeem a reset token ──────────────
+
+
+@requires_db
+async def test_reset_token_sets_password_for_caregiver(monkeypatch):
+    """niru/safety regression guard: a caregiver has an ACTIVE trusted_contacts row but
+    NO users stub, yet /auth/forgot-password issues them a reset token — so the shared
+    redemption endpoint MUST accept it. Previously _lookup_account_name resolved only
+    admin_users + users, so the caregiver hit a 400 dead-end. Now it resolves the
+    caregiver by contact_email and set-password proceeds; no member row is fabricated."""
+    _enable_authentik(monkeypatch)
+    spies = _Spies(monkeypatch)
+    cg_email = f"fp-cg-redeem-{uuid.uuid4()}@t.io"
+    new_password = "quiet-harbor-stone-73"
+    await _delete_user(cg_email)
+    member_email = await _seed_caregiver(cg_email, name="Cleo Caregiver")
+
+    # Step 1: request the reset — a real token lands in the DB for the caregiver email.
+    async with _client() as ac:
+        r = await ac.post(_FORGOT, json={"email": cg_email})
+    assert r.status_code == 200
+    tokens = await _tokens_for(cg_email)
+    assert len(tokens) == 1
+    token = tokens[0].token
+    assert spies.reset and spies.reset[0][0] == cg_email
+
+    # Step 2: redeem through the unchanged set-password endpoint (IdP seams mocked).
+    set_pw_calls: list[tuple[str, str]] = []
+
+    async def _provision(email_: str, name_: str) -> None:
+        return None
+
+    async def _set_password(email_: str, password_: str) -> None:
+        set_pw_calls.append((email_, password_))
+
+    monkeypatch.setattr("app.api.v1.activation.provision_authentik_account", _provision)
+    monkeypatch.setattr("app.api.v1.activation.set_authentik_password", _set_password)
+
+    async with _client() as ac:
+        r = await ac.post(
+            "/api/v1/activation/set-password",
+            json={"token": token, "password": new_password},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True, "email": cg_email}
+    # The caregiver's Authentik password was set — no 400 dead-end.
+    assert set_pw_calls == [(cg_email, new_password)]
+
+    # No users row was fabricated/activated for the caregiver-only account.
+    async with db_module.async_session_factory() as s:
+        cg_user = (
+            await s.execute(select(User).where(User.email == cg_email))
+        ).scalar_one_or_none()
+    assert cg_user is None
+    await _delete_user(cg_email)
+    await _delete_user(member_email)

@@ -35,6 +35,7 @@ from app.integrations.authentik_admin import (
 from app.models.admin_user import AdminUser
 from app.models.audit import AccountAuditLog
 from app.models.enums import AccountStatus
+from app.models.trusted_contact import TrustedContact
 from app.models.user import User
 from app.schemas.activation import ActivationSetPassword
 from app.services.activation_service import (
@@ -50,11 +51,18 @@ router = APIRouter(prefix="/activation", tags=["Activation"])
 
 
 async def _lookup_account_name(email: str) -> str | None:
-    """Return a display name for ``email`` from admin_users then users, else None.
+    """Return a display name for ``email`` across all three cohorts, else None.
+
+    Resolves admin_users, then users, then an ACTIVE trusted_contacts (caregiver) row.
+    This MUST agree exactly with /auth/forgot-password's ``_account_name_if_exists`` on
+    who is eligible: reset tokens are ISSUED for any of the three cohorts, so redemption
+    here must accept the same three — otherwise a caregiver clicks a valid reset link and
+    hits a 400 (the dead-end niru/safety flagged). Caregivers use Authentik password auth
+    (username/password → /auth/login), so a reset is meaningful for them.
 
     Runs on the maintenance (BYPASSRLS) session: this is pre-auth (no tenant GUC) and
-    ``users`` is per-user RLS-fenced, so a normal session would fail-close. ``None``
-    means no account exists for the email at all."""
+    ``users``/``trusted_contacts`` are per-user RLS-fenced, so a normal session would
+    fail-close. ``None`` means no account exists for the email at all."""
     async with maintenance_session() as mdb:
         admin = (
             await mdb.execute(select(AdminUser).where(AdminUser.email == email))
@@ -66,6 +74,16 @@ async def _lookup_account_name(email: str) -> str | None:
         ).scalar_one_or_none()
         if user is not None:
             return user.preferred_name or user.display_name or email
+        contact = (
+            await mdb.execute(
+                select(TrustedContact).where(
+                    TrustedContact.contact_email == email,
+                    TrustedContact.is_active.is_(True),
+                )
+            )
+        ).scalars().first()
+        if contact is not None:
+            return contact.contact_name or email
     return None
 
 
