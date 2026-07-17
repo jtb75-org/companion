@@ -3,6 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
 import { api } from '../api/client'
 import { BRAND_MID, BRAND_EMOJI } from '../branding'
+import { RESET_PASSWORD_COPY } from '../copy'
 
 interface ActivationInfo {
   valid: boolean
@@ -16,6 +17,10 @@ interface ActivationInfo {
 export default function ActivatePage() {
   const [searchParams] = useSearchParams()
   const token = searchParams.get('token')
+  // `?reset=1` marks a password-reset visit (from the forgot-password email). The
+  // set-password action and endpoint are identical to activation — this only
+  // swaps the copy from activation-flavored to reset-flavored.
+  const isReset = searchParams.get('reset') === '1'
   const navigate = useNavigate()
   const { user, loading: authLoading, loginWithEmail } = useAuth()
 
@@ -80,8 +85,9 @@ export default function ActivatePage() {
           <div className="text-4xl mb-2">{BRAND_EMOJI}</div>
           <h1 className="text-2xl font-bold text-companion-blue">{BRAND_MID}</h1>
           <p className="text-gray-600 text-sm mt-4">
-            This activation link is invalid or has expired. Please ask an administrator
-            to send you a new one.
+            {isReset
+              ? RESET_PASSWORD_COPY.invalidLink
+              : 'This activation link is invalid or has expired. Please ask an administrator to send you a new one.'}
           </p>
         </div>
       </div>
@@ -94,13 +100,21 @@ export default function ActivatePage() {
         <div className="text-center mb-8">
           <div className="text-4xl mb-2">{BRAND_EMOJI}</div>
           <h1 className="text-2xl font-bold text-companion-blue">{BRAND_MID}</h1>
-          <p className="text-gray-500 text-sm mt-2">Set up your account</p>
+          <p className="text-gray-500 text-sm mt-2">
+            {isReset ? RESET_PASSWORD_COPY.subtitle : 'Set up your account'}
+          </p>
         </div>
 
         {info && (
           <p className="text-gray-600 text-sm text-center mb-4">
-            Welcome, <strong>{info.name}</strong>. Create a password to finish setting
-            up your account.
+            {isReset ? (
+              RESET_PASSWORD_COPY.prompt
+            ) : (
+              <>
+                Welcome, <strong>{info.name}</strong>. Create a password to finish
+                setting up your account.
+              </>
+            )}
           </p>
         )}
 
@@ -114,7 +128,7 @@ export default function ActivatePage() {
           />
           <input
             type="password"
-            placeholder="Create a password"
+            placeholder={isReset ? RESET_PASSWORD_COPY.passwordPlaceholder : 'Create a password'}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             minLength={10}
@@ -126,7 +140,13 @@ export default function ActivatePage() {
             disabled={submitting}
             className="w-full bg-companion-blue text-white font-medium py-3 rounded-xl hover:bg-companion-blue-mid transition disabled:opacity-60"
           >
-            {submitting ? 'Setting up…' : 'Set password & continue'}
+            {submitting
+              ? isReset
+                ? RESET_PASSWORD_COPY.submitting
+                : 'Setting up…'
+              : isReset
+                ? RESET_PASSWORD_COPY.submit
+                : 'Set password & continue'}
           </button>
         </form>
       </div>

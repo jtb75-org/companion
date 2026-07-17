@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useAuth } from './AuthProvider'
-import { Navigate } from 'react-router-dom'
+import { Navigate, Link } from 'react-router-dom'
 import { BRAND_MID } from '../branding'
+import { FORGOT_PASSWORD_COPY } from '../copy'
 
 const AUTH_PROVIDER = import.meta.env.VITE_AUTH_PROVIDER || 'firebase'
 
@@ -106,6 +107,14 @@ export default function LoginPage() {
             {mode === 'login' ? 'Sign In' : 'Create Account'}
           </button>
         </form>
+
+        {mode === 'login' && (
+          <p className="text-center text-sm mt-4">
+            <Link to="/forgot-password" className="text-companion-blue hover:underline">
+              {FORGOT_PASSWORD_COPY.loginLink}
+            </Link>
+          </p>
+        )}
 
         {AUTH_PROVIDER !== 'authentik' && (
           <p className="text-center text-sm text-gray-400 mt-4">
