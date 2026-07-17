@@ -38,6 +38,9 @@ pytestmark = requires_db
 _SLOW_SEND_S = 2.0
 # Generous enough for a loaded CI box, tiny next to _SLOW_SEND_S.
 _RESPONSE_BUDGET_MS = 250.0
+# Max allowed exists-vs-unknown difference. Deliberately well BELOW the 35ms oracle this
+# file was written to kill, so a re-introduced (even partial) inline path fails here.
+_MAX_DELTA_MS = 20.0
 
 
 async def _ms_until_response_sent(email: str) -> float:
@@ -132,3 +135,17 @@ async def test_existing_and_unknown_addresses_are_timing_indistinguishable(monke
     # would be ~_SLOW_SEND_S while the unknown path stayed near zero.
     assert exists_ms < _RESPONSE_BUDGET_MS
     assert missing_ms < _RESPONSE_BUDGET_MS
+
+    # ...and, per the test's name, they must be indistinguishable FROM EACH OTHER.
+    # The budget check alone is not enough: a future regression that put, say, only the
+    # token write back inline would add tens of ms to the exists-path, stay under the
+    # budget, and slip through — yet still be a usable oracle (the bug this file exists
+    # for measured just 35ms). Comparing min-of-N samples strips scheduler noise, so the
+    # real delta is sub-millisecond and this ceiling is ~1000x headroom over noise while
+    # still catching an oracle smaller than the original.
+    delta_ms = abs(exists_ms - missing_ms)
+    assert delta_ms < _MAX_DELTA_MS, (
+        f"exists={exists_ms:.2f}ms vs unknown={missing_ms:.2f}ms (delta {delta_ms:.2f}ms) "
+        "— the request path is doing existence-dependent work again, which re-opens the "
+        "timing oracle even though both are under the budget"
+    )
