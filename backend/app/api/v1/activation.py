@@ -26,7 +26,8 @@ import logging
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
-from app.api.auth_authentik import _require_authentik_enabled
+from app.api.auth_authentik import _audit_login_event, _require_authentik_enabled
+from app.auth.session import get_session_store
 from app.db.session import maintenance_session
 from app.integrations.authentik_admin import (
     provision_authentik_account,
@@ -85,6 +86,108 @@ async def _lookup_account_name(email: str) -> str | None:
         if contact is not None:
             return contact.contact_name or email
     return None
+
+
+async def _subjects_for_email(email: str) -> set[str]:
+    """Return every Authentik subject bound to ``email`` across all three cohorts.
+
+    The BFF session stores only the opaque Authentik ``sub``, so revoking an account's
+    sessions requires mapping its email back to that subject. Cohorts + style mirror
+    /auth/forgot-password's ``_account_name_if_exists`` (member, then caregiver, then
+    admin) — the same three that can be issued a reset token must all be revocable.
+
+    We UNION every cohort rather than returning the first match. The same person is one
+    Authentik account (one ``sub``), so this is normally a 0- or 1-element set; but the
+    backfill is per-row and lazy, so an email can be a member whose ``users`` row has a
+    NULL subject while its ACTIVE ``trusted_contacts`` row carries the real one. A
+    first-match-wins lookup would read the NULL and silently skip the revoke — a revoke
+    that quietly fails is the failure mode this gate exists to prevent.
+
+    Runs on the maintenance (BYPASSRLS) session: this is pre-auth (no tenant GUC) and
+    ``users``/``trusted_contacts`` are per-user RLS-fenced, so a normal session would
+    fail-close. An empty set means no account here has ever logged in via Authentik —
+    there is nothing to revoke."""
+    subjects: set[str] = set()
+    async with maintenance_session() as mdb:
+        user = (
+            await mdb.execute(select(User).where(User.email == email))
+        ).scalar_one_or_none()
+        if user is not None and user.external_subject_id:
+            subjects.add(user.external_subject_id)
+        contacts = (
+            await mdb.execute(
+                select(TrustedContact).where(
+                    TrustedContact.contact_email == email,
+                    TrustedContact.is_active.is_(True),
+                )
+            )
+        ).scalars().all()
+        subjects.update(c.external_subject_id for c in contacts if c.external_subject_id)
+        admin = (
+            await mdb.execute(select(AdminUser).where(AdminUser.email == email))
+        ).scalar_one_or_none()
+        if admin is not None and admin.external_subject_id:
+            subjects.add(admin.external_subject_id)
+    return subjects
+
+
+async def _revoke_sessions_for_email(email: str) -> None:
+    """Evict every live BFF session of ``email``'s account after its password changed.
+
+    Pre-PHI gate #3. Without this a password reset only changes the Authentik credential:
+    an already-stolen session cookie/bearer keeps working for the rest of its sliding TTL,
+    so the user (or admin) resetting BECAUSE they suspect compromise does not actually
+    evict the attacker — worst for admins, who are full-privilege.
+
+    Called UNCONDITIONALLY, never gated on the reset marker: the ``reset=1`` in the link
+    is client-supplied and untrusted, so no security decision may branch on it. A genuine
+    first-time activation simply has no prior sessions, making this a harmless no-op.
+
+    BEST-EFFORT: the password is already changed by the time we get here, so a Redis
+    hiccup must not fail the request (that would strand the caller with a password they
+    can't be sure of). Log loudly instead — this is a security control failing open on
+    the eviction, not on the credential change."""
+    try:
+        subjects = await _subjects_for_email(email)
+        if not subjects:
+            return  # never logged in via Authentik → no subject → no sessions
+        store = get_session_store()
+        for subject in subjects:
+            await store.revoke_all_for_subject(subject)
+        log.info(
+            "revoked BFF sessions for %s after password set (%d subject(s))",
+            email,
+            len(subjects),
+        )
+        # Traceability: a security-relevant eviction gets a durable audit row.
+        # Best-effort in its own transaction (mirrors the login audits); ``details`` is
+        # structured metadata only — never the opaque subject itself.
+        await _audit_login_event(
+            "sessions_revoked",
+            email,
+            details={"reason": "password_set", "subject_count": len(subjects)},
+            best_effort=True,
+        )
+    except Exception:
+        log.error(
+            "failed to revoke sessions for %s after password set (best-effort) — "
+            "existing sessions may survive the reset",
+            email,
+            exc_info=True,
+        )
+        # This is the branch that MATTERS for forensics: the password changed but the
+        # eviction did not, so a stolen session survived a reset — the security control
+        # failed OPEN. An app-log line alone is the wrong record for that; a control that
+        # can fail open must fail loudly AND durably. Alert on this event.
+        try:
+            await _audit_login_event(
+                "sessions_revoke_failed",
+                email,
+                details={"reason": "password_set"},
+                best_effort=True,
+            )
+        except Exception:  # pragma: no cover — audit is itself best-effort
+            log.error("failed to audit the session-revocation failure for %s", email)
 
 
 async def _activate_member_if_invited(email: str) -> None:
@@ -187,6 +290,11 @@ async def set_activation_password(data: ActivationSetPassword):
         raise HTTPException(
             502, "Could not set your password. Please try again."
         ) from None
+
+    # The credential changed → every session minted under the OLD one must die (pre-PHI
+    # gate #3). Unconditional: a first-time activation has no sessions (no-op), and the
+    # link's reset marker is untrusted client input we must not branch on. Best-effort.
+    await _revoke_sessions_for_email(email)
 
     # Password is now set (email ownership proven via the redeemed token) — activate a
     # self-signup / invited member. Best-effort: it must not fail an already-succeeded
