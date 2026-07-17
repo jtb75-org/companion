@@ -57,6 +57,22 @@ STUB_REPLY = "This is a stubbed D.D. reply for tests."
 STUB_AUDIO = b"stub-mp3-bytes"
 STUB_TRANSCRIPT = "This is a stubbed transcript for tests."
 
+# Embeddings. This one is NOT a google client — it is an openai.AsyncOpenAI pointed at
+# settings.embedding_api_base, which defaults to the LiteLLM gateway on the LAN
+# (192.168.0.104:4000) with a 60s timeout. From a CI runner that address is unroutable,
+# so the SYN is blackholed and the call blocks for the FULL 60s. It is reached from the
+# conversation path: prompt_builder._build_document_context -> retrieve_relevant_chunks
+# -> embed_query, and prompt_builder swallows the failure and returns "" — so, again,
+# nothing looked broken. This is invisible on a dev machine, where the gateway answers
+# in milliseconds; only CI pays.
+#
+# Dimension must be 768 (document_chunk.embedding is Vector(768), nomic-embed-text) or
+# pgvector rejects the comparison. Non-zero on purpose: cosine distance against a
+# zero vector is undefined and would make the similarity query behave oddly rather
+# than simply return no rows.
+EMBEDDING_DIM = 768
+STUB_EMBEDDING = [((i % 10) + 1) / 100.0 for i in range(EMBEDDING_DIM)]
+
 
 class _StubPart:
     """One Part of a candidate's content. ``function_call = None`` == "model replied

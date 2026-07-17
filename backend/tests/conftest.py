@@ -129,12 +129,23 @@ def _patch_everywhere(monkeypatch, source_module, name: str, replacement) -> Non
     app/conversation/__init__.py bind at module level. Patching the source alone would
     silently miss all three, which is precisely the bug this whole fixture exists to
     prevent. So: patch the source, then sweep sys.modules for stale copies.
+
+    The sweep covers modules imported BEFORE this runs; patching the source covers those
+    imported AFTER (their `from ... import X` reads the already-patched attribute). Both
+    matter: app/conversation/retrieval.py binds embed_query at module level but is itself
+    imported lazily, so which case applies depends on test order.
+
+    Identity-guarded: only rebinds a module whose attribute IS the original object, so a
+    same-named but unrelated symbol elsewhere is never clobbered (per niru's review).
+    Known gaps, both covered by tests/test_no_live_llm.py: aliased imports
+    (`import X as y`) and direct client construction bypassing the factory.
     """
+    original = getattr(source_module, name)
     monkeypatch.setattr(source_module, name, replacement)
     for module in list(sys.modules.values()):
         if module is source_module or module is None:
             continue
-        if getattr(module, name, None) is not None:
+        if getattr(module, name, None) is original:
             monkeypatch.setattr(module, name, replacement, raising=False)
 
 
@@ -150,25 +161,71 @@ def stub_ai_backends(request, monkeypatch):
     would leave every new test exposed by default. Measured before this: 184s in CI for
     one test asserting only status codes. See tests/stub_llm.py.
 
-    Opt out per-test with @pytest.mark.real_llm. Nothing uses it; it exists so the
-    escape hatch is explicit and greppable instead of someone deleting the fixture.
+    Opt out with @pytest.mark.real_ai. Used by tests/test_pipeline/test_embedding_client.py
+    and tests/test_conversation/test_retrieval.py, which test these very boundaries and
+    mock their own network (via _make_client / _embed_query + a fake DB), so they are
+    self-contained without this fixture and must not be clobbered by it.
 
     The GCE_METADATA_* backstop at the top of this file covers a client this fixture
     does not know about yet. This fixture is the precise control (deterministic canned
     values); that is the blunt one (fail fast rather than hang).
     """
-    if request.node.get_closest_marker("real_llm"):
+    if request.node.get_closest_marker("real_ai"):
         return None
 
-    from tests.stub_llm import STUB_AUDIO, STUB_TRANSCRIPT, StubGeminiClient
+    from tests.stub_llm import (
+        STUB_AUDIO,
+        STUB_EMBEDDING,
+        STUB_TRANSCRIPT,
+        StubGeminiClient,
+    )
 
     client = StubGeminiClient()
 
     import app.conversation.llm as llm_module
     import app.conversation.stt as stt_module
     import app.conversation.tts as tts_module
+    import app.pipeline.embedding_client as embedding_module
 
     _patch_everywhere(monkeypatch, llm_module, "get_llm_client", lambda: client)
+
+    # Embeddings: NOT a google client. openai.AsyncOpenAI against the LAN LiteLLM
+    # gateway (192.168.0.104:4000, 60s timeout) — unroutable from CI, so it blocks the
+    # full 60s, and prompt_builder swallows the failure. Stubbed at the network boundary
+    # (embed_query/embed_documents) rather than at retrieve_relevant_chunks, so the real
+    # pgvector similarity query still runs against the test database.
+    async def _embed_query(text: str) -> list[float]:
+        return list(STUB_EMBEDDING)
+
+    async def _embed_documents(texts: list[str]) -> list[list[float]]:
+        return [list(STUB_EMBEDDING) for _ in texts]
+
+    _patch_everywhere(monkeypatch, embedding_module, "embed_query", _embed_query)
+    _patch_everywhere(monkeypatch, embedding_module, "embed_documents", _embed_documents)
+
+    # RAG retrieval is stubbed a layer ABOVE the embedding call, and that is deliberate.
+    #
+    # Migration 011 creates document_chunks.embedding only `if pgvector` is available.
+    # CI's postgres:16-alpine does NOT ship pgvector, so in CI the column does not exist
+    # and the similarity query CANNOT run — RAG is untestable there, with or without a
+    # stub. Today that is masked: embed_query hangs for 60s, so the SQL is never reached.
+    # Stubbing only embed_query would let the query finally run and fail with
+    # UndefinedColumnError, and because _build_document_context catches Exception and
+    # returns "", the failure would be swallowed while leaving the request's transaction
+    # ABORTED — every later statement then dies with InFailedSQLTransactionError. That
+    # trades a slow pass for a confusing failure, which is worse.
+    #
+    # So: return no chunks. Same observable outcome as today (no RAG context in the
+    # prompt), minus the 60s. Restoring genuine RAG coverage needs a pgvector-capable
+    # postgres image in CI (prod uses paradedb, which bundles it) — a separate change.
+    async def _retrieve_relevant_chunks(db, user_id, query, *args, **kwargs):
+        return []
+
+    import app.conversation.retrieval as retrieval_module
+
+    _patch_everywhere(
+        monkeypatch, retrieval_module, "retrieve_relevant_chunks", _retrieve_relevant_chunks
+    )
 
     # Return BYTES, not None. Returning None would take the "TTS unavailable" branch —
     # which is what CI has always silently tested — leaving the base64-encode path in

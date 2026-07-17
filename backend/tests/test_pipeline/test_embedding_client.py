@@ -10,6 +10,11 @@ import pytest
 from app.config import settings
 from app.pipeline import embedding_client
 
+# Exercises the embedding client itself, mocking its own network boundary
+# (patches embedding_client._make_client), so the autouse stub in conftest would
+# replace the very functions under test. Opt out — this module is already offline.
+pytestmark = pytest.mark.real_ai
+
 
 def _mock_client(vectors):
     """Mock AsyncOpenAI used as an async context manager.

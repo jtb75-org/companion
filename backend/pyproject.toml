@@ -102,5 +102,5 @@ testpaths = ["tests"]
 # specific test with @pytest.mark.timeout(N) rather than lifting the global bound.
 timeout = 60
 markers = [
-    "real_llm: opt OUT of the autouse LLM stub and use the real client (see tests/conftest.py)",
+    "real_ai: opt OUT of the autouse AI stubs (LLM/TTS/STT/embeddings/RAG) — for tests that exercise those boundaries and mock their own network (see tests/conftest.py)",
 ]

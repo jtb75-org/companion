@@ -11,10 +11,19 @@ uncredentialed call to a paid API from CI. That is exactly the regression these 
 exist to make loud. See tests/stub_llm.py for the measurements.
 """
 
+from uuid import uuid4
+
 import pytest
 
 from app.conversation.llm import GeminiClient, get_llm_client
-from tests.stub_llm import STUB_AUDIO, STUB_REPLY, STUB_TRANSCRIPT, StubGeminiClient
+from tests.stub_llm import (
+    EMBEDDING_DIM,
+    STUB_AUDIO,
+    STUB_EMBEDDING,
+    STUB_REPLY,
+    STUB_TRANSCRIPT,
+    StubGeminiClient,
+)
 
 
 def test_factory_is_stubbed_by_default():
@@ -83,6 +92,35 @@ async def test_voice_backends_are_stubbed():
     assert await transcribe_audio(b"audio") == STUB_TRANSCRIPT
 
 
+async def test_embeddings_are_stubbed():
+    """The embedding client is NOT a google client — it is openai.AsyncOpenAI aimed at
+    settings.embedding_api_base, which defaults to the LiteLLM gateway on the LAN. That
+    address answers instantly at a desk and is a 60s blackhole from CI, so this is the
+    one backend whose breakage is INVISIBLE locally: it took a red CI run to find, after
+    the LLM and TTS stubs were already in. Assert via the module that binds it at import
+    time (retrieval), not just the source."""
+    from app.conversation.retrieval import embed_query
+
+    vector = await embed_query("anything")
+
+    assert vector == STUB_EMBEDDING
+    assert len(vector) == EMBEDDING_DIM, "document_chunk.embedding is Vector(768)"
+
+
+async def test_rag_retrieval_is_stubbed_and_runs_no_sql():
+    """RAG is stubbed a layer above the embedding call because CI's postgres:16-alpine
+    has no pgvector, so migration 011 never creates document_chunks.embedding and the
+    similarity query cannot run there at all.
+
+    If this stub is removed but embed_query stays stubbed, the query runs, fails with
+    UndefinedColumnError, and _build_document_context swallows it while leaving the
+    transaction ABORTED — every later statement in the request then fails with
+    InFailedSQLTransactionError. Passing db=None proves no SQL is attempted."""
+    from app.conversation.retrieval import retrieve_relevant_chunks
+
+    assert await retrieve_relevant_chunks(None, uuid4(), "any query") == []
+
+
 def test_gce_metadata_probe_is_disabled():
     """The backstop for a google.cloud client this suite does not know about yet.
     google-auth reads these at module-import time, so if conftest ever stops setting
@@ -93,8 +131,8 @@ def test_gce_metadata_probe_is_disabled():
     assert metadata._METADATA_DEFAULT_TIMEOUT == 1
 
 
-@pytest.mark.real_llm
-def test_real_llm_marker_opts_out(request):
+@pytest.mark.real_ai
+def test_real_ai_marker_opts_out(request):
     """The escape hatch works: this test gets the REAL factory, not the stub.
 
     It asserts the marker's wiring only — it makes no LLM call, so it stays offline."""
