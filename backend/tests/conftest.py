@@ -191,9 +191,11 @@ def stub_ai_backends(request, monkeypatch):
 
     # Embeddings: NOT a google client. openai.AsyncOpenAI against the LAN LiteLLM
     # gateway (192.168.0.104:4000, 60s timeout) — unroutable from CI, so it blocks the
-    # full 60s, and prompt_builder swallows the failure. Stubbed at the network boundary
-    # (embed_query/embed_documents) rather than at retrieve_relevant_chunks, so the real
-    # pgvector similarity query still runs against the test database.
+    # full 60s, and prompt_builder swallows the failure.
+    #
+    # This covers the PIPELINE path (embed_documents, during ingestion). The conversation
+    # path is short-circuited a layer higher by the retrieve_relevant_chunks stub below —
+    # see the comment there for why the SQL must not run in a no-pgvector CI.
     async def _embed_query(text: str) -> list[float]:
         return list(STUB_EMBEDDING)
 
