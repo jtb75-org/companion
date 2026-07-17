@@ -1,14 +1,29 @@
 name: CI
 
 on:
-  # main is handled by build-and-push.yml, which calls this workflow via
-  # workflow_call before building. Every other branch and every PR is gated here.
-  push:
-    branches-ignore: [main]
+  # Every commit that matters is gated exactly ONCE:
+  #   * PRs           -> pull_request (below)
+  #   * main          -> build-and-push.yml calls this via workflow_call BEFORE building
+  #   * anything else -> workflow_dispatch, on demand
+  #
+  # There is deliberately NO `push` trigger. It used to be `push: branches-ignore: [main]`,
+  # which double-ran the entire suite on every PR branch: a push to a branch with an open
+  # PR matches BOTH triggers, so each commit burned two identical runs (measured: the last
+  # 40 runs were an exact 20 push / 20 pull_request split). Re-adding a push trigger
+  # restores that waste — the pull_request event already covers the same commits.
+  # The only thing lost is CI on a branch with no PR open yet; use workflow_dispatch.
   pull_request:
     branches: [main]
   workflow_call:
   workflow_dispatch:
+
+# One in-flight run per ref. A force-push or a rapid follow-up commit supersedes the
+# previous run, which nobody will read — cancel it instead of paying for it.
+# NEVER cancel main: that ref reaches this workflow via build-and-push.yml's
+# workflow_call, and killing it mid-flight would abort a build/deploy.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
