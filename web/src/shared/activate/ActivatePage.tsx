@@ -3,7 +3,7 @@ import { useSearchParams, useNavigate, Link } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
 import { api } from '../api/client'
 import { BRAND_MID, BRAND_EMOJI } from '../branding'
-import { RESET_PASSWORD_COPY } from '../copy'
+import { RESET_PASSWORD_COPY, SET_PASSWORD_COPY } from '../copy'
 
 interface ActivationInfo {
   valid: boolean
@@ -53,6 +53,15 @@ export default function ActivatePage() {
     e.preventDefault()
     setError('')
     if (!token || !info) return
+    // Check the length OURSELVES, before the network. The input deliberately has
+    // no `minLength`: that let the browser speak ("Please lengthen this text to
+    // 10 characters or more") — not our voice, above the reading bar, and at the
+    // exact moment the member has already failed once. Matches the mobile check
+    // and the backend floor.
+    if (password.length < SET_PASSWORD_COPY.minLength) {
+      setError(SET_PASSWORD_COPY.tooShort)
+      return
+    }
     setSubmitting(true)
     try {
       await api('/api/v1/activation/set-password', {
@@ -119,8 +128,7 @@ export default function ActivatePage() {
           <p className="text-gray-600 text-sm text-center mb-4">
             {isReset ? (
               <>
-                {RESET_PASSWORD_COPY.greetingPrefix} <strong>{info.name}</strong>.{' '}
-                {RESET_PASSWORD_COPY.promptSuffix}
+                {RESET_PASSWORD_COPY.greetingPrefix} <strong>{info.name}</strong>.
               </>
             ) : (
               <>
@@ -144,7 +152,6 @@ export default function ActivatePage() {
             placeholder={isReset ? RESET_PASSWORD_COPY.passwordPlaceholder : 'Create a password'}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            minLength={10}
             className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-companion-blue focus:outline-none transition"
           />
           {error && <p className="text-red-500 text-sm">{error}</p>}

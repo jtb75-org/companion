@@ -34,17 +34,37 @@ export const FORGOT_PASSWORD_COPY = {
   genericError: 'Something went wrong. Please try again.',
 } as const
 
+/**
+ * Shared by BOTH flavors of the set-password page (activation AND reset).
+ *
+ * Without this the input's `minLength` let the BROWSER speak — "Please lengthen
+ * this text to 10 characters or more" — which is not our voice and is well above
+ * the reading bar, at the exact moment a member has already failed once. The
+ * check now runs in `handleSubmit` and this string is shown instead. Kept
+ * word-for-word in sync with the mobile `activateTooShort`, and with the backend
+ * floor (config `password_min_length`, default 10).
+ */
+export const SET_PASSWORD_COPY = {
+  minLength: 10,
+  tooShort: 'Please use at least 10 letters or numbers.',
+} as const
+
 export const RESET_PASSWORD_COPY = {
   // Reset-flavored copy for the set-password landing page (?reset=1).
-  // `title` is the heading (NOT "Reset your password" — that is the request
-  // form's heading, and reusing it made the two screens indistinguishable).
-  title: 'Set a new password',
+  // Each slot does ONE job, and every slot uses the same verb ("Make"):
+  //   title    -> the task            "Make a new password"
+  //   greeting -> warmth only         "Welcome back, <name>."
+  //   submit   -> the action          "Make New Password"
+  // `title` must stay distinct from the request form's 'Reset your password'
+  // heading, or the two screens become indistinguishable. Web needs a `title`
+  // at all only because its heading slot is taken by the brand name — mobile's
+  // heading IS the greeting, so it needs no equivalent. Same meaning, different
+  // layouts.
+  title: 'Make a new password',
   // The greeting is KEPT on the reset path: this page already shows the
   // account's email in the form below, so suppressing the name protects
-  // nothing and only reads colder at a stressful moment. Rendered as
-  // "Welcome back, <name>. Make a new password for your account."
+  // nothing and only reads colder at a stressful moment.
   greetingPrefix: 'Welcome back,',
-  promptSuffix: 'Make a new password for your account.',
   passwordPlaceholder: 'New password',
   // Same verb as the prompt ("Make"), per the Easy-Read guidelines.
   submit: 'Make New Password',
