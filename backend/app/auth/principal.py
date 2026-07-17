@@ -202,6 +202,34 @@ async def _email_for_subject(mdb: AsyncSession, subject: str) -> str | None:
     return None
 
 
+async def resolve_session_email(request: Request) -> str | None:
+    """Return the IdP-verified EMAIL behind a BFF session for ANY cohort, else ``None``.
+
+    THE canonical resolver for a surface that serves more than one cohort. Use this —
+    NOT ``resolve_session_principal`` — whenever admins or caregivers can reach the
+    endpoint: ``resolve_session_principal`` is MEMBER-ONLY and raises 401 the moment a
+    subject has no ``users`` row, so it rejects a pure admin or pure caregiver outright
+    even though their session is perfectly valid. (That is exactly how /api/v1/auth/check
+    locked out the admin cohort at the Authentik cutover: it resolved the session
+    member-only and 401'd before reaching ``authorize_by_email``, the cohort-aware check
+    that would have recognised the admin.)
+
+    Role-AGNOSTIC and grants NOTHING: it returns only an email. Every caller still applies
+    its own role check (``authorize_by_email`` / ``caregiver_authorized_for_member`` / the
+    ``admin_users`` + ``is_active`` lookup), and that check remains the real authorization.
+
+    ``None`` (→ Firebase fallback) when the switch is off (inert; first line), there is no
+    session, or the subject maps to no known account. CSRF on state-changing methods is
+    enforced inside ``resolve_session_subject`` for cookie sessions."""
+    if not settings.authentik_login_enabled:
+        return None
+    subject = await resolve_session_subject(request)
+    if subject is None:
+        return None
+    async with maintenance_session() as mdb:
+        return await _email_for_subject(mdb, subject)
+
+
 async def resolve_caregiver_session(request: Request) -> str | None:
     """Return the IdP-verified EMAIL for a caregiver's BFF session, else ``None``.
 
@@ -214,13 +242,9 @@ async def resolve_caregiver_session(request: Request) -> str | None:
     ``None`` (→ Firebase fallback) when the switch is off (inert; first line), there is
     no session, or the subject maps to no known account. CSRF on state-changing methods
     is enforced inside ``resolve_session_subject`` for cookie sessions."""
-    if not settings.authentik_login_enabled:
-        return None
-    subject = await resolve_session_subject(request)
-    if subject is None:
-        return None
-    async with maintenance_session() as mdb:
-        return await _email_for_subject(mdb, subject)
+    # Identical to resolve_session_email — kept as a named alias so each call site
+    # documents which role gate it applies. Delegates so the three cannot drift.
+    return await resolve_session_email(request)
 
 
 async def resolve_admin_session(request: Request) -> str | None:
@@ -236,10 +260,6 @@ async def resolve_admin_session(request: Request) -> str | None:
     ``_email_for_subject``) so an admin who is ALSO a caregiver — whose login backfilled
     only ``trusted_contacts`` — still resolves. CSRF on unsafe methods is enforced inside
     ``resolve_session_subject`` for cookie sessions."""
-    if not settings.authentik_login_enabled:
-        return None
-    subject = await resolve_session_subject(request)
-    if subject is None:
-        return None
-    async with maintenance_session() as mdb:
-        return await _email_for_subject(mdb, subject)
+    # Identical to resolve_session_email — kept as a named alias so each call site
+    # documents which role gate it applies. Delegates so the three cannot drift.
+    return await resolve_session_email(request)
