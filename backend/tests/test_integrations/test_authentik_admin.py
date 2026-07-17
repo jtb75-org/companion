@@ -240,7 +240,6 @@ from tests.conftest import requires_db  # noqa: E402
 @pytest.mark.asyncio
 async def test_stub_seam_provisions_when_switch_on(monkeypatch):
     import app.services.invitation_service as inv
-    from app.db import session as db_module
 
     calls: list[tuple[str, str]] = []
 
@@ -253,8 +252,7 @@ async def test_stub_seam_provisions_when_switch_on(monkeypatch):
 
     # switch ON ⇒ provisioned with the stub email.
     monkeypatch.setattr(settings, "auth_provider", "authentik")
-    async with db_module.async_session_factory() as s:
-        await inv.get_or_create_stub_user(s, email, "Seam On")
+    await inv.get_or_create_stub_user(email, "Seam On")
     assert calls == [(email, "Seam On")]
 
 
@@ -262,7 +260,6 @@ async def test_stub_seam_provisions_when_switch_on(monkeypatch):
 @pytest.mark.asyncio
 async def test_stub_seam_inert_when_firebase(monkeypatch):
     import app.services.invitation_service as inv
-    from app.db import session as db_module
 
     calls: list[tuple[str, str]] = []
 
@@ -273,6 +270,5 @@ async def test_stub_seam_inert_when_firebase(monkeypatch):
     monkeypatch.setattr(settings, "auth_provider", "firebase")
 
     email = f"seam-off-{uuid.uuid4().hex[:8]}@example.com"
-    async with db_module.async_session_factory() as s:
-        await inv.get_or_create_stub_user(s, email, "Seam Off")
+    await inv.get_or_create_stub_user(email, "Seam Off")
     assert calls == []  # switch off ⇒ not called at all

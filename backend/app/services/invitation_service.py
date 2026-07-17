@@ -23,16 +23,17 @@ def generate_invitation_token() -> str:
     return secrets.token_urlsafe(36)
 
 
-async def get_or_create_stub_user(
-    db: AsyncSession, email: str, name: str
-) -> tuple[User, bool]:
+async def get_or_create_stub_user(email: str, name: str) -> tuple[User, bool]:
     """Find or create a stub user (account_status='invited') for ``email``.
 
     Creating/reading another person's account by email is inherently
     cross-tenant, so this runs on the maintenance (BYPASSRLS) session: under
     per-user RLS a member's own session can neither see nor INSERT another
     user's row (WITH CHECK would reject the stub whose id != the inviter's GUC).
-    ``db`` is kept for signature compatibility but not used for the user row.
+    Takes NO session: it opens its own maintenance session, so it is safe to call from
+    a background task with no request-scoped session (see /auth/signup). It previously
+    accepted an unused ``db`` purely for signature compatibility, which wrongly implied
+    it was bound to the caller's session.
     Returns (user, created); the returned user is detached (loaded scalars are
     safe — callers use existence / .id only).
     """
@@ -105,11 +106,11 @@ async def create_member_invitation(
         existing.is_active = False
         await db.flush()
         # Ensure stub user exists
-        await get_or_create_stub_user(db, email, contact_name)
+        await get_or_create_stub_user(email, contact_name)
         return existing
 
     # Ensure stub user exists
-    await get_or_create_stub_user(db, email, contact_name)
+    await get_or_create_stub_user(email, contact_name)
 
     contact = TrustedContact(
         user_id=inviter_user_id,
@@ -135,7 +136,7 @@ async def create_admin_platform_invitation(
     name: str,
 ) -> tuple[User, bool]:
     """Admin invites someone to the platform (Part 1 only, no member assignment)."""
-    return await get_or_create_stub_user(db, email, name)
+    return await get_or_create_stub_user(email, name)
 
 
 async def _load_active_invitation(
