@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.authorize import authorize_by_email
 from app.auth.firebase import verify_firebase_token
-from app.auth.principal import resolve_session_principal
+from app.auth.principal import resolve_session_email
 from app.config import settings
 from app.db import get_db
 from app.db.context import set_login_email_context
@@ -40,11 +40,20 @@ async def check_auth(
             }
 
     # DUAL-RUN Authentik-session branch (inert unless auth_provider == "authentik").
-    # This is a GET, so the CSRF check inside resolve_session_principal is a no-op.
-    principal = await resolve_session_principal(request, db)
-    if principal is not None:
-        email = principal.email
-    else:
+    # This is a GET, so the CSRF check inside resolve_session_subject is a no-op.
+    #
+    # Resolve the session's email ROLE-AGNOSTICALLY. This endpoint exists to answer
+    # "who is this and what may they do?" for EVERY cohort, and `authorize_by_email`
+    # below is the part that knows about admins and caregivers. It must therefore not be
+    # gated behind a member lookup: `resolve_session_principal` is MEMBER-ONLY and raises
+    # 401 for any subject with no `users` row, so it rejected pure admins and pure
+    # caregivers outright — before `authorize_by_email` could ever recognise them. That
+    # locked the admin cohort out of the web dashboard at the Authentik cutover (login
+    # returned 200, then every /auth/check 401'd with "Session does not map to a known
+    # member"). The rest of this handler already expects a member-less caller: it sets its
+    # own login-email GUC and reports has_account=False / profile_complete=True for them.
+    email = await resolve_session_email(request)
+    if email is None:
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="No token provided")
 
