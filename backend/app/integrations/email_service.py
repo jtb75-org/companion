@@ -8,6 +8,7 @@ Sends transactional emails for:
 - Safety alerts to caregivers
 """
 
+import asyncio
 import html
 import logging
 import smtplib
@@ -77,7 +78,11 @@ def _send_smtp(to_email: str, to_name: str, subject: str, text_body: str, html_b
         msg.attach(MIMEText(html_body, "html"))
 
     try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
+        # timeout is REQUIRED: smtplib defaults to no timeout, so a hung/blackholed
+        # relay would block this thread forever.
+        with smtplib.SMTP(
+            settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds
+        ) as server:
             if settings.smtp_use_tls:
                 server.starttls()
             if settings.smtp_username:
@@ -97,8 +102,17 @@ async def send_email(
     text_body: str,
     html_body: str | None = None,
 ) -> bool:
-    """Send a single email via Gmail SMTP."""
-    return _send_smtp(to_email, to_name, subject, text_body, html_body)
+    """Send a single email via the configured SMTP transport.
+
+    ``_send_smtp`` is BLOCKING (stdlib smtplib). Running it inline on the event loop
+    stalls every other request on this worker for the whole SMTP round-trip — and,
+    before ``smtp_timeout_seconds`` existed, an unreachable relay would have stalled
+    it forever. Hand it to a worker thread so the loop stays free; the bounded socket
+    timeout then caps the worst case for that thread too.
+    """
+    return await asyncio.to_thread(
+        _send_smtp, to_email, to_name, subject, text_body, html_body
+    )
 
 
 # ---------------------------------------------------------------------------

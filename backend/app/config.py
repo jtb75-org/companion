@@ -210,6 +210,10 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = False  # relay is plain SMTP on 25
     smtp_username: str = ""  # empty = no AUTH
     smtp_password: str = ""
+    # Socket timeout for the SMTP conversation. MUST be set: smtplib defaults to no
+    # timeout, so an unreachable/hung relay would block the caller forever (and, before
+    # the send was moved off the event loop, would have hung the whole worker).
+    smtp_timeout_seconds: float = 10.0
 
     # Document AI OCR
     documentai_processor_id: str = "6785df08989fd9a6"
