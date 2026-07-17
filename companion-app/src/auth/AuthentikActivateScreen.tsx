@@ -28,6 +28,14 @@ import { colors, brand } from '../theme/colors'
  *      in with the SAME BFF login the login screen uses, so the app lands
  *      authenticated on its home screen.
  *
+ * The SAME screen serves two flavors, chosen by the `reset` marker on the inbound
+ * link (`/activate?token=…&reset=1`, sent by the forgot-password email):
+ *   - reset=false (default) — activation: "Make a password to start using D.D."
+ *   - reset=true            — password reset: "Set a new password".
+ * This is a COPY-ONLY switch. Both flavors validate and redeem through the exact
+ * same endpoints with the same request; `reset` is never sent to the backend and
+ * grants nothing. The token alone carries authority.
+ *
  * All copy comes from `authStrings`. The password is never logged.
  */
 
@@ -37,9 +45,12 @@ type Phase = 'checking' | 'ready' | 'invalid'
 
 export function AuthentikActivateScreen({
   token,
+  reset = false,
   onBackToSignIn,
 }: {
   token: string | null
+  /** Copy-only: show reset wording instead of first-time activation wording. */
+  reset?: boolean
   onBackToSignIn: () => void
 }) {
   const { signInWithPassword } = useAuth()
@@ -131,7 +142,9 @@ export function AuthentikActivateScreen({
         <View style={styles.card}>
           <Text style={styles.emoji}>{brand.emoji}</Text>
           <Text style={styles.title}>{authStrings.activateInvalidTitle}</Text>
-          <Text style={styles.subtitle}>{authStrings.activateInvalidBody}</Text>
+          <Text style={styles.subtitle}>
+            {reset ? authStrings.activateResetInvalidBody : authStrings.activateInvalidBody}
+          </Text>
           <TouchableOpacity
             style={styles.button}
             onPress={onBackToSignIn}
@@ -152,6 +165,16 @@ export function AuthentikActivateScreen({
       ? `${authStrings.activateHello} ${details.name}`
       : authStrings.activateHello
 
+  // The greeting is kept on BOTH flavors. Suppressing the name on reset would
+  // protect nothing (this screen already shows the account's email below) and a
+  // member who just forgot their password is at a stress moment — recognition
+  // helps and costs nothing. Only the prompt + button change for reset.
+  const heading = greeting
+  const prompt = reset ? authStrings.activateResetPrompt : authStrings.activatePrompt
+  const submitLabel = reset
+    ? authStrings.activateResetCreateButton
+    : authStrings.activateCreateButton
+
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -159,8 +182,8 @@ export function AuthentikActivateScreen({
     >
       <View style={styles.card}>
         <Text style={styles.emoji}>{brand.emoji}</Text>
-        <Text style={styles.title}>{greeting}</Text>
-        <Text style={styles.subtitle}>{authStrings.activatePrompt}</Text>
+        <Text style={styles.title}>{heading}</Text>
+        <Text style={styles.subtitle}>{prompt}</Text>
 
         {details?.email ? (
           <View style={styles.emailBlock}>
@@ -186,12 +209,12 @@ export function AuthentikActivateScreen({
           onPress={handleCreatePassword}
           disabled={busy}
           accessibilityRole="button"
-          accessibilityLabel={authStrings.activateCreateButton}
+          accessibilityLabel={submitLabel}
         >
           {busy ? (
             <ActivityIndicator color={colors.white} />
           ) : (
-            <Text style={styles.buttonText}>{authStrings.activateCreateButton}</Text>
+            <Text style={styles.buttonText}>{submitLabel}</Text>
           )}
         </TouchableOpacity>
 

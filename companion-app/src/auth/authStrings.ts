@@ -108,6 +108,67 @@ export const authStrings = {
   signupBackButton: 'Back to Sign In',
   // On the "check your email" card: go back to the form to send the link again.
   signupResendLink: "Didn't get the email? Try again.",
+
+  // --- Forgot-password screen (self-service password reset) ----------------
+  // A member who cannot sign in types their email here, and we email them a link
+  // to make a new password (the link opens the /activate screen above, in its
+  // reset flavor).
+  //
+  // ANTI-ENUMERATION — the most important rule on this screen: the confirmation
+  // MUST read exactly the same whether or not the email belongs to a real
+  // account. Never say "we sent it" as a fact, and never say "no account found".
+  // The conditional "If we have that email" wording below is what keeps this
+  // honest for both cases. Do not edit it without re-review.
+
+  // Small text button under Sign In that opens this screen.
+  forgotLink: 'Forgot password?',
+  // Form header.
+  forgotTitle: 'Reset your password',
+  // Under the title — tells them what happens next.
+  forgotSubtitle: 'Type your email. We will send you a link to make a new password.',
+  // Field placeholder.
+  forgotEmailPlaceholder: 'Your email',
+  // The button that sends the request.
+  forgotButton: 'Send Link',
+  // Client-side checks (before we send anything).
+  forgotMissingEmail: 'Please type your email.',
+  // NOTE: must NOT reuse "Check your email" — that is `forgotSentTitle` (the
+  // SUCCESS card, meaning "go look in your inbox"). The same words one screen
+  // away meaning "what you typed is wrong" is a comprehension trap.
+  forgotBadEmail: 'That email does not look right. Please try again.',
+  // 429 = too many reset tries from this network right now.
+  forgotTooManyTries: 'Too many tries right now. Please wait a minute and try again.',
+  // Network / unknown / anything else.
+  forgotError: 'Something went wrong. Please try again.',
+  // Confirmation card, shown for ANY successful send. Deliberately does NOT
+  // repeat the email back or promise delivery — that would leak whether the
+  // account exists.
+  forgotSentTitle: 'Check your email',
+  forgotSentBody:
+    'If we have that email, we sent a link to it. Tap the link to make a new password.',
+  // Button that returns to the Sign In screen from the form or confirmation.
+  forgotBackButton: 'Back to Sign In',
+  // On the "check your email" card: go back to the form to send the link again.
+  forgotResendLink: "Didn't get the email? Try again.",
+
+  // --- Reset flavor of the set-your-password screen (?reset=1) -------------
+  // Same screen, same button action, same endpoint as the activation flow above
+  // — ONLY the words change. Shown when the emailed link carries `reset=1`, so a
+  // member resetting a password they already have is not told to "start using
+  // D.D." as if they were brand new.
+
+  // The "Hi <name>" greeting is KEPT on the reset path — this screen already
+  // shows the account's email below, so dropping the name protects nothing and
+  // only reads colder at a stressful moment. Only the prompt + button change.
+  // Replaces `activatePrompt`.
+  activateResetPrompt: 'Make a new password for your account.',
+  // Replaces `activateCreateButton`. Same verb ("Make") as the prompt above so
+  // the one action reads consistently (guidelines §3.3).
+  activateResetCreateButton: 'Make New Password',
+  // Replaces `activateInvalidBody` when the reset link is old or wrong: points
+  // them at the forgot-password screen instead of at an invite email.
+  activateResetInvalidBody:
+    'This link is old or is not right. Please go back and ask for a new link.',
 } as const
 
 export type AuthStringKey = keyof typeof authStrings

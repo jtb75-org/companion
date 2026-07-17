@@ -6,6 +6,7 @@ import {
 import { useAuth } from './AuthProvider'
 import { AuthLoginError } from './authApi'
 import { AuthentikSignupScreen } from './AuthentikSignupScreen'
+import { AuthentikForgotPasswordScreen } from './AuthentikForgotPasswordScreen'
 import { authStrings } from './authStrings'
 import { colors, brand } from '../theme/colors'
 
@@ -28,6 +29,9 @@ export function AuthentikLoginScreen() {
   // for the self-signup screen without needing a navigator (these pre-auth
   // screens are rendered directly by AppNavigator, not inside a container).
   const [showSignup, setShowSignup] = React.useState(false)
+  // Same toggle pattern for the self-service password reset. Members who cannot
+  // sign in reach it from the "Forgot password?" link below.
+  const [showForgot, setShowForgot] = React.useState(false)
 
   const messageForStatus = (status: number | null): string => {
     switch (status) {
@@ -71,6 +75,10 @@ export function AuthentikLoginScreen() {
 
   if (showSignup) {
     return <AuthentikSignupScreen onBackToSignIn={() => setShowSignup(false)} />
+  }
+
+  if (showForgot) {
+    return <AuthentikForgotPasswordScreen onBackToSignIn={() => setShowForgot(false)} />
   }
 
   return (
@@ -123,6 +131,16 @@ export function AuthentikLoginScreen() {
             {error}
           </Text>
         ) : null}
+
+        <TouchableOpacity
+          style={styles.linkButton}
+          onPress={() => setShowForgot(true)}
+          disabled={busy}
+          accessibilityRole="button"
+          accessibilityLabel={authStrings.forgotLink}
+        >
+          <Text style={styles.linkText}>{authStrings.forgotLink}</Text>
+        </TouchableOpacity>
 
         <TouchableOpacity
           style={styles.linkButton}
