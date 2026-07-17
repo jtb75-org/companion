@@ -161,6 +161,13 @@ class Settings(BaseSettings):
     # once this many sends fire for an email in a window, further signups for it become
     # silent no-ops (the response stays byte-identical — anti-enumeration is preserved).
     signup_email_max_per_window: int = 3
+    # Self-service password-reset throttle (per client IP, reuses login_window_seconds).
+    # Mirrors the signup knobs: /auth/forgot-password is an unauthenticated
+    # account-existence probe + outbound-email surface, so cap reset attempts per
+    # IP/window (bulk probing) AND per victim email (reset-mail bombing). Distinct
+    # buckets from signup so the two flows don't share a counter.
+    reset_max_attempts: int = 5
+    reset_email_max_per_window: int = 3
     # Whether to trust the raw X-Forwarded-For chain for the login rate-limit client
     # IP. cf-connecting-ip (set by Cloudflare, unspoofable via the cloudflared tunnel)
     # is always trusted; XFF is client-injectable unless a trusted proxy owns it, so it
@@ -193,9 +200,16 @@ class Settings(BaseSettings):
     # Must be explicitly set to true. Never enable in production.
     dev_auth_bypass: bool = False
 
-    # Gmail SMTP (Google Workspace)
-    gmail_smtp_user: str = "dd@mydailydignity.com"
-    gmail_smtp_password: str = ""
+    # SMTP transport for transactional email. Prod points at the in-cluster mail relay
+    # (plain SMTP on :25), which authenticates upstream to SES itself — so no client
+    # AUTH and no TLS on the hop to the relay. Empty smtp_host = dev/test log-only
+    # fallback (no mail is sent). starttls() is called only when smtp_use_tls; login()
+    # only when smtp_username is set.
+    smtp_host: str = ""  # empty = dev/test log-only
+    smtp_port: int = 25
+    smtp_use_tls: bool = False  # relay is plain SMTP on 25
+    smtp_username: str = ""  # empty = no AUTH
+    smtp_password: str = ""
 
     # Document AI OCR
     documentai_processor_id: str = "6785df08989fd9a6"

@@ -52,12 +52,16 @@ from app.db.context import (
     set_user_context,
 )
 from app.db.session import async_session_factory, maintenance_session
+from app.integrations.email_service import APP_URL, send_password_reset_email
 from app.models.admin_user import AdminUser
 from app.models.audit import AccountAuditLog
 from app.models.enums import AccountStatus
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
-from app.services.activation_service import send_activation_if_enabled
+from app.services.activation_service import (
+    issue_activation_token,
+    send_activation_if_enabled,
+)
 from app.services.invitation_service import get_or_create_stub_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -144,6 +148,20 @@ class SignupRequest(BaseModel):
             raise ValueError("name is required")
         if "<" in v or ">" in v:
             raise ValueError("name contains invalid characters")
+        return v
+
+
+class ForgotPasswordRequest(BaseModel):
+    """Body for the unauthenticated POST /auth/forgot-password (self-service reset)."""
+
+    email: str = Field(min_length=3, max_length=320)
+
+    @field_validator("email")
+    @classmethod
+    def _plausible_email(cls, v: str) -> str:
+        v = v.strip()
+        if not _EMAIL_RE.match(v):
+            raise ValueError("enter a valid email address")
         return v
 
 
@@ -420,6 +438,124 @@ async def signup(
     # only, so an audit hiccup never fails the request and the response stays uniform.
     await _audit_login_event(
         "signup_requested", email, details={"result": result}, best_effort=True
+    )
+    return {"status": "ok"}
+
+
+async def _account_name_if_exists(email: str) -> str | None:
+    """Return a display name if ``email`` belongs to any account, else ``None``.
+
+    Resolves across all three cohorts on the MAINTENANCE (BYPASSRLS) session — this is
+    pre-auth (no tenant GUC) and ``users``/``trusted_contacts`` are per-user RLS-fenced,
+    so a normal session would fail-close. Cohorts, in priority order:
+      * member — any ``users`` row (INVITED/ACTIVE/deactivated all reset the same way;
+        the reset link lands on the branded set-password page either way);
+      * caregiver — an ACTIVE ``trusted_contacts`` row (mirrors _try_caregiver_login);
+      * admin — an ACTIVE ``admin_users`` row (mirrors _try_admin_login).
+    ``None`` means no account exists — the caller sends nothing but still returns 200."""
+    async with maintenance_session() as mdb:
+        user = (
+            await mdb.execute(select(User).where(User.email == email))
+        ).scalar_one_or_none()
+        if user is not None:
+            return user.preferred_name or user.display_name or email
+        contact = (
+            await mdb.execute(
+                select(TrustedContact).where(
+                    TrustedContact.contact_email == email,
+                    TrustedContact.is_active.is_(True),
+                )
+            )
+        ).scalars().first()
+        if contact is not None:
+            return contact.contact_name or email
+        admin = (
+            await mdb.execute(select(AdminUser).where(AdminUser.email == email))
+        ).scalar_one_or_none()
+        if admin is not None and admin.is_active:
+            return admin.name or email
+    return None
+
+
+async def _issue_and_send_reset(email: str, name: str) -> None:
+    """Issue a fresh activation token and email the branded reset link. BEST-EFFORT.
+
+    Reuses the activation token machinery (``issue_activation_token`` supersedes any
+    prior unused token) and the SAME redemption endpoint (``/api/v1/activation/
+    set-password``) — the link only carries a ``reset=1`` marker so the branded page can
+    adjust its copy. A token or send failure must NOT change the uniform 200 response
+    (anti-enumeration), so we log and continue."""
+    try:
+        token = await issue_activation_token(email)
+        reset_url = f"{APP_URL}/activate?token={token}&reset=1"
+        await send_password_reset_email(email, name, reset_url)
+    except Exception:
+        log.error(
+            "failed to issue/send password-reset email for %s (best-effort)",
+            email,
+            exc_info=True,
+        )
+
+
+@router.post("/forgot-password")
+async def forgot_password(
+    body: ForgotPasswordRequest,
+    request: Request,
+) -> dict[str, str]:
+    """Self-service password reset: email a branded set-password link if an account exists.
+
+    UNAUTHENTICATED and Authentik-only (404 under firebase). Mirrors /auth/signup's
+    security envelope exactly:
+      * IP rate limit (distinct ``reset:ip`` bucket, ``reset_max_attempts``): the primary
+        abuse control for this unauthenticated account-probe + outbound-email surface.
+      * Anti-enumeration: the response is byte-identical whether or not the email exists.
+        We NEVER reveal account existence — an existing account and an unknown address
+        both return ``200 {"status": "ok"}`` with no branching in the response.
+      * Per-EMAIL cap (``reset:email``, ``reset_email_max_per_window``): bounds
+        reset-mail bombing a single victim even from rotating IPs.
+
+    When an account DOES exist (member / caregiver / admin), we issue an activation
+    token and email a reset link that redeems through the EXISTING
+    ``/api/v1/activation/set-password`` endpoint (unchanged) — that endpoint has no
+    first-time-only guard, so it cleanly re-sets the password of an already-ACTIVE
+    account. All side effects are best-effort and never alter the 200 response.
+    """
+    _require_authentik_enabled()
+
+    # Rate-limit by IP FIRST (the #1 abuse control here). Distinct bucket from signup +
+    # login so counters don't cross-contaminate. Over threshold → 429.
+    limiter = get_login_rate_limiter()
+    ip_bucket = f"reset:ip:{_client_ip(request)}"
+    if await limiter.hit(ip_bucket) > settings.reset_max_attempts:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "too many password-reset attempts — try again later",
+            headers={"Retry-After": str(settings.login_window_seconds)},
+        )
+
+    email = body.email.strip().lower()
+
+    # Resolve existence + a display name on the maintenance (BYPASSRLS) session. We branch
+    # on the result but the HTTP response is identical in every branch (anti-enumeration).
+    name = await _account_name_if_exists(email)
+
+    if name is not None:
+        # Second, address-keyed bound: cap how many reset mails one address can receive
+        # per window so an attacker rotating IPs still can't bomb one victim. When over,
+        # skip the SEND but keep the branch/response identical (anti-enumeration).
+        if await limiter.hit(f"reset:email:{email}") <= settings.reset_email_max_per_window:
+            await _issue_and_send_reset(email, name)
+            result = "sent"
+        else:
+            result = "capped"
+    else:
+        # No account — do nothing, send no email, still return 200 (no existence leak).
+        result = "noop"
+
+    # Best-effort audit in its own transaction (mirrors signup_requested): server-side
+    # only, so an audit hiccup never fails the request and the response stays uniform.
+    await _audit_login_event(
+        "password_reset_requested", email, details={"result": result}, best_effort=True
     )
     return {"status": "ok"}
 
