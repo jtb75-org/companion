@@ -524,13 +524,15 @@ async def _issue_and_send_reset(email: str, name: str) -> None:
     adjust its copy. A token or send failure must NOT change the uniform 200 response
     (anti-enumeration), so we log and continue.
 
-    DEFERRED pre-PHI launch gates (tracked by coordinator, intentionally NOT done here):
-      (a) Session invalidation on reset — revoke the account's existing Authentik
-          sessions after the password is reset so a stolen live session can't outlive it.
-      (b) Timing-equalize the send — dispatch this in the background so the
-          account-exists path isn't measurably slower than the no-account path (a
-          timing side-channel that partially undermines anti-enumeration; same latent
-          issue as /auth/signup, to be fixed uniformly)."""
+    Session invalidation on reset is handled at REDEMPTION, not here: set-password
+    revokes every live BFF session of the account once the new password is actually set
+    (``app/api/v1/activation._revoke_sessions_for_email``). Merely requesting a reset
+    must not evict anyone — that would let an unauthenticated attacker log a victim out
+    of every device by spamming this endpoint with their address.
+
+    Timing: this runs off the request path (``_process_reset_request`` via
+    ``BackgroundTasks``) so the account-exists branch can't be measured against the
+    no-account branch — see ``forgot_password``."""
     try:
         token = await issue_activation_token(email)
         reset_url = f"{APP_URL}/activate?token={token}&reset=1"
