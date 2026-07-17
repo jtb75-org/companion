@@ -95,3 +95,14 @@ export async function api<T>(
 
   return res.json()
 }
+
+// Request a password-reset email. The backend ALWAYS returns 200 {"status":"ok"}
+// for a valid request shape (anti-enumeration: it never reveals whether the
+// address exists), throws with `.status === 429` when rate-limited, and 422 on
+// an invalid email. Callers must show the same confirmation for any success.
+export async function forgotPassword(email: string): Promise<{ status: string }> {
+  return api<{ status: string }>('/auth/forgot-password', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+}

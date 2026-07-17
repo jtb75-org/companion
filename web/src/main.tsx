@@ -14,6 +14,7 @@ import { AdminLayout } from './admin/AdminLayout'
 import AcceptInvitationPage from './shared/invite/AcceptInvitationPage'
 import InvitationExpiredPage from './shared/invite/InvitationExpiredPage'
 import ActivatePage from './shared/activate/ActivatePage'
+import ForgotPasswordPage from './shared/forgot/ForgotPasswordPage'
 import './index.css'
 
 const queryClient = new QueryClient({
@@ -32,6 +33,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
             <Route path="/invite/accept" element={<AcceptInvitationPage />} />
             <Route path="/activate" element={<ActivatePage />} />
             <Route path="/invite/expired" element={<InvitationExpiredPage />} />
