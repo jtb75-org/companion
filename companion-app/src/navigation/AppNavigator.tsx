@@ -100,9 +100,12 @@ export function AppNavigator() {
       }
     }
     checkProfile()
-    // `user` is kept in deps so Firebase mode re-checks on every auth-state
-    // change exactly as before; `isAuthenticated` drives the Authentik path
-    // (where `user` is always null).
+    // `user` is kept in deps so Firebase mode re-checks on every auth-state change
+    // exactly as before; `isAuthenticated` drives the Authentik path (where `user` is
+    // always null). `signOut` is intentionally NOT a dependency: it's only invoked in the
+    // 401/403 error path, not a trigger for the profile check, and it's recreated each
+    // render — adding it would re-run this effect (and re-hit /me) on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, user])
 
   if (loading) return null
