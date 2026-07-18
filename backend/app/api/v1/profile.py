@@ -1,15 +1,13 @@
 """Profile completion endpoint."""
 
+import logging
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import logging
-
 from app.auth.firebase import verify_firebase_token
 from app.auth.principal import resolve_session_principal
-
-log = logging.getLogger(__name__)
 from app.config import settings
 from app.db import get_db
 from app.db.context import set_login_email_context, set_user_context
@@ -17,6 +15,8 @@ from app.models.audit import AccountAuditLog
 from app.models.enums import AccountStatus
 from app.models.trusted_contact import TrustedContact
 from app.models.user import User
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Profile"])
 
