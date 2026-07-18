@@ -27,8 +27,8 @@ export default function AcceptInvitationPage() {
   const [error, setError] = useState('')
   const [accepting, setAccepting] = useState(false)
 
-  // Inline email/password login (Authentik mode). On success `user` becomes
-  // truthy and the accept effect above fires with the same token still in the URL.
+  // Inline email/password login (Authentik mode). On success the session cookie is set
+  // and the handler calls acceptAndEnter() directly with the token still in the URL.
   const [loginEmail, setLoginEmail] = useState('')
   const [loginPassword, setLoginPassword] = useState('')
   const [loginError, setLoginError] = useState('')
@@ -46,8 +46,9 @@ export default function AcceptInvitationPage() {
     }
   }
 
-  // First-time invitee (Authentik mode): set a password, then sign in with it so
-  // the accept effect below runs. The email is fixed to the invited address.
+  // First-time invitee (Authentik mode): set a password, sign in with it to mint the
+  // session cookie, then acceptAndEnter() directly. The email is fixed to the invited
+  // address.
   const [newPassword, setNewPassword] = useState('')
   const [setupError, setSetupError] = useState('')
   const [settingUp, setSettingUp] = useState(false)
