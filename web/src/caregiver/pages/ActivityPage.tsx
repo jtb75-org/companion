@@ -7,34 +7,35 @@ interface ActivityEntry {
   timestamp: string
 }
 
-const placeholderActivity: ActivityEntry[] = [
-  { id: '1', action: 'You viewed the dashboard', timestamp: '2026-03-27T14:15:00Z' },
-  { id: '2', action: 'You checked medication adherence', timestamp: '2026-03-27T10:30:00Z' },
-  { id: '3', action: 'You reviewed upcoming bills', timestamp: '2026-03-26T16:45:00Z' },
-]
-
 interface Props {
   userId: string
 }
 
 export function ActivityPage({ userId }: Props) {
-  const { data: activity, isLoading } = useQuery({
+  const { data: activity, isLoading, isError } = useQuery({
     queryKey: ['caregiver-activity', userId],
-    queryFn: async () => {
-      try {
-        return await api<ActivityEntry[]>(`/api/v1/caregiver/activity?user_id=${userId}`)
-      } catch {
-        return placeholderActivity
-      }
-    },
+    // No try/catch fallback: a failed load must surface, not be replaced with fabricated
+    // activity rows that imply the caregiver did things they never did.
+    queryFn: () => api<ActivityEntry[]>(`/api/v1/caregiver/activity?user_id=${userId}`),
     enabled: !!userId,
   })
-
-  const entries = Array.isArray(activity) ? activity : placeholderActivity
 
   if (isLoading) {
     return <p className="text-gray-500">Loading activity...</p>
   }
+
+  if (isError) {
+    return (
+      <div>
+        <h1 className="text-xl font-semibold text-gray-900 mb-4">Your Activity</h1>
+        <p className="text-sm text-red-600">
+          We couldn't load your activity right now. Please refresh in a moment.
+        </p>
+      </div>
+    )
+  }
+
+  const entries = Array.isArray(activity) ? activity : []
 
   return (
     <div>

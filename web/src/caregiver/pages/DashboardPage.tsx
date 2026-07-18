@@ -11,49 +11,50 @@ interface DashboardData {
   upcoming_appointments: { description: string; date: string }[]
 }
 
-const placeholderData: DashboardData = {
-  status: 'managing_well',
-  tasks: { completed: 4, total: 5 },
-  medication_adherence: 0.92,
-  upcoming_bills: [
-    { description: 'Electric bill', due_date: '2026-04-01', amount: '$142.50' },
-    { description: 'Internet', due_date: '2026-04-05', amount: '$65.00' },
-  ],
-  upcoming_appointments: [
-    { description: 'Dr. Chen - Annual checkup', date: '2026-04-03' },
-  ],
-}
-
 interface Props {
   userId: string
 }
 
 export function DashboardPage({ userId }: Props) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: ['caregiver-dashboard', userId],
-    queryFn: async () => {
-      try {
-        return await api<DashboardData>(`/api/v1/caregiver/dashboard?user_id=${userId}`)
-      } catch {
-        return placeholderData
-      }
-    },
+    // No try/catch fallback: a failed load must surface, NOT be replaced with a calm
+    // fabricated "Managing Well" state a caregiver could act on. See the isError branch.
+    queryFn: () => api<DashboardData>(`/api/v1/caregiver/dashboard?user_id=${userId}`),
     enabled: !!userId,
   })
 
-  const raw = data ?? placeholderData
+  if (isLoading) {
+    return <p className="text-gray-500">Loading dashboard...</p>
+  }
+
+  // Never fabricate care data. If the dashboard can't load, say so plainly and show no
+  // status — a false "all is well" is the most dangerous thing to put in front of a
+  // caregiver.
+  if (isError || !data) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-xl font-semibold text-gray-900">Caregiver Dashboard</h1>
+        <Card title="Dashboard unavailable">
+          <p className="text-sm text-red-600">
+            We couldn't load this dashboard right now, so we're not showing a status.
+            This doesn't necessarily mean anything is wrong — only that the latest
+            information couldn't be reached. Please refresh in a moment.
+          </p>
+        </Card>
+      </div>
+    )
+  }
+
+  const raw = data
   const dashboard = {
-    status: raw.status ?? 'managing_well',
+    status: raw.status,
     tasks: raw.tasks ?? { completed: 0, total: 0 },
     medication_adherence: raw.medication_adherence ?? 0,
     upcoming_bills: Array.isArray(raw.upcoming_bills)
       ? raw.upcoming_bills : [],
     upcoming_appointments: Array.isArray(raw.upcoming_appointments)
       ? raw.upcoming_appointments : [],
-  }
-
-  if (isLoading) {
-    return <p className="text-gray-500">Loading dashboard...</p>
   }
 
   const adherencePct = Math.round(dashboard.medication_adherence * 100)
@@ -63,12 +64,17 @@ export function DashboardPage({ userId }: Props) {
       <h1 className="text-xl font-semibold text-gray-900">Caregiver Dashboard</h1>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {/* Status */}
+        {/* Status — only render a verdict the data actually reported. A missing/unknown
+            status must NOT default to either "Managing Well" (false calm) or "Needs
+            Attention" (false alarm). */}
         <Card title="Status">
-          <StatusBadge
-            status={dashboard.status === 'managing_well' ? 'healthy' : 'warning'}
-            label={dashboard.status === 'managing_well' ? 'Managing Well' : 'Needs Attention'}
-          />
+          {dashboard.status === 'managing_well' ? (
+            <StatusBadge status="healthy" label="Managing Well" />
+          ) : dashboard.status === 'needs_attention' ? (
+            <StatusBadge status="warning" label="Needs Attention" />
+          ) : (
+            <span className="text-sm text-gray-500">Status unavailable</span>
+          )}
         </Card>
 
         {/* Tasks */}
