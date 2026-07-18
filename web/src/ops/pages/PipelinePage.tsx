@@ -1,8 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { collection, onSnapshot } from 'firebase/firestore'
 import { api } from '../../shared/api/client'
-import { db } from '../../shared/auth/firebase'
 import { Card } from '../../shared/components/Card'
 import { StatusBadge } from '../../shared/components/StatusBadge'
 
@@ -420,69 +418,6 @@ function DocumentCard({
 }
 
 // ---------------------------------------------------------------------------
-// Firestore Real-Time Hook
-// ---------------------------------------------------------------------------
-
-function usePipelineFirestore(
-  setDocuments: React.Dispatch<React.SetStateAction<PipelineDocument[]>>,
-) {
-  const [connected, setConnected] = useState(false)
-
-  useEffect(() => {
-    const unsubscribe = onSnapshot(
-      collection(db, 'pipeline_events'),
-      (snapshot) => {
-        setConnected(true)
-        snapshot.docChanges().forEach((change) => {
-          if (change.type === 'added' || change.type === 'modified') {
-            const docId = change.doc.id
-            const data = change.doc.data()
-
-            setDocuments((prev) => {
-              const idx = prev.findIndex((d) => d.id === docId)
-              if (idx < 0) return prev
-
-              const next = [...prev]
-              const existing = { ...next[idx] }
-              const stages = [...(existing.pipeline_stages || [])]
-
-              // Update stages from Firestore document fields
-              for (const stageName of PIPELINE_STAGE_ORDER) {
-                const key = stageName.toLowerCase()
-                if (data[key]) {
-                  const si = stages.findIndex((s) => s.stage === stageName)
-                  const stageData: PipelineStage = {
-                    stage: stageName,
-                    status: data[key] as PipelineStage['status'],
-                  }
-                  if (si >= 0) {
-                    stages[si] = stageData
-                  } else {
-                    stages.push(stageData)
-                  }
-                }
-              }
-              existing.pipeline_stages = stages
-              next[idx] = existing
-              return next
-            })
-          }
-        })
-      },
-      (err) => {
-        // Firestore listener failed (rules, network, etc.)
-        // Polling fallback handles updates — don't show disconnected
-        console.warn('Firestore listener error:', err)
-      },
-    )
-
-    return () => unsubscribe()
-  }, [setDocuments])
-
-  return connected
-}
-
-// ---------------------------------------------------------------------------
 // Reprocess Button
 // ---------------------------------------------------------------------------
 
@@ -590,9 +525,6 @@ export function PipelinePage() {
 
   const health = healthData ?? placeholderHealth
 
-  // --- Firestore for real-time updates ---
-  const firestoreConnected = usePipelineFirestore(setDocuments)
-
   // --- Actions ---
   const handleCancel = async (id: string) => {
     if (!window.confirm('Cancel processing for this document?')) return
@@ -647,13 +579,13 @@ export function PipelinePage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-semibold text-gray-900">Pipeline</h1>
-          {/* Live indicator */}
+          {/* Refresh indicator — the list polls /admin/documents every 5s */}
           <div className="flex items-center gap-1.5">
             <div
               className={`h-2 w-2 rounded-full ${!docsLoading ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`}
             />
             <span className={`text-xs font-medium ${!docsLoading ? 'text-emerald-600' : 'text-amber-600'}`}>
-              {firestoreConnected ? 'Live' : 'Polling'}
+              {docsLoading ? 'Connecting' : 'Polling'}
             </span>
           </div>
         </div>
