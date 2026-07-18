@@ -108,4 +108,10 @@ async def check_auth(
     )
     response["has_account"] = user_record is not None
 
+    # Hand the double-submit CSRF token back to the SPA. The web app is served from a
+    # different subdomain than this API, so it can't read the host-only companion_csrf
+    # cookie set at login; on a fresh page load it recovers the token here (this endpoint
+    # CAN read the cookie the browser sent) and echoes it as X-CSRF-Token on writes.
+    response["csrf_token"] = request.cookies.get(settings.csrf_cookie_name)
+
     return response

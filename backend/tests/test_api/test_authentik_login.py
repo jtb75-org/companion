@@ -220,9 +220,11 @@ async def test_login_succeeds_for_invited_stub(monkeypatch):
 
 @requires_db
 async def test_login_web_omits_session_token_from_body(monkeypatch):
-    """Web clients (mobile not set) get the session ONLY via the httpOnly cookie —
-    the opaque sid must never appear in the JSON body where browser JS could read
-    it, preserving the full httpOnly/XSS posture (safety follow-up)."""
+    """Web clients (mobile not set) get the SESSION only via the httpOnly cookie — the
+    opaque sid must never appear in the JSON body where browser JS could read it,
+    preserving the httpOnly/XSS posture. The csrf token IS returned in the body (it is
+    already a readable/non-httpOnly value) so the cross-subdomain SPA can echo it as
+    X-CSRF-Token without reading the host-only cookie."""
     email = "authentik-web@example.com"
     await _delete_user(email)
     async with db_module.async_session_factory() as s:
@@ -241,9 +243,11 @@ async def test_login_web_omits_session_token_from_body(monkeypatch):
         r = await ac.post(_LOGIN, json={"username": email, "password": "pw"})
     assert r.status_code == 200
     body = r.json()
-    assert body == {"status": "ok"}
+    # The sid must NOT be in the body; the csrf token MUST be, and match the cookie.
     assert "session_token" not in body
-    assert "csrf_token" not in body
+    assert body["csrf_token"]
+    assert body["csrf_token"] == r.cookies["companion_csrf"]
+    assert "companion_sid" in {c for c in r.cookies}
     # The session still exists — delivered via the httpOnly cookie only.
     assert "companion_sid" in {c for c in r.cookies}
     await _delete_user(email)

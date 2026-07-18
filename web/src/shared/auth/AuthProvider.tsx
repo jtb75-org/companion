@@ -8,6 +8,7 @@ import {
   createUserWithEmailAndPassword,
 } from 'firebase/auth'
 import { auth, googleProvider } from './firebase'
+import { setCsrfToken } from '../api/client'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
 const AUTH_PROVIDER = import.meta.env.VITE_AUTH_PROVIDER || 'firebase'
@@ -148,6 +149,7 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
     setAdminRole(null)
     setProfileComplete(null)
     setCaregiverUsers(null)
+    setCsrfToken(null)
   }
 
   // Resolve the current session from the ambient cookie. Mirrors the Firebase
@@ -166,6 +168,9 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
         setProfileComplete(data.profile_complete ?? true)
         setCaregiverUsers(data.has_charges ? [] : null)
         setUser({ email: data.email ?? '' })
+        // Recover the double-submit CSRF token on a fresh load (the SPA can't read the
+        // host-only cross-subdomain cookie); the API returns it in the check body.
+        if (data.csrf_token) setCsrfToken(data.csrf_token)
       } else {
         clearSession()
       }
@@ -199,6 +204,12 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
         body: JSON.stringify({ username: email, password }),
       })
       if (res.ok) {
+        // Store the CSRF token from the login body FIRST. A first-time caregiver invitee
+        // is still PENDING, so the checkSession() below 403s and delivers nothing — but
+        // acceptAndEnter must POST /invitations/accept with X-CSRF-Token right after. So
+        // the token has to come from the login body, not the check.
+        const data = await res.json().catch(() => ({}))
+        if (data.csrf_token) setCsrfToken(data.csrf_token)
         await checkSession()
         return
       }

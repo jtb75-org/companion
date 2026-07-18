@@ -12,6 +12,16 @@ function readCookie(name: string): string | null {
   return match ? decodeURIComponent(match[1]) : null
 }
 
+// The CSRF double-submit token, delivered in the /auth/login and /auth/check response
+// BODIES and held here. The web app is on a different subdomain than the API, so the
+// host-only companion_csrf cookie set by the API is unreadable to document.cookie —
+// reading it from the body is how the SPA can echo X-CSRF-Token on writes. AuthProvider
+// sets this on login and on session check, and clears it on logout.
+let csrfToken: string | null = null
+export function setCsrfToken(token: string | null): void {
+  csrfToken = token
+}
+
 export async function api<T>(
   path: string,
   options?: RequestInit
@@ -31,7 +41,9 @@ export async function api<T>(
   if (AUTH_PROVIDER === 'authentik') {
     const method = (options?.method || 'GET').toUpperCase()
     if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
-      const csrf = readCookie('companion_csrf')
+      // Prefer the body-delivered token (cross-subdomain); fall back to the readable
+      // cookie for any same-origin deployment.
+      const csrf = csrfToken ?? readCookie('companion_csrf')
       if (csrf) {
         headers['X-CSRF-Token'] = csrf
       }
