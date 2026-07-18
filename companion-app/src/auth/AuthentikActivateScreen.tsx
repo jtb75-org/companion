@@ -16,9 +16,7 @@ import { colors, brand } from '../theme/colors'
 /**
  * "Set your password" screen, opened from the link in a member's email.
  *
- * Only reachable when AUTH_PROVIDER === 'authentik' (AppNavigator routes here on
- * an inbound /activate deep link). In Firebase mode this screen is never
- * mounted and the app behaves exactly as before.
+ * Reached when AppNavigator routes here on an inbound /activate deep link.
  *
  * Flow:
  *   1. On mount, check the link (GET /activation/validate). A good link greets

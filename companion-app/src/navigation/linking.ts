@@ -14,8 +14,8 @@
  * When the app is installed, iOS Associated Domains / Android App Links open
  * the app directly on this URL; otherwise it falls back to the web page.
  *
- * This module only PARSES the URL — routing lives in AppNavigator, gated on
- * AUTH_PROVIDER === 'authentik'. Parsing is deliberately defensive: a malformed
+ * This module only PARSES the URL — routing lives in AppNavigator. Parsing is
+ * deliberately defensive: a malformed
  * or unrelated link returns null (no throw, no crash), and the caller shows the
  * calm "this link did not work" state.
  */

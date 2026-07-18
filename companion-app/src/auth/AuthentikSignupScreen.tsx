@@ -9,9 +9,7 @@ import { colors, brand } from '../theme/colors'
 
 /**
  * Member self-signup ("Create account") screen for the self-hosted (Authentik)
- * path. Only rendered when AUTH_PROVIDER === 'authentik' (the login screen it is
- * launched from is itself gated behind that flag). In Firebase mode this screen
- * is never mounted and the app behaves exactly as before.
+ * path. Launched from the login screen.
  *
  * Two phases:
  *   1. 'form'  — collect a name + email, then POST /auth/signup.

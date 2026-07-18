@@ -41,7 +41,7 @@ const STATUS_COLORS: Record<string, string> = {
 }
 
 export function ProfileScreen() {
-  const { user, signOut } = useAuth()
+  const { signOut } = useAuth()
   const [profile, setProfile] = useState<ProfileData | null>(null)
   const [caregivers, setCaregivers] = useState<Caregiver[]>([])
   const [loadingCaregivers, setLoadingCaregivers] = useState(true)
@@ -71,7 +71,7 @@ export function ProfileScreen() {
     loadCaregivers()
   }, [loadCaregivers])
 
-  const displayName = profile?.preferred_name || profile?.display_name || user?.displayName || 'Member'
+  const displayName = profile?.preferred_name || profile?.display_name || 'Member'
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -83,7 +83,6 @@ export function ProfileScreen() {
           </Text>
         </View>
         <Text style={styles.name}>{displayName}</Text>
-        <Text style={styles.email}>{user?.email}</Text>
         {profile?.phone && <Text style={styles.phone}>{profile.phone}</Text>}
       </View>
 

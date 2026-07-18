@@ -6,12 +6,10 @@ import { TodayScreen } from '../screens/TodayScreen'
 import { ChatScreen } from '../screens/ChatScreen'
 import { MyStuffScreen } from '../screens/MyStuffScreen'
 import { ProfileScreen } from '../screens/ProfileScreen'
-import { LoginScreen } from '../auth/LoginScreen'
 import { AuthentikLoginScreen } from '../auth/AuthentikLoginScreen'
 import { AuthentikActivateScreen } from '../auth/AuthentikActivateScreen'
 import { OnboardingScreen } from '../auth/OnboardingScreen'
 import { useAuth } from '../auth/AuthProvider'
-import { AUTH_PROVIDER } from '../auth/authConfig'
 import { ActivationLink, parseActivationLink } from './linking'
 import { api, ApiError } from '../api/client'
 import { usePushNotifications } from '../hooks/usePushNotifications'
@@ -34,21 +32,18 @@ function TabIcon({ label, focused }: { label: string; focused: boolean }) {
 }
 
 export function AppNavigator() {
-  const { user, isAuthenticated, loading, signOut } = useAuth()
+  const { isAuthenticated, loading, signOut } = useAuth()
   const [profileComplete, setProfileComplete] = useState<boolean | null>(null)
   // Pending account-activation link ({token, reset}) from an inbound /activate
-  // deep link. Authentik-only: in Firebase mode this stays null and the screen is
-  // never shown, so the live path is completely unchanged.
+  // deep link.
   const [activationLink, setActivationLink] = useState<ActivationLink | null>(null)
   usePushNotifications(profileComplete === true)
 
   // Handle the account-activation / password-reset universal / app link:
   //   https://app.mydailydignity.com/activate?token=...[&reset=1]
-  // Cold start via getInitialURL, warm via the 'url' event. Only acts under
-  // AUTH_PROVIDER === 'authentik'; under firebase the link is ignored (inert).
+  // Cold start via getInitialURL, warm via the 'url' event.
   // `reset` only picks the screen's wording — both flavors route the same way.
   useEffect(() => {
-    if (AUTH_PROVIDER !== 'authentik') return
     let cancelled = false
 
     const handleUrl = (url: string | null | undefined) => {
@@ -100,23 +95,22 @@ export function AppNavigator() {
       }
     }
     checkProfile()
-    // `user` is kept in deps so Firebase mode re-checks on every auth-state change
-    // exactly as before; `isAuthenticated` drives the Authentik path (where `user` is
-    // always null). `signOut` is intentionally NOT a dependency: it's only invoked in the
-    // 401/403 error path, not a trigger for the profile check, and it's recreated each
-    // render — adding it would re-run this effect (and re-hit /me) on every render.
+    // `isAuthenticated` drives the check (it flips true once the Authentik session
+    // token is present). `signOut` is intentionally NOT a dependency: it's only
+    // invoked in the 401/403 error path, not a trigger for the profile check, and it's
+    // recreated each render — adding it would re-run this effect (and re-hit /me) on
+    // every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthenticated, user])
+  }, [isAuthenticated])
 
   if (loading) return null
 
   if (!isAuthenticated) {
-    // A member who tapped their email link lands on "set your password" first
-    // (Authentik only) — for a first-time invite OR a password reset, which is
-    // the same screen with reset-flavored copy. After they set it, AuthProvider
-    // signs them in and this branch is left automatically. "Back to Sign In"
-    // clears the link.
-    if (AUTH_PROVIDER === 'authentik' && activationLink) {
+    // A member who tapped their email link lands on "set your password" first —
+    // for a first-time invite OR a password reset, which is the same screen with
+    // reset-flavored copy. After they set it, AuthProvider signs them in and this
+    // branch is left automatically. "Back to Sign In" clears the link.
+    if (activationLink) {
       return (
         <AuthentikActivateScreen
           token={activationLink.token}
@@ -125,7 +119,7 @@ export function AppNavigator() {
         />
       )
     }
-    return AUTH_PROVIDER === 'authentik' ? <AuthentikLoginScreen /> : <LoginScreen />
+    return <AuthentikLoginScreen />
   }
 
   if (profileComplete === null) {

@@ -1,5 +1,3 @@
-import auth from '@react-native-firebase/auth'
-import { AUTH_PROVIDER } from '../auth/authConfig'
 import { getSessionTokenSync } from '../auth/sessionToken'
 
 // Self-hosted prod backend (staging Cloud Run is retired). Point dev at a
@@ -9,23 +7,18 @@ export const API_BASE = __DEV__
   : 'https://api.mydailydignity.com'
 
 /**
- * The dual-run Authorization header for an authenticated request. Under Authentik it is
- * the opaque session bearer (Keychain); under Firebase the ID token. Returns {} when
- * unauthenticated. This is the SINGLE place the auth scheme is chosen, so every caller —
- * including the multipart document-scan endpoints that can't use api() (they send
- * FormData, not JSON) — stays correct across the cutover.
+ * The Authorization header for an authenticated request: the opaque Authentik
+ * (self-hosted BFF) session bearer read from the Keychain-backed cache. Returns
+ * {} when unauthenticated. This is the SINGLE place the auth scheme is chosen, so
+ * every caller — including the multipart document-scan endpoints that can't use
+ * api() (they send FormData, not JSON) — stays correct.
+ *
+ * Kept async so callers (and the FormData scan endpoints) don't have to change.
  */
 export async function getAuthHeader(): Promise<Record<string, string>> {
-  if (AUTH_PROVIDER === 'authentik') {
-    // Self-hosted BFF: attach the opaque session token as a non-ambient bearer.
-    const sessionToken = getSessionTokenSync()
-    return sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}
-  }
-  // Firebase (legacy path) — unchanged behavior.
-  const user = auth().currentUser
-  if (!user) return {}
-  const token = await user.getIdToken()
-  return { Authorization: `Bearer ${token}` }
+  // Self-hosted BFF: attach the opaque session token as a non-ambient bearer.
+  const sessionToken = getSessionTokenSync()
+  return sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}
 }
 
 /** Carries the HTTP status so callers can act on it (e.g. clear the session on 401). */

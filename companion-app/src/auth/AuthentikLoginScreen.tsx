@@ -11,10 +11,8 @@ import { authStrings } from './authStrings'
 import { colors, brand } from '../theme/colors'
 
 /**
- * Username/password login for the self-hosted (Authentik) path.
- *
- * Only rendered when AUTH_PROVIDER === 'authentik'. In Firebase mode this
- * screen is never mounted and the app behaves exactly as before.
+ * Username/password login for the self-hosted (Authentik) path. This is the
+ * app's sole sign-in screen.
  *
  * All user-facing copy comes from `authStrings` so it can be reviewed in one
  * place. Errors are mapped from the HTTP status to calm, plain-language text.
@@ -56,7 +54,7 @@ export function AuthentikLoginScreen() {
     try {
       await signInWithPassword(username.trim(), password)
       // On success the AuthProvider flips isAuthenticated, and AppNavigator
-      // routes into the app exactly like a successful Firebase login.
+      // routes into the app.
     } catch (e) {
       const status = e instanceof AuthLoginError ? e.status : null
       setError(messageForStatus(status))

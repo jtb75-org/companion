@@ -7,9 +7,6 @@
  *
  * Everything else in the app reads the token through this module (via the
  * in-memory cache), so the storage backend is isolated to this one file.
- *
- * This is authentik-mode-only. In Firebase mode none of these functions are
- * called, so the keychain is never touched.
  */
 import * as Keychain from 'react-native-keychain'
 
