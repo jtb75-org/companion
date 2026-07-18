@@ -677,8 +677,10 @@ export function PipelinePage() {
         </div>
       ) : null}
 
-      {/* Recent failures */}
-      {healthData && healthData.recent_failures.length > 0 && (
+      {/* Recent failures — suppressed when health is erroring, so a failed refetch that
+          retains stale data (TanStack v5 keeps `data` on refetch error) can't show the
+          error card AND stale failures at once. */}
+      {!healthError && healthData && healthData.recent_failures.length > 0 && (
         <Card title="Recent Failures">
           <div className="space-y-2">
             {healthData.recent_failures.map((f, i) => (
