@@ -3,12 +3,17 @@ import { api } from '../../shared/api/client'
 import { Card } from '../../shared/components/Card'
 import { StatusBadge } from '../../shared/components/StatusBadge'
 
+// Mirrors what backend caregiver_service.get_dashboard_summary actually returns.
+// active_medications and upcoming_appointments are COUNTS, not lists; there is no
+// medication_adherence field — rendering a fabricated one showed a false "0% / every
+// dose missed" alarm on a clean load. Extra list fields (overdue_bills_list,
+// recent_documents) are read defensively via `raw as any` in the render below.
 interface DashboardData {
-  status: 'managing_well' | 'needs_attention'
-  tasks: { completed: number; total: number }
-  medication_adherence: number
-  upcoming_bills: { description: string; due_date: string; amount: string }[]
-  upcoming_appointments: { description: string; date: string }[]
+  status?: 'managing_well' | 'needs_attention'
+  tasks?: { completed: number; total: number }
+  active_medications?: number
+  upcoming_appointments?: number
+  upcoming_bills?: { description: string; due_date: string; amount: string }[]
 }
 
 interface Props {
@@ -50,14 +55,11 @@ export function DashboardPage({ userId }: Props) {
   const dashboard = {
     status: raw.status,
     tasks: raw.tasks ?? { completed: 0, total: 0 },
-    medication_adherence: raw.medication_adherence ?? 0,
+    active_medications: raw.active_medications ?? 0,
+    upcoming_appointments: raw.upcoming_appointments ?? 0,
     upcoming_bills: Array.isArray(raw.upcoming_bills)
       ? raw.upcoming_bills : [],
-    upcoming_appointments: Array.isArray(raw.upcoming_appointments)
-      ? raw.upcoming_appointments : [],
   }
-
-  const adherencePct = Math.round(dashboard.medication_adherence * 100)
 
   return (
     <div className="space-y-6">
@@ -87,14 +89,13 @@ export function DashboardPage({ userId }: Props) {
           </div>
         </Card>
 
-        {/* Medication Adherence */}
-        <Card title="Medication Adherence" subtitle={`${adherencePct}%`}>
-          <div className="w-full bg-gray-200 rounded-full h-2.5">
-            <div
-              className={`h-2.5 rounded-full ${adherencePct >= 80 ? 'bg-companion-sage' : 'bg-companion-amber'}`}
-              style={{ width: `${adherencePct}%` }}
-            />
-          </div>
+        {/* Active Medications — the backend returns a count, not an adherence rate.
+            (Adherence isn't computed server-side; don't invent a percentage.) */}
+        <Card
+          title="Active Medications"
+          subtitle={dashboard.active_medications === 1 ? '1 active' : `${dashboard.active_medications} active`}
+        >
+          <p className="text-2xl font-semibold text-gray-800">{dashboard.active_medications}</p>
         </Card>
       </div>
 
@@ -133,19 +134,16 @@ export function DashboardPage({ userId }: Props) {
           )}
         </Card>
 
-        {/* Upcoming Appointments */}
+        {/* Upcoming Appointments — backend returns a count only, not a list. */}
         <Card title="Upcoming Appointments">
-          {dashboard.upcoming_appointments.length === 0 ? (
+          {dashboard.upcoming_appointments === 0 ? (
             <p className="text-sm text-gray-500">No upcoming appointments.</p>
           ) : (
-            <ul className="space-y-2">
-              {dashboard.upcoming_appointments.map((appt, i) => (
-                <li key={i} className="flex justify-between text-sm">
-                  <span className="text-gray-700">{appt.description}</span>
-                  <span className="text-gray-500">{new Date(appt.date).toLocaleDateString()}</span>
-                </li>
-              ))}
-            </ul>
+            <p className="text-sm text-gray-700">
+              {dashboard.upcoming_appointments === 1
+                ? '1 upcoming appointment'
+                : `${dashboard.upcoming_appointments} upcoming appointments`}
+            </p>
           )}
         </Card>
       </div>
