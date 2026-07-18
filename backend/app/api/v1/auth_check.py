@@ -1,6 +1,6 @@
 """Auth check endpoint — called by web dashboard after Firebase login."""
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ router = APIRouter(tags=["Auth"])
 @router.get("/api/v1/auth/check")
 async def check_auth(
     request: Request,
+    resp: Response,
     db: AsyncSession = Depends(get_db),
     authorization: str | None = Header(None, alias="Authorization"),
 ):
@@ -113,5 +114,9 @@ async def check_auth(
     # cookie set at login; on a fresh page load it recovers the token here (this endpoint
     # CAN read the cookie the browser sent) and echoes it as X-CSRF-Token on writes.
     response["csrf_token"] = request.cookies.get(settings.csrf_cookie_name)
+
+    # This response carries the CSRF token + identity fields (email/role). Never cache it
+    # (defense in depth against a misconfigured shared cache/CDN; safety follow-up).
+    resp.headers["Cache-Control"] = "no-store"
 
     return response

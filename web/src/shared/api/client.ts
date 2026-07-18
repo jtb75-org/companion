@@ -21,6 +21,10 @@ let csrfToken: string | null = null
 export function setCsrfToken(token: string | null): void {
   csrfToken = token
 }
+// For raw fetches outside api() (e.g. logout) that still need the double-submit header.
+export function getCsrfToken(): string | null {
+  return csrfToken ?? readCookie('companion_csrf')
+}
 
 export async function api<T>(
   path: string,
