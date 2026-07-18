@@ -61,19 +61,6 @@ const PIPELINE_STAGE_ORDER = [
   'Routing',
 ]
 
-const placeholderHealth: PipelineHealth = {
-  documents_in_flight: 0,
-  stages: [
-    { stage: 'Ingestion', success_rate: 0.99, avg_time_ms: 120, status: 'healthy' },
-    { stage: 'Classification', success_rate: 0.97, avg_time_ms: 340, status: 'healthy' },
-    { stage: 'Extraction', success_rate: 0.94, avg_time_ms: 520, status: 'healthy' },
-    { stage: 'Summarization', success_rate: 0.96, avg_time_ms: 1800, status: 'healthy' },
-    { stage: 'Routing', success_rate: 0.98, avg_time_ms: 45, status: 'healthy' },
-    { stage: 'Tracking', success_rate: 1.0, avg_time_ms: 30, status: 'healthy' },
-  ],
-  recent_failures: [],
-}
-
 // ---------------------------------------------------------------------------
 // Pipeline Stepper
 // ---------------------------------------------------------------------------
@@ -488,42 +475,43 @@ export function PipelinePage() {
   }, [docsData])
 
   // --- Fetch pipeline health (stage health cards) ---
-  const { data: healthData } = useQuery({
+  // No placeholder/fallback. A failed health fetch must surface as an error, NOT
+  // masquerade as "healthy 99%". The render distinguishes three real states: skeleton
+  // while loading, an error card on failure, and real cards only once real data arrives.
+  const {
+    data: healthData,
+    isLoading: healthLoading,
+    isError: healthError,
+  } = useQuery({
     queryKey: ['pipeline-health'],
     queryFn: async () => {
-      try {
-        const raw = await api<Record<string, unknown>>('/admin/pipeline/health')
-        let stages: StageHealth[] = []
-        if (Array.isArray(raw.stages)) {
-          stages = raw.stages
-        } else if (raw.stages && typeof raw.stages === 'object') {
-          stages = Object.entries(raw.stages as Record<string, Record<string, unknown>>).map(
-            ([name, s]) => ({
-              stage: name.charAt(0).toUpperCase() + name.slice(1),
-              success_rate: (s.success_rate as number) ?? 1,
-              avg_time_ms: (s.avg_ms as number) ?? 0,
-              status: ((s.success_rate as number) >= 0.95
-                ? 'healthy'
-                : (s.success_rate as number) >= 0.85
-                  ? 'warning'
-                  : 'critical') as StageHealth['status'],
-            }),
-          )
-        }
-        return {
-          documents_in_flight: (raw.documents_in_flight as number) ?? 0,
-          stages,
-          recent_failures: Array.isArray(raw.recent_failures)
-            ? (raw.recent_failures as PipelineHealth['recent_failures'])
-            : [],
-        }
-      } catch {
-        return placeholderHealth
+      const raw = await api<Record<string, unknown>>('/admin/pipeline/health')
+      let stages: StageHealth[] = []
+      if (Array.isArray(raw.stages)) {
+        stages = raw.stages
+      } else if (raw.stages && typeof raw.stages === 'object') {
+        stages = Object.entries(raw.stages as Record<string, Record<string, unknown>>).map(
+          ([name, s]) => ({
+            stage: name.charAt(0).toUpperCase() + name.slice(1),
+            success_rate: (s.success_rate as number) ?? 1,
+            avg_time_ms: (s.avg_ms as number) ?? 0,
+            status: ((s.success_rate as number) >= 0.95
+              ? 'healthy'
+              : (s.success_rate as number) >= 0.85
+                ? 'warning'
+                : 'critical') as StageHealth['status'],
+          }),
+        )
+      }
+      return {
+        documents_in_flight: (raw.documents_in_flight as number) ?? 0,
+        stages,
+        recent_failures: Array.isArray(raw.recent_failures)
+          ? (raw.recent_failures as PipelineHealth['recent_failures'])
+          : [],
       }
     },
   })
-
-  const health = healthData ?? placeholderHealth
 
   // --- Actions ---
   const handleCancel = async (id: string) => {
@@ -639,42 +627,61 @@ export function PipelinePage() {
         </div>
       )}
 
-      {/* Stage health cards */}
-      {health.stages.length > 0 && (
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {health.stages.map((stage) => (
-          <Card key={stage.stage} title={stage.stage}>
-            <div className="flex items-center justify-between mb-2">
-              <StatusBadge status={stage.status} label={stage.status} />
-              <span className="text-xs text-gray-400">{stage.avg_time_ms}ms avg</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="flex-1 bg-gray-200 rounded-full h-2">
-                <div
-                  className={`h-2 rounded-full ${
-                    stage.success_rate >= 0.95
-                      ? 'bg-green-500'
-                      : stage.success_rate >= 0.85
-                        ? 'bg-yellow-500'
-                        : 'bg-red-500'
-                  }`}
-                  style={{ width: `${stage.success_rate * 100}%` }}
-                />
+      {/* Stage health — skeleton while loading, error card on failure, real cards only
+          once real data arrives. Never fabricated numbers. */}
+      {healthLoading ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {PIPELINE_STAGE_ORDER.map((name) => (
+            <Card key={name} title={name}>
+              <div className="animate-pulse space-y-2" aria-hidden>
+                <div className="h-4 w-24 bg-gray-200 rounded" />
+                <div className="h-2 bg-gray-200 rounded-full" />
               </div>
-              <span className="text-sm text-gray-600 w-12 text-right">
-                {Math.round(stage.success_rate * 100)}%
-              </span>
-            </div>
-          </Card>
-        ))}
-      </div>
-      )}
+            </Card>
+          ))}
+        </div>
+      ) : healthError ? (
+        <Card title="Pipeline health">
+          <p className="text-sm text-red-600">
+            Couldn't load pipeline health metrics. This doesn't mean the pipeline is down —
+            only that its health can't be read right now.
+          </p>
+        </Card>
+      ) : healthData && healthData.stages.length > 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {healthData.stages.map((stage) => (
+            <Card key={stage.stage} title={stage.stage}>
+              <div className="flex items-center justify-between mb-2">
+                <StatusBadge status={stage.status} label={stage.status} />
+                <span className="text-xs text-gray-400">{stage.avg_time_ms}ms avg</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex-1 bg-gray-200 rounded-full h-2">
+                  <div
+                    className={`h-2 rounded-full ${
+                      stage.success_rate >= 0.95
+                        ? 'bg-green-500'
+                        : stage.success_rate >= 0.85
+                          ? 'bg-yellow-500'
+                          : 'bg-red-500'
+                    }`}
+                    style={{ width: `${stage.success_rate * 100}%` }}
+                  />
+                </div>
+                <span className="text-sm text-gray-600 w-12 text-right">
+                  {Math.round(stage.success_rate * 100)}%
+                </span>
+              </div>
+            </Card>
+          ))}
+        </div>
+      ) : null}
 
       {/* Recent failures */}
-      {health.recent_failures.length > 0 && (
+      {healthData && healthData.recent_failures.length > 0 && (
         <Card title="Recent Failures">
           <div className="space-y-2">
-            {health.recent_failures.map((f, i) => (
+            {healthData.recent_failures.map((f, i) => (
               <div key={i} className="border border-red-100 bg-red-50 rounded p-3 text-sm">
                 <div className="flex justify-between">
                   <span className="font-medium text-red-800">{f.stage}</span>
