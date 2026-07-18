@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
 import { api } from '../api/client'
@@ -27,8 +27,8 @@ export default function AcceptInvitationPage() {
   const [error, setError] = useState('')
   const [accepting, setAccepting] = useState(false)
 
-  // Inline email/password login (Authentik mode). On success `user` becomes
-  // truthy and the accept effect above fires with the same token still in the URL.
+  // Inline email/password login (Authentik mode). On success the session cookie is set
+  // and the handler calls acceptAndEnter() directly with the token still in the URL.
   const [loginEmail, setLoginEmail] = useState('')
   const [loginPassword, setLoginPassword] = useState('')
   const [loginError, setLoginError] = useState('')
@@ -38,13 +38,17 @@ export default function AcceptInvitationPage() {
     setLoginError('')
     try {
       await loginWithEmail(loginEmail, loginPassword)
+      // The session cookie now exists; accept directly rather than waiting on `user`
+      // (a pending invitee's /auth/check 403s, so `user` would never arrive).
+      await acceptAndEnter()
     } catch (err: any) {
       setLoginError(err.message || 'Sign in failed. Please try again.')
     }
   }
 
-  // First-time invitee (Authentik mode): set a password, then sign in with it so
-  // the accept effect below runs. The email is fixed to the invited address.
+  // First-time invitee (Authentik mode): set a password, sign in with it to mint the
+  // session cookie, then acceptAndEnter() directly. The email is fixed to the invited
+  // address.
   const [newPassword, setNewPassword] = useState('')
   const [setupError, setSetupError] = useState('')
   const [settingUp, setSettingUp] = useState(false)
@@ -59,10 +63,13 @@ export default function AcceptInvitationPage() {
         method: 'POST',
         body: JSON.stringify({ token, password: newPassword }),
       })
-      // Password set on the identity provider — sign in with it. On success `user`
-      // becomes truthy and the accept effect submits the invitation. (No settingUp
-      // reset on success: we navigate away.)
+      // Password set on the identity provider — sign in with it to establish the session
+      // cookie, then accept directly. We do NOT wait for `user`: a first-time invitee is
+      // a PENDING caregiver, so /auth/check 403s and `user` never becomes truthy —
+      // acceptAndEnter is what flips them active. (No settingUp reset on success: it
+      // reloads into the dashboard.)
       await loginWithEmail(invitation.contact_email, newPassword)
+      await acceptAndEnter()
     } catch (err: any) {
       setSetupError(err?.message || 'Could not set your password. Please try again.')
       setSettingUp(false)
@@ -81,21 +88,44 @@ export default function AcceptInvitationPage() {
       .finally(() => setLoading(false))
   }, [token, navigate])
 
-  // Once user is signed in, accept the invitation
-  useEffect(() => {
-    if (!user || !token || !invitation || accepting) return
-
+  // Accept the invitation, then ENTER the dashboard.
+  //
+  // This must NOT be gated on `user` becoming truthy. A first-time invitee is a PENDING
+  // caregiver until this call runs, so /auth/check (authorize_by_email) returns 403 and
+  // `user` never populates — gating accept on `user` deadlocked the flow (accept was the
+  // only thing that could make the caregiver authorized). So the login handlers call this
+  // directly once the session cookie exists, regardless of `user`.
+  //
+  // After accept succeeds the session is an ACTIVE caregiver, but AuthProvider still holds
+  // the stale `authorized=false` from the login-time check. A hard reload re-runs the
+  // session check so the now-authorized role is picked up and the caregiver dashboard
+  // renders; an SPA navigate() would race that stale state and bounce to /login.
+  const acceptFiredRef = useRef(false)
+  const acceptAndEnter = async () => {
+    if (!token || acceptFiredRef.current) return
+    acceptFiredRef.current = true
     setAccepting(true)
-    api('/api/v1/invitations/accept', {
-      method: 'POST',
-      body: JSON.stringify({ token }),
-    })
-      .then(() => navigate('/caregiver/alerts', { replace: true }))
-      .catch(() => {
-        setError('Failed to accept invitation. It may have expired.')
-        setAccepting(false)
+    try {
+      await api('/api/v1/invitations/accept', {
+        method: 'POST',
+        body: JSON.stringify({ token }),
       })
-  }, [user, token, invitation, navigate, accepting])
+      window.location.assign('/caregiver/alerts')
+    } catch {
+      acceptFiredRef.current = false
+      setError('We could not finish setting up your access. The invitation may have expired.')
+      setAccepting(false)
+      setSettingUp(false)
+    }
+  }
+
+  // A caregiver who is ALREADY signed in (e.g. accepting a second charge) lands here with
+  // `user` already truthy — accept on mount. First-time invitees never hit this branch
+  // (their login leaves `user` null); their login handlers call acceptAndEnter directly.
+  useEffect(() => {
+    if (user && token && invitation) acceptAndEnter()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, token, invitation])
 
   if (loading || authLoading) {
     return (
@@ -159,7 +189,8 @@ export default function AcceptInvitationPage() {
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 minLength={10}
-                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-companion-blue focus:outline-none transition"
+                disabled={settingUp}
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-companion-blue focus:outline-none transition disabled:opacity-60 disabled:bg-gray-50"
               />
               {setupError && (
                 <p className="text-red-500 text-sm">{setupError}</p>
