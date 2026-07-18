@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../../shared/api/client'
-import { auth } from '../../shared/auth/firebase'
 
 /* ── Types ─────────────────────────────────────────────────── */
 
@@ -50,17 +49,15 @@ async function downloadExport(dateFrom: string, dateTo: string) {
   if (dateFrom) params.set('date_from', dateFrom)
   if (dateTo) params.set('date_to', dateTo)
 
-  const user = auth.currentUser
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (user) {
-    const token = await user.getIdToken()
-    headers['Authorization'] = `Bearer ${token}`
-  }
-
   const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+  // Authenticated by the ambient Authentik session cookie (credentials:'include').
+  // This is a GET, so no CSRF token is needed. It returns a file blob, so it can't go
+  // through the shared api() client (which parses JSON) — but it must still send the
+  // cookie, which the previous raw fetch did not (nor could it read a Firebase token
+  // under Authentik, so export always 401'd).
   const res = await fetch(
     `${API_BASE}/admin/conversations/export?${params.toString()}`,
-    { headers },
+    { credentials: 'include', headers: { 'Content-Type': 'application/json' } },
   )
   if (!res.ok) throw new Error(`Export failed: ${res.status}`)
   const blob = await res.blob()
