@@ -1,7 +1,4 @@
-import { auth } from '../auth/firebase'
-
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
-const AUTH_PROVIDER = import.meta.env.VITE_AUTH_PROVIDER || 'firebase'
 
 // Read a cookie value by name from document.cookie (used for the CSRF
 // double-submit token in Authentik BFF mode).
@@ -34,23 +31,15 @@ export async function api<T>(
     'Content-Type': 'application/json',
   }
 
-  const user = AUTH_PROVIDER === 'firebase' ? auth.currentUser : null
-  if (AUTH_PROVIDER === 'firebase' && user) {
-    const token = await user.getIdToken()
-    headers['Authorization'] = `Bearer ${token}`
-  }
-
   // Authentik BFF: cookie session is ambient. Attach the CSRF double-submit
   // header on unsafe methods (backend compares it to the companion_csrf cookie).
-  if (AUTH_PROVIDER === 'authentik') {
-    const method = (options?.method || 'GET').toUpperCase()
-    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
-      // Prefer the body-delivered token (cross-subdomain); fall back to the readable
-      // cookie for any same-origin deployment.
-      const csrf = csrfToken ?? readCookie('companion_csrf')
-      if (csrf) {
-        headers['X-CSRF-Token'] = csrf
-      }
+  const method = (options?.method || 'GET').toUpperCase()
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+    // Prefer the body-delivered token (cross-subdomain); fall back to the readable
+    // cookie for any same-origin deployment.
+    const csrf = csrfToken ?? readCookie('companion_csrf')
+    if (csrf) {
+      headers['X-CSRF-Token'] = csrf
     }
   }
 
@@ -64,26 +53,11 @@ export async function api<T>(
     headers: { ...headers, ...options?.headers },
   })
 
-  // Firebase mode: on 401, try refreshing the token and retry once.
-  if (res.status === 401 && AUTH_PROVIDER === 'firebase' && user) {
-    const freshToken = await user.getIdToken(true) // force refresh
-    headers['Authorization'] = `Bearer ${freshToken}`
-    const retry = await fetch(`${API_BASE}${path}`, {
-      ...options,
-      credentials: 'include',
-      headers: { ...headers, ...options?.headers },
-    })
-    if (!retry.ok) {
-      throw new Error(`API error: ${retry.status}`)
-    }
-    return retry.json()
-  }
-
-  // Authentik mode: a 401 on an authenticated request means the ambient cookie
-  // session expired mid-use (login/check use raw fetch, not this client, so they
-  // never reach here). Signal the AuthProvider to drop session state so the
-  // privileged shell can't linger; ProtectedRoute then redirects to /login.
-  if (res.status === 401 && AUTH_PROVIDER === 'authentik') {
+  // A 401 on an authenticated request means the ambient cookie session expired
+  // mid-use (login/check use raw fetch, not this client, so they never reach here).
+  // Signal the AuthProvider to drop session state so the privileged shell can't
+  // linger; ProtectedRoute then redirects to /login.
+  if (res.status === 401) {
     window.dispatchEvent(new Event('companion:session-expired'))
   }
 
