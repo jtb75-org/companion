@@ -25,8 +25,11 @@ subject to this check.
 MOBILE bearer session: a React Native client cannot use the httpOnly cookie, so it
 presents the SAME opaque session id as ``Authorization: Bearer <session_token>``. Being
 non-ambient (a bearer can't be attached cross-site by a browser), it needs NO CSRF, just
-like a Firebase bearer. The bearer path is tried ONLY when the switch is on and there is
-no valid session cookie. The session store holds opaque ``token_urlsafe`` ids, so a
+like a Firebase bearer. The bearer session is tried FIRST — BEFORE the cookie — because a
+native client's HTTP stack (NSURLSession/OkHttp) auto-re-sends the login cookie too, and
+resolving the cookie first would wrongly force CSRF onto the bearer client's POSTs. A
+browser never sends a session bearer (the sid cookie is httpOnly), so web still takes the
+CSRF-enforced cookie path. The session store holds opaque ``token_urlsafe`` ids, so a
 Firebase id_token (a dotted JWT) simply misses the lookup → ``None`` → the caller falls
 through to the existing Firebase-bearer verification. A Firebase JWT is therefore never
 mis-resolved as a session, and Firebase verification is untouched.
