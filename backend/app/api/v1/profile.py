@@ -4,8 +4,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import logging
+
 from app.auth.firebase import verify_firebase_token
 from app.auth.principal import resolve_session_principal
+
+log = logging.getLogger(__name__)
 from app.config import settings
 from app.db import get_db
 from app.db.context import set_login_email_context, set_user_context
@@ -27,8 +31,24 @@ async def get_my_profile(
 
     DUAL-RUN: accepts a BFF Authentik session when auth_provider == "authentik",
     else the existing Firebase bearer path (byte-identical under "firebase")."""
+    # TEMP DIAGNOSTIC (chore/me-auth-diagnostics): pin down the mobile /me-401. Logs NO
+    # token values — only presence + resolution outcome. Remove once the cause is known.
+    _bearer = bool(authorization and authorization.startswith("Bearer "))
+    _cookie = settings.session_cookie_name in request.cookies
+    try:
+        principal = await resolve_session_principal(request, db)
+    except HTTPException as _e:
+        log.info(
+            "ME_DIAG provider=%s bearer=%s cookie=%s -> raised %s:%s",
+            settings.auth_provider, _bearer, _cookie, _e.status_code, _e.detail,
+        )
+        raise
+    log.info(
+        "ME_DIAG provider=%s bearer=%s cookie=%s -> principal=%s",
+        settings.auth_provider, _bearer, _cookie,
+        "session" if principal is not None else "none(->firebase)",
+    )
     # DUAL-RUN Authentik-session branch (inert unless auth_provider == "authentik").
-    principal = await resolve_session_principal(request, db)
     if principal is not None:
         # Session resolves the member by subject and already set the tenant GUC.
         user = principal.user
