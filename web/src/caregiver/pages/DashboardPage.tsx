@@ -3,25 +3,17 @@ import { api } from '../../shared/api/client'
 import { Card } from '../../shared/components/Card'
 import { StatusBadge } from '../../shared/components/StatusBadge'
 
+// Mirrors what backend caregiver_service.get_dashboard_summary actually returns.
+// active_medications and upcoming_appointments are COUNTS, not lists; there is no
+// medication_adherence field — rendering a fabricated one showed a false "0% / every
+// dose missed" alarm on a clean load. Extra list fields (overdue_bills_list,
+// recent_documents) are read defensively via `raw as any` in the render below.
 interface DashboardData {
-  status: 'managing_well' | 'needs_attention'
-  tasks: { completed: number; total: number }
-  medication_adherence: number
-  upcoming_bills: { description: string; due_date: string; amount: string }[]
-  upcoming_appointments: { description: string; date: string }[]
-}
-
-const placeholderData: DashboardData = {
-  status: 'managing_well',
-  tasks: { completed: 4, total: 5 },
-  medication_adherence: 0.92,
-  upcoming_bills: [
-    { description: 'Electric bill', due_date: '2026-04-01', amount: '$142.50' },
-    { description: 'Internet', due_date: '2026-04-05', amount: '$65.00' },
-  ],
-  upcoming_appointments: [
-    { description: 'Dr. Chen - Annual checkup', date: '2026-04-03' },
-  ],
+  status?: 'managing_well' | 'needs_attention'
+  tasks?: { completed: number; total: number }
+  active_medications?: number
+  upcoming_appointments?: number
+  upcoming_bills?: { description: string; due_date: string; amount: string }[]
 }
 
 interface Props {
@@ -29,46 +21,62 @@ interface Props {
 }
 
 export function DashboardPage({ userId }: Props) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: ['caregiver-dashboard', userId],
-    queryFn: async () => {
-      try {
-        return await api<DashboardData>(`/api/v1/caregiver/dashboard?user_id=${userId}`)
-      } catch {
-        return placeholderData
-      }
-    },
+    // No try/catch fallback: a failed load must surface, NOT be replaced with a calm
+    // fabricated "Managing Well" state a caregiver could act on. See the isError branch.
+    queryFn: () => api<DashboardData>(`/api/v1/caregiver/dashboard?user_id=${userId}`),
     enabled: !!userId,
   })
-
-  const raw = data ?? placeholderData
-  const dashboard = {
-    status: raw.status ?? 'managing_well',
-    tasks: raw.tasks ?? { completed: 0, total: 0 },
-    medication_adherence: raw.medication_adherence ?? 0,
-    upcoming_bills: Array.isArray(raw.upcoming_bills)
-      ? raw.upcoming_bills : [],
-    upcoming_appointments: Array.isArray(raw.upcoming_appointments)
-      ? raw.upcoming_appointments : [],
-  }
 
   if (isLoading) {
     return <p className="text-gray-500">Loading dashboard...</p>
   }
 
-  const adherencePct = Math.round(dashboard.medication_adherence * 100)
+  // Never fabricate care data. If the dashboard can't load, say so plainly and show no
+  // status — a false "all is well" is the most dangerous thing to put in front of a
+  // caregiver.
+  if (isError || !data) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-xl font-semibold text-gray-900">Caregiver Dashboard</h1>
+        <Card title="Dashboard unavailable">
+          <p className="text-sm text-red-600">
+            We couldn't load this dashboard right now, so we're not showing a status.
+            This doesn't necessarily mean anything is wrong — only that the latest
+            information couldn't be reached. Please refresh in a moment.
+          </p>
+        </Card>
+      </div>
+    )
+  }
+
+  const raw = data
+  const dashboard = {
+    status: raw.status,
+    tasks: raw.tasks ?? { completed: 0, total: 0 },
+    active_medications: raw.active_medications ?? 0,
+    upcoming_appointments: raw.upcoming_appointments ?? 0,
+    upcoming_bills: Array.isArray(raw.upcoming_bills)
+      ? raw.upcoming_bills : [],
+  }
 
   return (
     <div className="space-y-6">
       <h1 className="text-xl font-semibold text-gray-900">Caregiver Dashboard</h1>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {/* Status */}
+        {/* Status — only render a verdict the data actually reported. A missing/unknown
+            status must NOT default to either "Managing Well" (false calm) or "Needs
+            Attention" (false alarm). */}
         <Card title="Status">
-          <StatusBadge
-            status={dashboard.status === 'managing_well' ? 'healthy' : 'warning'}
-            label={dashboard.status === 'managing_well' ? 'Managing Well' : 'Needs Attention'}
-          />
+          {dashboard.status === 'managing_well' ? (
+            <StatusBadge status="healthy" label="Managing Well" />
+          ) : dashboard.status === 'needs_attention' ? (
+            <StatusBadge status="warning" label="Needs Attention" />
+          ) : (
+            <span className="text-sm text-gray-500">Status unavailable</span>
+          )}
         </Card>
 
         {/* Tasks */}
@@ -81,14 +89,13 @@ export function DashboardPage({ userId }: Props) {
           </div>
         </Card>
 
-        {/* Medication Adherence */}
-        <Card title="Medication Adherence" subtitle={`${adherencePct}%`}>
-          <div className="w-full bg-gray-200 rounded-full h-2.5">
-            <div
-              className={`h-2.5 rounded-full ${adherencePct >= 80 ? 'bg-companion-sage' : 'bg-companion-amber'}`}
-              style={{ width: `${adherencePct}%` }}
-            />
-          </div>
+        {/* Active Medications — the backend returns a count, not an adherence rate.
+            (Adherence isn't computed server-side; don't invent a percentage.) */}
+        <Card
+          title="Active Medications"
+          subtitle={dashboard.active_medications === 1 ? '1 active' : `${dashboard.active_medications} active`}
+        >
+          <p className="text-2xl font-semibold text-gray-800">{dashboard.active_medications}</p>
         </Card>
       </div>
 
@@ -127,19 +134,16 @@ export function DashboardPage({ userId }: Props) {
           )}
         </Card>
 
-        {/* Upcoming Appointments */}
+        {/* Upcoming Appointments — backend returns a count only, not a list. */}
         <Card title="Upcoming Appointments">
-          {dashboard.upcoming_appointments.length === 0 ? (
+          {dashboard.upcoming_appointments === 0 ? (
             <p className="text-sm text-gray-500">No upcoming appointments.</p>
           ) : (
-            <ul className="space-y-2">
-              {dashboard.upcoming_appointments.map((appt, i) => (
-                <li key={i} className="flex justify-between text-sm">
-                  <span className="text-gray-700">{appt.description}</span>
-                  <span className="text-gray-500">{new Date(appt.date).toLocaleDateString()}</span>
-                </li>
-              ))}
-            </ul>
+            <p className="text-sm text-gray-700">
+              {dashboard.upcoming_appointments === 1
+                ? '1 upcoming appointment'
+                : `${dashboard.upcoming_appointments} upcoming appointments`}
+            </p>
           )}
         </Card>
       </div>
