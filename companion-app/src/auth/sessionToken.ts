@@ -31,8 +31,18 @@ const backend = {
       return null
     }
   },
-  async set(value: string): Promise<void> {
-    await Keychain.setGenericPassword(ACCOUNT, value, { service: KEYCHAIN_SERVICE })
+  async set(value: string): Promise<boolean> {
+    // Returns whether the durable write succeeded. Keychain WRITES can throw on the iOS
+    // Simulator and some locked-device states (reads/removes already swallow this). We do
+    // NOT rethrow: failing the whole login because the secret couldn't be persisted is
+    // worse than a session that simply won't survive an app restart. The caller keeps the
+    // token in the in-memory cache either way.
+    try {
+      await Keychain.setGenericPassword(ACCOUNT, value, { service: KEYCHAIN_SERVICE })
+      return true
+    } catch {
+      return false
+    }
   },
   async remove(): Promise<void> {
     try {
@@ -66,12 +76,19 @@ export async function loadSessionToken(): Promise<string | null> {
   return cachedToken
 }
 
-/** Store the token after a successful login (keychain first, then memory). */
+/** Store the token after a successful login (keychain if possible, always memory). */
 export async function persistSessionToken(token: string): Promise<void> {
-  // Write to the keychain BEFORE caching in memory: if the write throws, we do
-  // not want the in-memory cache holding a sid that was never persisted.
-  await backend.set(token)
+  // Cache in memory unconditionally so the bearer is usable for THIS app run even when
+  // the durable Keychain write fails (e.g. the iOS Simulator) — otherwise login itself
+  // throws and the user is stuck on "Something went wrong" despite a valid session. A
+  // failed persist only means the session won't survive an app restart.
+  const persisted = await backend.set(token)
   cachedToken = token
+  if (!persisted) {
+    console.warn(
+      '[sessionToken] Keychain write failed; session held in memory only (will not survive restart)',
+    )
+  }
 }
 
 /** Clear the token on logout (memory + keychain). */

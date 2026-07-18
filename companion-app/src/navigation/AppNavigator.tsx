@@ -13,7 +13,7 @@ import { OnboardingScreen } from '../auth/OnboardingScreen'
 import { useAuth } from '../auth/AuthProvider'
 import { AUTH_PROVIDER } from '../auth/authConfig'
 import { ActivationLink, parseActivationLink } from './linking'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import { usePushNotifications } from '../hooks/usePushNotifications'
 import { colors } from '../theme/colors'
 
@@ -34,7 +34,7 @@ function TabIcon({ label, focused }: { label: string; focused: boolean }) {
 }
 
 export function AppNavigator() {
-  const { user, isAuthenticated, loading } = useAuth()
+  const { user, isAuthenticated, loading, signOut } = useAuth()
   const [profileComplete, setProfileComplete] = useState<boolean | null>(null)
   // Pending account-activation link ({token, reset}) from an inbound /activate
   // deep link. Authentik-only: in Firebase mode this stays null and the screen is
@@ -85,13 +85,27 @@ export function AppNavigator() {
         }
       } catch (err) {
         console.log('[AppNavigator] /api/v1/me error:', err)
+        // A 401/403 means the session is invalid/expired — clear it and return to
+        // sign-in. Do NOT fall through to setProfileComplete(false): that misroutes an
+        // auth failure into the onboarding screen, whose complete-profile POST would then
+        // 401 too, trapping the user.
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          await signOut()
+          return
+        }
+        // Non-auth error (network / 5xx): we can't determine the profile; surface it as
+        // incomplete so the user isn't stranded on a spinner. (Completing the profile is
+        // idempotent; a stale transient error at worst re-shows onboarding once.)
         setProfileComplete(false)
       }
     }
     checkProfile()
-    // `user` is kept in deps so Firebase mode re-checks on every auth-state
-    // change exactly as before; `isAuthenticated` drives the Authentik path
-    // (where `user` is always null).
+    // `user` is kept in deps so Firebase mode re-checks on every auth-state change
+    // exactly as before; `isAuthenticated` drives the Authentik path (where `user` is
+    // always null). `signOut` is intentionally NOT a dependency: it's only invoked in the
+    // 401/403 error path, not a trigger for the profile check, and it's recreated each
+    // render — adding it would re-run this effect (and re-hit /me) on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, user])
 
   if (loading) return null

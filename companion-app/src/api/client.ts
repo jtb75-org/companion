@@ -28,6 +28,14 @@ export async function getAuthHeader(): Promise<Record<string, string>> {
   return { Authorization: `Bearer ${token}` }
 }
 
+/** Carries the HTTP status so callers can act on it (e.g. clear the session on 401). */
+export class ApiError extends Error {
+  constructor(public readonly status: number, message?: string) {
+    super(message ?? `API error: ${status}`)
+    this.name = 'ApiError'
+  }
+}
+
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -35,12 +43,15 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   }
 
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { ...headers, ...options?.headers },
+    // Spread caller options FIRST, then set headers LAST — otherwise a caller passing
+    // options.headers would overwrite the whole merged object and DROP the Authorization
+    // bearer (the /me-401 class of bug). Matches the web client.
     ...options,
+    headers: { ...headers, ...options?.headers },
   })
 
   if (!res.ok) {
-    throw new Error(`API error: ${res.status}`)
+    throw new ApiError(res.status)
   }
 
   if (res.status === 204) {
