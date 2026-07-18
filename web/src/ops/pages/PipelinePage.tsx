@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../shared/api/client'
 import { Card } from '../../shared/components/Card'
@@ -513,6 +513,21 @@ export function PipelinePage() {
     },
   })
 
+  // The six pipeline stages are a fixed structural fact, so the health grid ALWAYS shows
+  // all of them — filled from the last-24h metrics when present, "no activity" when not.
+  // Any stage the backend reports that isn't in the canonical order is appended, so
+  // nothing is dropped. This keeps the card grid stable instead of flashing cards in and
+  // then out on a quiet pipeline, where the metrics query legitimately returns nothing
+  // (e.g. a clean-slate prod with zero documents in the last 24h).
+  const stageCards = useMemo(() => {
+    const byName = new Map((healthData?.stages ?? []).map((s) => [s.stage, s]))
+    const known = PIPELINE_STAGE_ORDER.map((name) => ({ name, stage: byName.get(name) }))
+    const extra = (healthData?.stages ?? [])
+      .filter((s) => !PIPELINE_STAGE_ORDER.includes(s.stage))
+      .map((s) => ({ name: s.stage, stage: s }))
+    return [...known, ...extra]
+  }, [healthData])
+
   // --- Actions ---
   const handleCancel = async (id: string) => {
     if (!window.confirm('Cancel processing for this document?')) return
@@ -627,55 +642,59 @@ export function PipelinePage() {
         </div>
       )}
 
-      {/* Stage health — skeleton while loading, error card on failure, real cards only
-          once real data arrives. Never fabricated numbers. */}
-      {healthLoading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {PIPELINE_STAGE_ORDER.map((name) => (
-            <Card key={name} title={name}>
-              <div className="animate-pulse space-y-2" aria-hidden>
-                <div className="h-4 w-24 bg-gray-200 rounded" />
-                <div className="h-2 bg-gray-200 rounded-full" />
-              </div>
-            </Card>
-          ))}
-        </div>
-      ) : healthError ? (
+      {/* Stage health — the six pipeline stages are structural, so the grid is ALWAYS
+          the same set of cards; only each card's inner content changes: skeleton while
+          loading, real metrics when the stage has activity, "no activity" when it has
+          none in the last 24h. This keeps the layout stable instead of flashing cards in
+          and then out on a quiet pipeline. A hard health error (endpoint unreadable) is
+          the one case that swaps the whole grid for an error card. */}
+      {healthError ? (
         <Card title="Pipeline health">
           <p className="text-sm text-red-600">
             Couldn't load pipeline health metrics. This doesn't mean the pipeline is down —
             only that its health can't be read right now.
           </p>
         </Card>
-      ) : healthData && healthData.stages.length > 0 ? (
+      ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {healthData.stages.map((stage) => (
-            <Card key={stage.stage} title={stage.stage}>
-              <div className="flex items-center justify-between mb-2">
-                <StatusBadge status={stage.status} label={stage.status} />
-                <span className="text-xs text-gray-400">{stage.avg_time_ms}ms avg</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="flex-1 bg-gray-200 rounded-full h-2">
-                  <div
-                    className={`h-2 rounded-full ${
-                      stage.success_rate >= 0.95
-                        ? 'bg-green-500'
-                        : stage.success_rate >= 0.85
-                          ? 'bg-yellow-500'
-                          : 'bg-red-500'
-                    }`}
-                    style={{ width: `${stage.success_rate * 100}%` }}
-                  />
+          {stageCards.map(({ name, stage }) => (
+            <Card key={name} title={name}>
+              {healthLoading ? (
+                <div className="animate-pulse space-y-2" aria-hidden>
+                  <div className="h-4 w-24 bg-gray-200 rounded" />
+                  <div className="h-2 bg-gray-200 rounded-full" />
                 </div>
-                <span className="text-sm text-gray-600 w-12 text-right">
-                  {Math.round(stage.success_rate * 100)}%
-                </span>
-              </div>
+              ) : stage ? (
+                <>
+                  <div className="flex items-center justify-between mb-2">
+                    <StatusBadge status={stage.status} label={stage.status} />
+                    <span className="text-xs text-gray-400">{stage.avg_time_ms}ms avg</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 bg-gray-200 rounded-full h-2">
+                      <div
+                        className={`h-2 rounded-full ${
+                          stage.success_rate >= 0.95
+                            ? 'bg-green-500'
+                            : stage.success_rate >= 0.85
+                              ? 'bg-yellow-500'
+                              : 'bg-red-500'
+                        }`}
+                        style={{ width: `${stage.success_rate * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-sm text-gray-600 w-12 text-right">
+                      {Math.round(stage.success_rate * 100)}%
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <p className="text-xs text-gray-400">No activity in the last 24h</p>
+              )}
             </Card>
           ))}
         </div>
-      ) : null}
+      )}
 
       {/* Recent failures — suppressed when health is erroring, so a failed refetch that
           retains stale data (TanStack v5 keeps `data` on refetch error) can't show the
