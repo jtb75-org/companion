@@ -8,6 +8,7 @@ import {
   createUserWithEmailAndPassword,
 } from 'firebase/auth'
 import { auth, googleProvider } from './firebase'
+import { setCsrfToken, getCsrfToken } from '../api/client'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
 const AUTH_PROVIDER = import.meta.env.VITE_AUTH_PROVIDER || 'firebase'
@@ -30,14 +31,6 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | null>(null)
-
-// Read a cookie value by name from document.cookie (Authentik CSRF token).
-function readCookie(name: string): string | null {
-  const match = document.cookie.match(
-    new RegExp('(?:^|; )' + name.replace(/([.$?*|{}()[\]\\/+^])/g, '\\$1') + '=([^;]*)')
-  )
-  return match ? decodeURIComponent(match[1]) : null
-}
 
 function FirebaseAuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
@@ -141,6 +134,11 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
   // Drop all session state back to logged-out. Used on no-session, logout, and a
   // mid-session 401 (see the session-expired listener below). setState setters are
   // stable, so this is safe to reference from an effect without re-subscribing.
+  // Resets the AUTHORIZATION/UI state, NOT the session's existence. Deliberately does
+  // NOT clear the CSRF token: a pending caregiver's checkSession() 403s (not authorized
+  // yet) and calls this, but their session cookie is still live and acceptAndEnter must
+  // still send X-CSRF-Token. The token is cleared only where the SESSION truly ends —
+  // logout and the session-expired listener.
   const clearSession = () => {
     setUser(null)
     setAuthorized(null)
@@ -166,6 +164,9 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
         setProfileComplete(data.profile_complete ?? true)
         setCaregiverUsers(data.has_charges ? [] : null)
         setUser({ email: data.email ?? '' })
+        // Recover the double-submit CSRF token on a fresh load (the SPA can't read the
+        // host-only cross-subdomain cookie); the API returns it in the check body.
+        if (data.csrf_token) setCsrfToken(data.csrf_token)
       } else {
         clearSession()
       }
@@ -184,7 +185,11 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
   // session expired mid-use). Clear state so the privileged shell can't linger;
   // ProtectedRoute then sends the user to /login.
   useEffect(() => {
-    const onExpired = () => clearSession()
+    // Session is gone server-side — drop the CSRF token too (unlike a plain clearSession).
+    const onExpired = () => {
+      setCsrfToken(null)
+      clearSession()
+    }
     window.addEventListener('companion:session-expired', onExpired)
     return () => window.removeEventListener('companion:session-expired', onExpired)
   }, [])
@@ -199,6 +204,12 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
         body: JSON.stringify({ username: email, password }),
       })
       if (res.ok) {
+        // Store the CSRF token from the login body FIRST. A first-time caregiver invitee
+        // is still PENDING, so the checkSession() below 403s and delivers nothing — but
+        // acceptAndEnter must POST /invitations/accept with X-CSRF-Token right after. So
+        // the token has to come from the login body, not the check.
+        const data = await res.json().catch(() => ({}))
+        if (data.csrf_token) setCsrfToken(data.csrf_token)
         await checkSession()
         return
       }
@@ -230,7 +241,11 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
   const logout = async () => {
     try {
       const headers: Record<string, string> = {}
-      const csrf = readCookie('companion_csrf')
+      // Use the body-delivered token (getCsrfToken), NOT the host-only cookie — which the
+      // SPA can't read cross-subdomain. Without it, logout's POST fails CSRF, the catch
+      // swallows it, and the server-side Redis session is NEVER revoked (a reload could
+      // silently re-authenticate).
+      const csrf = getCsrfToken()
       if (csrf) {
         headers['X-CSRF-Token'] = csrf
       }
@@ -242,6 +257,7 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // best-effort: swallow network errors, still clear local state
     }
+    setCsrfToken(null)
     clearSession()
   }
 

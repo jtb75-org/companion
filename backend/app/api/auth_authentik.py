@@ -199,8 +199,12 @@ async def _mint_session(response: Response, *, subject: str, mobile: bool) -> di
     Stores only the opaque Authentik subject in Redis (no PII).
 
     The credential differs by client, and this split is load-bearing:
-      * WEB gets the session via the httpOnly ``companion_sid`` cookie (+ the readable
-        ``companion_csrf`` cookie for the double-submit check). NO body token.
+      * WEB gets the session via the httpOnly ``companion_sid`` cookie. The double-submit
+        ``companion_csrf`` cookie is set too, but the SPA (app.mydailydignity.com) can NOT
+        read it: it is host-only, set by api.mydailydignity.com, so it's unreadable cross
+        subdomain. So the csrf token is ALSO returned in the body — the SPA stores it and
+        echoes it as ``X-CSRF-Token``; the cookie remains for the server-side comparison.
+        The session id is still NEVER in the web body (httpOnly/XSS posture preserved).
       * MOBILE gets the opaque session id in the BODY only, to store in the Keychain and
         present as ``Authorization: Bearer``. It is deliberately sent NO cookies. A
         native HTTP stack (NSURLSession / OkHttp) auto-persists and re-sends any
@@ -217,7 +221,8 @@ async def _mint_session(response: Response, *, subject: str, mobile: bool) -> di
         return {"status": "ok", "session_token": sid, "csrf_token": csrf}
     _set_cookie(response, settings.session_cookie_name, sid, http_only=True)
     _set_cookie(response, settings.csrf_cookie_name, csrf, http_only=False)
-    return {"status": "ok"}
+    # csrf (NOT the sid) in the body so the cross-subdomain SPA can send X-CSRF-Token.
+    return {"status": "ok", "csrf_token": csrf}
 
 
 async def _audit_login_event(

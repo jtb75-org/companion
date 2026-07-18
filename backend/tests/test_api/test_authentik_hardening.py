@@ -99,6 +99,30 @@ async def test_cors_preflight_allows_csrf_header():
     assert "x-csrf-token" in allowed
 
 
+def test_cors_never_combines_credentials_with_wildcard_or_regex():
+    """Guard the CSRF-token-in-body invariant (PR #124, safety follow-up). The double-
+    submit token now rides in the /auth/check + /auth/login response bodies, so its
+    confidentiality — and that of the email/role fields — depends on CORS staying a
+    STRICT static allowlist. A future regression to a wildcard origin, or an
+    allow_origin_regex combined with credentials, would turn /auth/check into a
+    cross-origin token-exfiltration endpoint. Assert that can never ship."""
+    from app.main import CORS_ORIGINS, app
+
+    cors = next(
+        m for m in app.user_middleware if m.cls.__name__ == "CORSMiddleware"
+    )
+    if cors.kwargs.get("allow_credentials"):
+        assert "*" not in cors.kwargs.get("allow_origins", []), (
+            "credentialed CORS must never use a wildcard origin"
+        )
+        assert not cors.kwargs.get("allow_origin_regex"), (
+            "credentialed CORS must not use allow_origin_regex (reflected-origin risk)"
+        )
+    # No configured environment may list a wildcard origin.
+    for env, origins in CORS_ORIGINS.items():
+        assert "*" not in origins, f"CORS_ORIGINS[{env!r}] must not contain '*'"
+
+
 # ── gate #2: TLS to Authentik — CA bundle threads config → authenticator → httpx ──
 
 
