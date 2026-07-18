@@ -213,6 +213,11 @@ async def _mint_session(response: Response, *, subject: str, mobile: bool) -> di
     Shared by the member and caregiver login paths so the behavior is identical."""
     sid = await get_session_store().create(subject)
     csrf = secrets.token_urlsafe(32)
+    # TEMP DIAGNOSTIC (chore/login-mobile-flag-diag): is the client asking for the mobile
+    # bearer? mobile=true => session_token in body (no cookie); mobile=false => cookie
+    # only, NO session_token (a stale mobile build would hit this and throw "missing
+    # token"). Remove once the mobile-login cause is confirmed. No secrets logged.
+    log.info("LOGIN_DIAG _mint_session mobile=%s session_token_in_body=%s", mobile, mobile)
     if mobile:
         return {"status": "ok", "session_token": sid, "csrf_token": csrf}
     _set_cookie(response, settings.session_cookie_name, sid, http_only=True)
