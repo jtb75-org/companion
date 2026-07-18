@@ -193,7 +193,11 @@ async def test_login_succeeds_for_invited_stub(monkeypatch):
         await s.commit()
     _, store = _enable_authentik_with_mocks(monkeypatch, sub="sub-invited", email=email)
 
-    # Mobile client (mobile=true): body carries the bearer session token.
+    # Mobile client (mobile=true): the bearer session token comes in the BODY, and NO
+    # cookies are set. A native HTTP stack (NSURLSession/OkHttp) auto-persists any
+    # Set-Cookie and re-sends it, which would force the CSRF-enforced cookie path onto the
+    # bearer client's state-changing requests and 403 them — so a mobile login must not
+    # mint cookies at all.
     async with _client() as ac:
         r = await ac.post(
             _LOGIN, json={"username": email, "password": "pw", "mobile": True}
@@ -201,16 +205,16 @@ async def test_login_succeeds_for_invited_stub(monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ok"
-    # Session + CSRF cookies set.
+    # No session/CSRF cookies for a mobile login (the fix — see resolve_session_subject).
     cookie_names = {c for c in r.cookies}
-    assert "companion_sid" in cookie_names
-    assert "companion_csrf" in cookie_names
-    # The session maps to the opaque Authentik subject (no email/PII stored).
-    sid = r.cookies["companion_sid"]
+    assert "companion_sid" not in cookie_names
+    assert "companion_csrf" not in cookie_names
+    # Mobile bearer: the body carries the opaque session id, which maps to the Authentik
+    # subject (no email/PII stored). csrf_token is present for parity though the app
+    # ignores it (a bearer is non-ambient and needs no CSRF).
+    sid = body["session_token"]
     assert await store.get(sid) == "sub-invited"
-    # Mobile bearer: the body carries the SAME opaque session id (+ csrf for parity).
-    assert body["session_token"] == sid
-    assert body["csrf_token"] == r.cookies["companion_csrf"]
+    assert body["csrf_token"]
     await _delete_user(email)
 
 

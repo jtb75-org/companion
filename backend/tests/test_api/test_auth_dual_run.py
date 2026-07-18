@@ -313,6 +313,50 @@ async def test_authentik_bearer_session_post_no_csrf_required(monkeypatch):
     await _cleanup(email)
 
 
+async def test_authentik_bearer_wins_over_autoresent_cookie_on_post(monkeypatch):
+    """REGRESSION (the prod mobile lockout): a native client presents the session id as a
+    BEARER, but its HTTP stack (NSURLSession/OkHttp) ALSO auto-re-sends the login cookie.
+    On a state-changing POST with NO X-CSRF-Token — exactly what iOS sends — the request
+    must resolve via the bearer (non-ambient, no CSRF), NOT via the cookie, which would
+    403 'CSRF token missing or invalid'. Before the bearer-first fix, every mobile POST
+    after login returned 403 and onboarding was un-completable.
+
+    Cookie and bearer carry the SAME sid here (the real scenario); the assertion that
+    matters is that the POST resolves at all instead of 403-ing."""
+    email = f"dual-mobile-both-{uuid.uuid4()}@t.io"
+    await _cleanup(email)
+    await _add_user(email, sub="sub-mobile-both")
+    store = _enable_authentik(monkeypatch)
+    sid = await store.create("sub-mobile-both")
+    req = _make_request(
+        "POST",
+        cookies={settings.session_cookie_name: sid},
+        headers={"Authorization": f"Bearer {sid}"},
+    )
+    async with db_module.async_session_factory() as db:
+        user = await deps.get_current_user(req, authorization=f"Bearer {sid}", db=db)
+    assert user.email == email  # resolved via the bearer — no spurious CSRF 403
+    await _cleanup(email)
+
+
+async def test_authentik_cookie_still_csrf_enforced_when_no_bearer(monkeypatch):
+    """Guard the OTHER side of the bearer-first swap: a browser (cookie only, NO session
+    bearer) on a POST without the double-submit token must STILL 403. Bearer-first must
+    not weaken web CSRF — it only bypasses CSRF when a real bearer is actually present."""
+    email = f"dual-web-csrf-{uuid.uuid4()}@t.io"
+    await _cleanup(email)
+    await _add_user(email, sub="sub-web-csrf")
+    store = _enable_authentik(monkeypatch)
+    sid = await store.create("sub-web-csrf")
+    # Cookie only, POST, no X-CSRF-Token, no Authorization header at all.
+    req = _make_request("POST", cookies={settings.session_cookie_name: sid})
+    with pytest.raises(HTTPException) as ei:
+        async with db_module.async_session_factory() as db:
+            await deps.get_current_user(req, authorization=None, db=db)
+    assert ei.value.status_code == 403
+    await _cleanup(email)
+
+
 async def test_authentik_invalid_bearer_falls_through_to_firebase(monkeypatch):
     """flag=authentik: a bearer that is neither a live session nor a valid Firebase
     token → None → Firebase path; with no email claim that's a 401."""

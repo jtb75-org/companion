@@ -194,22 +194,30 @@ def _clear_cookie(response: Response, name: str) -> None:
 
 
 async def _mint_session(response: Response, *, subject: str, mobile: bool) -> dict:
-    """Create a BFF session for ``subject`` and set the auth cookies.
+    """Create a BFF session for ``subject`` and hand it to the client.
 
-    Stores only the opaque Authentik subject in Redis (no PII). Web clients get the
-    session via the httpOnly cookie alone; a mobile client (``mobile`` true) also
-    receives the opaque session id in the body to store in the Keychain and present as
-    ``Authorization: Bearer``. Shared by the member and caregiver login paths so the
-    cookie/CSRF/mobile-gating behavior is identical."""
+    Stores only the opaque Authentik subject in Redis (no PII).
+
+    The credential differs by client, and this split is load-bearing:
+      * WEB gets the session via the httpOnly ``companion_sid`` cookie (+ the readable
+        ``companion_csrf`` cookie for the double-submit check). NO body token.
+      * MOBILE gets the opaque session id in the BODY only, to store in the Keychain and
+        present as ``Authorization: Bearer``. It is deliberately sent NO cookies. A
+        native HTTP stack (NSURLSession / OkHttp) auto-persists and re-sends any
+        ``Set-Cookie`` it receives, so setting the cookie here would make every later
+        state-changing request resolve via the CSRF-enforced cookie path and 403 a bearer
+        client that (correctly) carries no CSRF token. ``resolve_session_subject`` also
+        tries the bearer before the cookie as a second line of defense, but not minting
+        the cookie at all is the clean fix — mobile never had a use for it.
+
+    Shared by the member and caregiver login paths so the behavior is identical."""
     sid = await get_session_store().create(subject)
     csrf = secrets.token_urlsafe(32)
+    if mobile:
+        return {"status": "ok", "session_token": sid, "csrf_token": csrf}
     _set_cookie(response, settings.session_cookie_name, sid, http_only=True)
     _set_cookie(response, settings.csrf_cookie_name, csrf, http_only=False)
-    result: dict = {"status": "ok"}
-    if mobile:
-        result["session_token"] = sid
-        result["csrf_token"] = csrf
-    return result
+    return {"status": "ok"}
 
 
 async def _audit_login_event(

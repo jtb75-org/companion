@@ -104,33 +104,43 @@ async def resolve_session_subject(request: Request) -> str | None:
       * neither credential maps to a live session (expired / logged out / a Firebase JWT).
 
     Two credential shapes carry the same opaque session id:
-      * COOKIE (``companion_sid``) — ambient, so a state-changing method must also pass
-        the double-submit CSRF check before the subject is returned.
       * BEARER (``Authorization: Bearer``) — non-ambient (a browser can't attach it
-        cross-site), tried only when there is NO valid session cookie, and — like a
-        Firebase bearer — NOT subject to CSRF.
+        cross-site), so NOT subject to CSRF. This is a NATIVE client's credential.
+      * COOKIE (``companion_sid``) — ambient, so a state-changing method must also pass
+        the double-submit CSRF check before the subject is returned. This is a BROWSER's
+        credential.
 
-    The bearer lookup runs only when the switch is on, a bearer is present, and no valid
-    session cookie resolved, so the extra store lookup is off the hot path. A Firebase
-    id_token presented as the bearer is not a session key → misses → ``None`` → the
-    caller uses the existing Firebase verification. Firebase JWTs are never mis-resolved
-    and Firebase verification is not weakened."""
+    The BEARER is tried FIRST, and this ordering is load-bearing. A native client
+    (iOS/Android) presents the session id as a bearer, but its HTTP stack
+    (NSURLSession / OkHttp) also auto-persists the login ``Set-Cookie`` and re-sends the
+    ``companion_sid`` cookie on every request. If the cookie were resolved first, that
+    client's state-changing requests would be forced through the CSRF check — which it
+    (correctly, being non-ambient) carries no token for — and every POST/PUT/DELETE would
+    spuriously 403. Trying the bearer first resolves the native client without CSRF; a
+    browser never sends a session bearer (the ``companion_sid`` cookie is httpOnly and
+    unreadable to JS), so web is unaffected and still takes the CSRF-enforced cookie path.
+
+    A Firebase id_token presented as the bearer is not a session key → misses the store →
+    falls through → ``None`` → the caller uses the existing Firebase verification.
+    Firebase JWTs are never mis-resolved and Firebase verification is not weakened."""
     if not settings.authentik_login_enabled:
         return None
     store = get_session_store()
-    # 1) Cookie session (ambient → CSRF-enforced on unsafe methods).
+    # 1) Bearer session FIRST (non-ambient → no CSRF). Native clients present this AND
+    #    auto-resend the login cookie; resolving the cookie first would wrongly force CSRF
+    #    onto their POSTs. A Firebase JWT misses the store lookup and falls through.
+    token = _bearer_session_token(request)
+    if token:
+        subject = await store.get(token)
+        if subject:
+            return subject
+    # 2) Cookie session (ambient → CSRF-enforced on unsafe methods). The WEB path: a
+    #    browser's only session credential, since the sid cookie is httpOnly.
     sid = request.cookies.get(settings.session_cookie_name)
     if sid:
         subject = await store.get(sid)
         if subject:
             _enforce_csrf(request)
-            return subject
-    # 2) Bearer session (non-ambient → no CSRF). Only reached when no valid cookie
-    #    session resolved. A Firebase JWT misses the store lookup and returns None.
-    token = _bearer_session_token(request)
-    if token:
-        subject = await store.get(token)
-        if subject:
             return subject
     return None
 
