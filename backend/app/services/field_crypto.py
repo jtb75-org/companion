@@ -37,6 +37,8 @@ id raises, and untagged ciphertext raises rather than leaking plaintext.
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -44,7 +46,9 @@ import threading
 from collections import OrderedDict
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from app.config import settings
 from app.services import openbao_transit
@@ -427,6 +431,72 @@ async def decrypt_json_for_user(db, user_id, ciphertext):
     if not ciphertext:  # None or "" — an absent JSON field has no object.
         return None
     return json.loads(await decrypt_for_user(db, user_id, ciphertext))
+
+
+# ---------------------------------------------------------------------------
+# Per-user keyed content fingerprint (exact-duplicate detection)
+# ---------------------------------------------------------------------------
+#
+# The document exact-dedup tier fingerprints uploaded page bytes so a member
+# re-uploading the identical file is caught (the "I thought it glitched, tap
+# again" double-submit). This used to be a plain SHA-256 of the bytes, which is
+# identical across members for identical bytes — a privileged DB/maintenance
+# breach could correlate the same document across members, or confirm whether a
+# member holds a *known* document by fingerprinting a guess.
+#
+# We instead compute an HMAC-SHA-256 keyed by a per-member secret derived from
+# that member's envelope DEK. Same member + same bytes -> identical fingerprint
+# (dedup still fires, and the lookup stays per-user-scoped), but the same bytes
+# under two different members produce unrelated fingerprints, so the value is no
+# longer cross-member-correlatable and can't be pre-computed without the
+# member's key material.
+#
+# The HMAC key is an HKDF subkey off the member DEK under a distinct info label,
+# NOT the encryption DEK itself — domain separation, so a fingerprint can never
+# be turned back into (or confused with) an encryption key.
+_FINGERPRINT_INFO = b"companion/content-fingerprint/v1"
+
+# IKM used ONLY in development/test when no keyring/OpenBao is configured, so
+# exact-dedup still works hermetically without KMS. The HKDF salt is the
+# per-user id, so even here two members get different fingerprint keys. This is
+# never reached when a keyring or OpenBao is present (fail-closed in prod).
+_DEV_FINGERPRINT_IKM = b"companion/dev-content-fingerprint"
+
+
+def _derive_fingerprint_key(dek: bytes, user_id) -> bytes:
+    """HKDF-SHA-256 subkey off ``dek``, domain-separated from field encryption.
+
+    Salting with the user id binds the subkey to the member (and makes the
+    dev-fallback IKM per-user); the distinct ``info`` label keeps this key space
+    disjoint from any encryption use of the DEK.
+    """
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=_user_aad(user_id),
+        info=_FINGERPRINT_INFO,
+    ).derive(dek)
+
+
+async def fingerprint_for_user(db, user_id, data: bytes) -> str:
+    """Per-user keyed content fingerprint of ``data`` -> hex HMAC-SHA-256.
+
+    Keyed by an HKDF subkey off the member's DEK, so it is deterministic for a
+    given (member, bytes) pair — exact-dedup fires when the same member
+    re-uploads identical bytes — while being uncorrelatable across members.
+
+    Fails closed in prod without key material; in dev/test without a keyring it
+    derives a deterministic per-user key from a fixed dev IKM so dedup still
+    works hermetically.
+    """
+    if _can_encrypt():
+        dek = await _get_or_create_dek(db, user_id)
+    elif _is_dev():
+        dek = _DEV_FINGERPRINT_IKM
+    else:
+        raise _no_keyring_error("compute content fingerprints")
+    key = _derive_fingerprint_key(dek, user_id)
+    return hmac.new(key, data, hashlib.sha256).hexdigest()
 
 
 # ---------------------------------------------------------------------------
