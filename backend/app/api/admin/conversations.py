@@ -11,6 +11,7 @@ from app.auth.dependencies import AdminUser, require_admin_role
 from app.db.session import get_maintenance_db
 from app.models.chat_session import ChatSession
 from app.models.user import User
+from app.services.field_crypto import decrypt_for_user
 
 router = APIRouter(
     prefix="/admin/conversations",
@@ -130,6 +131,16 @@ async def export_conversations(
 
     export = []
     for s in sessions:
+        # Transcript content is per-user envelope-encrypted at rest; decrypt
+        # each turn under its own message's user_id (the maintenance/BYPASSRLS
+        # session can read every member's DEK row).
+        messages = []
+        for m in s.messages:
+            messages.append({
+                "role": m.role,
+                "content": await decrypt_for_user(db, m.user_id, m.content),
+                "created_at": m.created_at.isoformat(),
+            })
         export.append({
             "id": str(s.id),
             "session_id": s.session_id,
@@ -142,16 +153,7 @@ async def export_conversations(
             ),
             "message_count": s.message_count,
             "summary": s.summary,
-            "messages": [
-                {
-                    "role": m.role,
-                    "content": m.content,
-                    "created_at": (
-                        m.created_at.isoformat()
-                    ),
-                }
-                for m in s.messages
-            ],
+            "messages": messages,
         })
 
     return {"conversations": export, "total": len(export)}
@@ -177,6 +179,17 @@ async def get_conversation(
             detail="Conversation not found",
         )
 
+    # Transcript content is per-user envelope-encrypted at rest; decrypt each
+    # turn under its message's user_id before returning to the admin.
+    messages = []
+    for m in chat_session.messages:
+        messages.append({
+            "id": str(m.id),
+            "role": m.role,
+            "content": await decrypt_for_user(db, m.user_id, m.content),
+            "created_at": m.created_at.isoformat(),
+        })
+
     return {
         "id": str(chat_session.id),
         "session_id": chat_session.session_id,
@@ -191,13 +204,5 @@ async def get_conversation(
         ),
         "message_count": chat_session.message_count,
         "summary": chat_session.summary,
-        "messages": [
-            {
-                "id": str(m.id),
-                "role": m.role,
-                "content": m.content,
-                "created_at": m.created_at.isoformat(),
-            }
-            for m in chat_session.messages
-        ],
+        "messages": messages,
     }

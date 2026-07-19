@@ -24,6 +24,7 @@ from app.schemas.conversation import (
     ConversationMessageRequest,
     ConversationStartRequest,
 )
+from app.services.field_crypto import encrypt_for_user
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +234,14 @@ async def start_conversation(
                 chat_session_id=db_session.id,
                 user_id=db_session.user_id,
                 role="assistant",
-                content=greeting,
+                # PHI at rest: encrypt transcript content under the member's
+                # per-user envelope DEK (same scheme as RAG chunk_text / OCR
+                # text / extracted_fields). /start commits once with the tenant
+                # GUC still live (set by require_complete_profile), so the DEK
+                # get-or-create and INSERT run inside RLS.
+                content=await encrypt_for_user(
+                    db, db_session.user_id, greeting
+                ),
             )
         )
         await db.commit()
@@ -381,17 +389,24 @@ async def send_message(
         )
         db_session = result.scalar_one_or_none()
         if db_session:
+            # PHI at rest: encrypt each turn under the member's per-user DEK.
+            # The tenant GUC was re-set above (set_user_context), so the DEK
+            # get-or-create and INSERTs run inside RLS.
             db.add(ChatMessage(
                 chat_session_id=db_session.id,
                 user_id=db_session.user_id,
                 role="user",
-                content=user_text,
+                content=await encrypt_for_user(
+                    db, db_session.user_id, user_text
+                ),
             ))
             db.add(ChatMessage(
                 chat_session_id=db_session.id,
                 user_id=db_session.user_id,
                 role="assistant",
-                content=response_text,
+                content=await encrypt_for_user(
+                    db, db_session.user_id, response_text
+                ),
             ))
             db_session.message_count += 2
             await db.commit()
@@ -513,17 +528,24 @@ async def send_message_stream(
                 )
                 db_sess = res.scalar_one_or_none()
                 if db_sess:
+                    # PHI at rest: encrypt each turn under the member's per-user
+                    # DEK. set_user_context above re-set the tenant GUC so the
+                    # DEK get-or-create and INSERTs run inside RLS.
                     db.add(ChatMessage(
                         chat_session_id=db_sess.id,
                         user_id=db_sess.user_id,
                         role="user",
-                        content=data.text,
+                        content=await encrypt_for_user(
+                            db, db_sess.user_id, data.text
+                        ),
                     ))
                     db.add(ChatMessage(
                         chat_session_id=db_sess.id,
                         user_id=db_sess.user_id,
                         role="assistant",
-                        content=full_response,
+                        content=await encrypt_for_user(
+                            db, db_sess.user_id, full_response
+                        ),
                     ))
                     db_sess.message_count += 2
                     await db.commit()
