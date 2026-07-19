@@ -317,11 +317,11 @@ async def test_logout_revokes_cookie_session(monkeypatch):
     assert r.status_code == 204
     assert await store.get(sid) is None
 
-    # Assert that Set-Cookie headers clear the cookies with correct attributes matching original setup
+    # Set-Cookie clears must mirror the SET attributes (secure/httponly/samesite).
     set_cookies = r.headers.get_list("set-cookie")
     sid_header = next((h for h in set_cookies if settings.session_cookie_name in h), None)
     csrf_header = next((h for h in set_cookies if settings.csrf_cookie_name in h), None)
-    
+
     assert sid_header is not None, "session cookie should be cleared"
     assert csrf_header is not None, "csrf cookie should be cleared"
     assert "HttpOnly" in sid_header, "session cookie clearance should preserve HttpOnly flag"
