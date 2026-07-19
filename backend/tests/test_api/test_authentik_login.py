@@ -317,6 +317,21 @@ async def test_logout_revokes_cookie_session(monkeypatch):
     assert r.status_code == 204
     assert await store.get(sid) is None
 
+    # Set-Cookie clears must mirror the SET attributes (secure/httponly/samesite).
+    set_cookies = r.headers.get_list("set-cookie")
+    sid_header = next((h for h in set_cookies if settings.session_cookie_name in h), None)
+    csrf_header = next((h for h in set_cookies if settings.csrf_cookie_name in h), None)
+
+    assert sid_header is not None, "session cookie should be cleared"
+    assert csrf_header is not None, "csrf cookie should be cleared"
+    assert "HttpOnly" in sid_header, "session cookie clearance should preserve HttpOnly flag"
+    assert "HttpOnly" not in csrf_header, "csrf cookie clearance should not have HttpOnly flag"
+    assert "SameSite=lax" in sid_header, "session cookie clearance should match SameSite attribute"
+    assert "SameSite=lax" in csrf_header, "csrf cookie clearance should match SameSite attribute"
+    if settings.session_cookie_secure:
+        assert "Secure" in sid_header
+        assert "Secure" in csrf_header
+
 
 @requires_db
 async def test_login_refuses_unverified_email(monkeypatch):
