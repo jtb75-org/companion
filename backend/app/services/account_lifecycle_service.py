@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.db.session import maintenance_session
+from app.integrations.authentik_admin import delete_authentik_account
 from app.models.audit import DeletionAuditLog
 from app.models.document import Document
 from app.models.enums import AccountStatus, DeletionReason
@@ -296,14 +297,24 @@ async def execute_deletion(db: AsyncSession, user_id: UUID) -> dict:
         await db.delete(admin_record)
         audit_details["admin_record_deleted"] = True
 
-    # 10. Identity-provider account cleanup: Firebase auth was retired, so there is no
-    # Firebase user to delete here. Deleting the corresponding Authentik account is a
-    # separate follow-up (needs the Authentik admin API + its own safety review); until
-    # then a deleted member may leave an orphaned Authentik account (which can no longer
-    # log in — the invite-only `users` row is gone, so /auth/login refuses it). Record the
-    # deferral explicitly so every deletion audit documents the known orphan rather than
-    # silently omitting IdP cleanup.
-    audit_details["idp_cleanup"] = "deferred"
+    # 10. Identity-provider account cleanup: hard-DELETE the Authentik user for this email.
+    # By this point the email has been purged from every Companion cohort — member row is
+    # deleted below (step 11), caregiver rows in step 8, admin record in step 9 — so it
+    # maps to no surviving identity and deleting its Authentik account is safe. A full
+    # delete (not a disable) both satisfies the CCPA right-to-delete (removes the residual
+    # email+name+password-hash PII) and closes the stale-password-on-reinvite hazard: a
+    # re-invited email is forced to provision a FRESH account rather than inheriting the
+    # old password. This is BEST-EFFORT: the local rows are the primary deletion and are
+    # already staged, so an Authentik/network failure must NOT abort the request — a
+    # leftover orphan (if any) still can't log in, since all cohort rows are gone. The
+    # outcome is recorded in the audit for traceability.
+    email = user.email
+    try:
+        idp_outcome = await delete_authentik_account(email)
+    except Exception:
+        logger.exception("Authentik account deletion failed for user=%s", user_id)
+        idp_outcome = "failed"
+    audit_details["idp_cleanup"] = idp_outcome  # deleted | not_found | skipped | failed
 
     # audit_details was mutated in-place AFTER db.add(audit) and after the admin lookup
     # above triggered an autoflush that serialized a PARTIAL dict. Plain-dict mutations to
