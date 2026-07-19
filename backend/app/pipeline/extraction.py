@@ -339,11 +339,20 @@ async def _regex_bill(text: str) -> tuple[dict, list[str]]:
             if amount_match
             else None
         )
-        # A positive amount alongside credit language is still a credit.
-        if amount is not None and re.search(
-            r"(?i)\bcredit\b|do not pay", text
-        ):
-            amount = -abs(amount)
+        # Only an EXPLICIT credit signal flips a positive parse negative. A bare
+        # "credit" anywhere would wrongly negate an ordinary "Credit Card
+        # Statement" bill the member ACTUALLY owes, so it is NOT a signal here.
+        # Genuine signals: the phrase "credit balance", "do not pay", or a "CR"
+        # token immediately adjacent to the matched amount ("$45.00 CR").
+        if amount is not None:
+            explicit_credit = re.search(
+                r"(?i)credit\s+balance|do\s+not\s+pay", text
+            )
+            cr_adjacent = amount_match is not None and re.match(
+                r"(?i)\s*cr\b", text[amount_match.end():amount_match.end() + 4]
+            )
+            if explicit_credit or cr_adjacent:
+                amount = -abs(amount)
     if amount is None:
         missing.append("amount_due")
 

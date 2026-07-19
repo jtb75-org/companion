@@ -23,6 +23,7 @@ from app.pipeline.extraction import (
     DEFAULT_PROMPTS,
     _get_extraction_prompt,
     _parse_amount,
+    _regex_bill,
     _validate_fields,
 )
 from app.pipeline.schemas import ClassificationResult, ExtractionResult
@@ -115,6 +116,55 @@ def test_validate_fields_plain_negative_and_credit_word():
 
 
 # ---------------------------------------------------------------------------
+# (b') Regex fallback must NOT read a Credit-CARD bill as a credit balance.
+# A bare "credit" anywhere in the OCR text (e.g. "Credit Card Statement") must
+# not flip an owed amount negative — that would tell a member they owe nothing
+# on a bill they actually owe (worse than the original bug).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_regex_bill_credit_card_statement_stays_positive():
+    text = (
+        "Credit Card Statement\n"
+        "Total Amount Due $45.00\n"
+        "Due 07/22/2026"
+    )
+    fields, _ = await _regex_bill(text)
+    assert fields["amount_due"] is not None
+    assert float(fields["amount_due"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_regex_bill_visa_credit_card_stays_positive():
+    text = "Visa Credit Card\nPayment Due $123.45"
+    fields, _ = await _regex_bill(text)
+    assert fields["amount_due"] is not None
+    assert float(fields["amount_due"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_regex_bill_true_credit_balance_is_negative():
+    text = "City of Kirkwood\ncredit balance $10.15"
+    fields, _ = await _regex_bill(text)
+    assert float(fields["amount_due"]) <= 0
+
+
+@pytest.mark.asyncio
+async def test_regex_bill_parenthesized_amount_is_negative():
+    text = "City of Kirkwood\nTotal Amount Due ($10.15)\nDO NOT PAY"
+    fields, _ = await _regex_bill(text)
+    assert float(fields["amount_due"]) <= 0
+
+
+@pytest.mark.asyncio
+async def test_regex_bill_cr_token_adjacent_to_amount_is_negative():
+    text = "City of Kirkwood\nBalance $10.15 CR"
+    fields, _ = await _regex_bill(text)
+    assert float(fields["amount_due"]) <= 0
+
+
+# ---------------------------------------------------------------------------
 # (c) Summarization credit guard — never instruct payment on a credit
 # ---------------------------------------------------------------------------
 
@@ -202,7 +252,9 @@ def test_credit_guard_low_confidence_is_collaborative():
     new_spoken, new_card = _apply_credit_guard(
         "You should pay $10.15.", "card", _classification("bill", 0.70), fields
     )
-    assert "together" in new_spoken.lower()
+    # Collaborative branch: invites a look together rather than a flat claim.
+    assert "want to look at it together" in new_spoken.lower()
+    assert "let's check" in new_card.lower()
     assert "10.15" in new_spoken
     assert not _has_payment_language(new_spoken)
     assert not _has_payment_language(new_card)
