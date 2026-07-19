@@ -84,10 +84,12 @@ class Settings(BaseSettings):
     s3_bucket_documents: str = "companion-documents"
     s3_region: str = "us-east-1"
 
-    # Firebase project id — retained ONLY for the FCM push path (see
-    # services/push_notification_service.py, which uses the FCM v1 HTTP API via a
-    # service-account key, NOT firebase-admin). Firebase AUTHENTICATION has been
-    # retired; nothing here verifies Firebase ID tokens any more.
+    # Firebase project id (env COMPANION_FIREBASE_PROJECT_ID). Firebase AUTHENTICATION
+    # has been retired — nothing verifies Firebase ID tokens any more, so no code reads
+    # this setting. It is retained to document the env var: the FCM push path
+    # (services/push_notification_service.py) reads COMPANION_FIREBASE_PROJECT_ID from the
+    # environment directly and calls the FCM v1 HTTP API with a service-account key (NOT
+    # firebase-admin).
     firebase_project_id: str = "companion-dev"
 
     # ── Authentik BFF native login ──
