@@ -136,8 +136,9 @@ async def summarize(
         CLASSIFY_SOFTEN_TONE,
         ocr_quality_forces_review,
     )
+    ocr_forced_review = ocr_quality_forces_review(ocr_confidence)
     effective_confidence = classification.confidence_score
-    if ocr_quality_forces_review(ocr_confidence):
+    if ocr_forced_review:
         effective_confidence = min(
             effective_confidence, CLASSIFY_SOFTEN_TONE - 0.01
         )
@@ -152,8 +153,12 @@ async def summarize(
     # Credit safety guard (defense-in-depth): never instruct a member to pay a
     # credit or zero balance, even if the LLM ignored the prompt guidance. This
     # may fully replace `spoken`, so the reading-grade check MUST run after it.
+    # A low OCR confidence must also force the collaborative wording here — the
+    # guard picks its tone independently, so without this a garbled credit bill
+    # would still get the flat "all set" copy the OCR floor is meant to prevent.
     spoken, card = _apply_credit_guard(
-        spoken, card, classification, extraction.extracted_fields
+        spoken, card, classification, extraction.extracted_fields,
+        force_low_confidence=ocr_forced_review,
     )
 
     # Reading complexity check — computed on the FINAL text the member receives
@@ -226,6 +231,7 @@ def _apply_credit_guard(
     card: str,
     classification: ClassificationResult,
     fields: dict,
+    force_low_confidence: bool = False,
 ) -> tuple[str, str]:
     """Replace bill summaries for a credit/zero balance with credit-safe wording.
 
@@ -237,9 +243,11 @@ def _apply_credit_guard(
     "remit", "mail a check"). Always rewriting is the only LLM-independent
     guarantee that a member is never told to pay a credit.
 
-    When the classification confidence is below 0.90, the wording is
+    When the classification confidence is below 0.90 — or ``force_low_confidence``
+    is set (a low OCR confidence tripped the review floor) — the wording is
     COLLABORATIVE (invites review) rather than a flat statement, so an uncertain
-    read never confidently suppresses a payment the member may actually owe.
+    read (bad classifier OR bad scan) never confidently suppresses a payment the
+    member may actually owe.
     """
     if classification.classification != "bill":
         return spoken, card
@@ -250,7 +258,9 @@ def _apply_credit_guard(
 
     sender = fields.get("sender") or "this company"
     credit = abs(amount)
-    low_confidence = classification.confidence_score < 0.90
+    low_confidence = (
+        classification.confidence_score < 0.90 or force_low_confidence
+    )
 
     if low_confidence:
         # Uncertain read — invite a look together instead of a flat claim.

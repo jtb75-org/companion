@@ -40,14 +40,22 @@ def _ocr_with_document_ai(
 
 
 def _mean_token_confidence(document) -> float | None:
-    """Mean of per-token layout confidences across all pages, or ``None``."""
+    """Mean of per-token layout confidences across all pages, or ``None``.
+
+    A genuine ``0.0`` is a real reported confidence (an unreadable token) and
+    MUST count — dropping it would make the review floor go inert exactly when a
+    scan is worst, and would inflate the mean on mixed pages. Only genuinely
+    absent (``None``) confidences are skipped.
+    """
     try:
-        scores: list[float] = [
-            float(token.layout.confidence)
-            for page in document.pages
-            for token in page.tokens
-            if token.layout.confidence
-        ]
+        scores: list[float] = []
+        for page in document.pages:
+            for token in page.tokens:
+                layout = getattr(token, "layout", None)
+                conf = getattr(layout, "confidence", None) if layout else None
+                if conf is None:
+                    continue
+                scores.append(float(conf))
     except Exception:  # noqa: BLE001 — telemetry must never break OCR
         return None
     if not scores:
