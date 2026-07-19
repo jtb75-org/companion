@@ -32,10 +32,19 @@ Return ONLY valid JSON with these exact keys:
 
 {
   "sender": "The company or organization that sent the bill (full name)",
-  "amount_due": "The total amount due as a number (e.g. 51.24)",
+  "amount_due": "The SIGNED total amount due as a number (see the AMOUNT rule below)",
   "due_date": "Payment due date in YYYY-MM-DD format (e.g. 2026-04-10)",
   "account_number_masked": "Account number with all but last 4 digits masked (e.g. ****0666)"
 }
+
+AMOUNT rule (read carefully):
+- Normally amount_due is a positive number, e.g. 51.24.
+- CRITICAL: If the statement shows a CREDIT, a negative balance, a
+  parenthesized amount like ($10.15), the words "CREDIT" or "DO NOT PAY", or a
+  value written as -$10.15, then the customer OWES NOTHING. Return a NEGATIVE
+  number (e.g. -10.15) or 0. NEVER turn a credit into a positive charge.
+- Example: a statement reading "Total Amount Due ($10.15) CREDIT DO NOT PAY"
+  means amount_due is -10.15.
 
 If a field cannot be found, set its value to null.
 Do NOT include any text outside the JSON object.
@@ -214,6 +223,61 @@ async def _llm_extract(
         return None
 
 
+def _parse_amount(raw: object) -> float | None:
+    """Parse a money value into a SIGNED float, preserving credits/negatives.
+
+    Accounting statements express a credit (money the customer does NOT owe) in
+    many ways: a parenthesized amount '($10.15)', a leading minus '-$10.15', a
+    'CR'/'CREDIT' marker (leading, trailing, or attached like '.15CR'), a
+    'CREDIT BALANCE' label, or a 'DO NOT PAY' notice next to the number. All of
+    these must map to a value <= 0 so downstream logic never tells a member to
+    pay a balance they don't owe. Returns None when no number can be recovered.
+    """
+    s = str(raw).strip()
+    if not s:
+        return None
+
+    negative = False
+
+    # Parenthesized negatives: "($10.15)" -> -10.15
+    if s.startswith("(") and s.endswith(")"):
+        negative = True
+        s = s[1:-1].strip()
+
+    # Credit markers anywhere in the value. Order matters: strip the multi-word
+    # phrases before the bare "credit" so no stray "balance"/"pay" is left to
+    # break float parsing. "cr" is matched only as a standalone token (letters
+    # on neither side) so ".15CR" and "CR .15" hit but words like "credit" or
+    # "accrual" do not.
+    credit_markers = (
+        r"do\s*not\s*pay",
+        r"credit\s*balance",
+        r"credit",
+        r"(?<![a-z])cr(?![a-z])",
+    )
+    for pat in credit_markers:
+        if re.search(pat, s, flags=re.IGNORECASE):
+            negative = True
+            s = re.sub(pat, " ", s, flags=re.IGNORECASE).strip()
+
+    s = s.replace("$", "").replace(",", "").strip()
+
+    if s.startswith("-"):
+        negative = True
+        s = s[1:].strip()
+
+    if not s:
+        # A bare credit marker with no number still means "owes nothing".
+        return 0.0 if negative else None
+
+    try:
+        value = float(s)
+    except (ValueError, TypeError):
+        return None
+
+    return -abs(value) if negative else value
+
+
 def _validate_fields(
     fields: dict, doc_type: str
 ) -> tuple[dict, list[str]]:
@@ -222,18 +286,17 @@ def _validate_fields(
 
     if doc_type == "bill":
         required = ["sender", "amount_due", "due_date"]
-        # Clean up amount_due — ensure it's a number
+        # Clean up amount_due — ensure it's a SIGNED number (credits stay <= 0).
         if fields.get("amount_due") is not None:
-            try:
-                fields["amount_due"] = float(
-                    str(fields["amount_due"])
-                    .replace("$", "")
-                    .replace(",", "")
-                )
-            except (ValueError, TypeError):
-                fields["amount_due"] = None
+            fields["amount_due"] = _parse_amount(fields["amount_due"])
 
         for key in required:
+            # A credit/zero balance (amount_due <= 0) is a VALID, present value,
+            # so treat amount_due as present whenever it parsed to a number.
+            if key == "amount_due":
+                if fields.get("amount_due") is None:
+                    missing.append(key)
+                continue
             if not fields.get(key):
                 missing.append(key)
 
@@ -262,13 +325,35 @@ async def _regex_bill(text: str) -> tuple[dict, list[str]]:
     """Regex fallback for bill extraction."""
     missing: list[str] = []
 
-    amount_match = re.search(r"\$\s*([\d,]+\.?\d*)", text)
-    amount = (
-        Decimal(amount_match.group(1).replace(",", ""))
-        if amount_match
-        else None
+    # Detect an explicit credit/negative first: "($10.15)" or "-$10.15".
+    credit_match = re.search(
+        r"\(\s*\$\s*([\d,]+\.?\d*)\s*\)|-\s*\$\s*([\d,]+\.?\d*)", text
     )
-    if not amount:
+    if credit_match:
+        raw = credit_match.group(1) or credit_match.group(2)
+        amount = -Decimal(raw.replace(",", ""))
+    else:
+        amount_match = re.search(r"\$\s*([\d,]+\.?\d*)", text)
+        amount = (
+            Decimal(amount_match.group(1).replace(",", ""))
+            if amount_match
+            else None
+        )
+        # Only an EXPLICIT credit signal flips a positive parse negative. A bare
+        # "credit" anywhere would wrongly negate an ordinary "Credit Card
+        # Statement" bill the member ACTUALLY owes, so it is NOT a signal here.
+        # Genuine signals: the phrase "credit balance", "do not pay", or a "CR"
+        # token immediately adjacent to the matched amount ("$45.00 CR").
+        if amount is not None:
+            explicit_credit = re.search(
+                r"(?i)credit\s+balance|do\s+not\s+pay", text
+            )
+            cr_adjacent = amount_match is not None and re.match(
+                r"(?i)\s*cr\b", text[amount_match.end():amount_match.end() + 4]
+            )
+            if explicit_credit or cr_adjacent:
+                amount = -abs(amount)
+    if amount is None:
         missing.append("amount_due")
 
     date_match = re.search(

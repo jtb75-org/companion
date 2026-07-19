@@ -34,19 +34,31 @@ _DEFAULT_SUMMARIZATION_PROMPT = (
     "- Tone: Warm, helpful, and reassuring.\n"
     "- Structure: 'What it is' followed by 'What to do'.\n"
     "- Safety: If the document is about money owed or medical news, "
-    "stay calm and suggest a small next step.\n\n"
+    "stay calm and suggest a small next step.\n"
+    "- CREDIT / ZERO BALANCE: If 'amount_due' is negative, zero, or the document "
+    "shows a credit ('CREDIT', 'DO NOT PAY', a parenthesized or negative amount), "
+    "the customer OWES NOTHING. NEVER tell them to pay, and never mention a due "
+    "date to pay by. Instead say the account has a credit or that there is nothing "
+    "to pay right now.\n\n"
     "## TASK\n"
     "1. Internal Reasoning: Briefly analyze the importance of this document.\n"
     "2. Spoken Summary: A 2-3 sentence friendly explanation for the user.\n"
     "3. Card Summary: A dashboard line (max 60 chars) in the format 'Sender — Key Detail'.\n\n"
     "## OUTPUT FORMAT\n"
     "Return ONLY valid JSON with these keys: 'reasoning', 'spoken', 'card'.\n"
-    "Example:\n"
+    "Example (amount owed):\n"
     '{{'
     '  "reasoning": "This is a utility bill with a clear due date.",'
     '  "spoken": "You have a bill from the Electric Company '
     'for $45. You should pay it by next Friday.",'
     '  "card": "Electric Co — $45 due Friday"'
+    '}}\n'
+    "Example (credit — nothing owed, amount_due is -10.15):\n"
+    '{{'
+    '  "reasoning": "This statement is a credit, so nothing is owed.",'
+    '  "spoken": "This statement from the City of Kirkwood shows a credit of '
+    '$10.15. Your account is ahead, so you do not need to send any money.",'
+    '  "card": "City of Kirkwood — $10.15 credit, all set"'
     '}}'
 )
 
@@ -107,16 +119,24 @@ async def summarize(
         "urgent": "Today",
     }.get(classification.urgency_level, "Soon")
 
-    # Reading complexity check
+    # Apply confidence-based hedging (Trust Layer)
+    spoken = _apply_confidence_hedging(spoken, classification.confidence_score)
+
+    # Credit safety guard (defense-in-depth): never instruct a member to pay a
+    # credit or zero balance, even if the LLM ignored the prompt guidance. This
+    # may fully replace `spoken`, so the reading-grade check MUST run after it.
+    spoken, card = _apply_credit_guard(
+        spoken, card, classification, extraction.extracted_fields
+    )
+
+    # Reading complexity check — computed on the FINAL text the member receives
+    # (post-hedging, post-credit-guard) so the audited grade matches reality.
     grade = get_flesch_kincaid_grade(spoken)
     if grade > 6.0:
         logger.warning(
             "COMPLEX_TEXT_WARNING: doc=%s grade=%.1f summary=%s",
             classification.document_id, grade, spoken
         )
-
-    # Apply confidence-based hedging (Trust Layer)
-    spoken = _apply_confidence_hedging(spoken, classification.confidence_score)
 
     return SummarizationResult(
         document_id=classification.document_id,
@@ -162,6 +182,83 @@ def _apply_confidence_hedging(text: str, confidence: float) -> str:
     if text.endswith(".") or text.endswith("!"):
         return text[:-1] + suffix
     return text + suffix
+
+
+def _coerce_amount(raw: object) -> float | None:
+    """Best-effort convert an extracted amount_due into a float."""
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _apply_credit_guard(
+    spoken: str,
+    card: str,
+    classification: ClassificationResult,
+    fields: dict,
+) -> tuple[str, str]:
+    """Replace bill summaries for a credit/zero balance with credit-safe wording.
+
+    Runs for any bill whose extracted amount_due is present and <= 0 (a credit or
+    zero balance). The rewrite is UNCONDITIONAL — it does NOT try to detect
+    payment-instruction language first. amount_due <= 0 definitively means the
+    member owes nothing, and no keyword list can reliably catch every way an LLM
+    might phrase a payment ("make a payment", "payment required", "send money",
+    "remit", "mail a check"). Always rewriting is the only LLM-independent
+    guarantee that a member is never told to pay a credit.
+
+    When the classification confidence is below 0.90, the wording is
+    COLLABORATIVE (invites review) rather than a flat statement, so an uncertain
+    read never confidently suppresses a payment the member may actually owe.
+    """
+    if classification.classification != "bill":
+        return spoken, card
+
+    amount = _coerce_amount(fields.get("amount_due"))
+    if amount is None or amount > 0:
+        return spoken, card
+
+    sender = fields.get("sender") or "this company"
+    credit = abs(amount)
+    low_confidence = classification.confidence_score < 0.90
+
+    if low_confidence:
+        # Uncertain read — invite a look together instead of a flat claim.
+        if credit > 0:
+            spoken = (
+                f"I think this statement from {sender} shows a credit of "
+                f"${credit:.2f} — want to look at it together?"
+            )
+            card = f"{sender} — maybe ${credit:.2f} credit, let's check"
+        else:
+            spoken = (
+                f"I think this statement from {sender} shows a zero balance "
+                "— want to look at it together?"
+            )
+            card = f"{sender} — maybe $0 balance, let's check"
+    elif credit > 0:
+        spoken = (
+            f"This statement from {sender} shows a credit of ${credit:.2f}. "
+            "Your account is ahead, so you do not need to send any money."
+        )
+        card = f"{sender} — ${credit:.2f} credit, all set"
+    else:
+        spoken = (
+            f"This statement from {sender} shows a zero balance. "
+            "Your account is all set, so you do not need to send any money "
+            "right now."
+        )
+        card = f"{sender} — $0 balance, all set"
+
+    logger.info(
+        "CREDIT_GUARD_APPLIED: doc=%s amount_due=%s confidence=%.2f "
+        "rewrote summary to credit-safe wording",
+        classification.document_id, amount, classification.confidence_score,
+    )
+    return spoken, card
 
 
 async def _llm_summarize(
