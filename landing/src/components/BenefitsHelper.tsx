@@ -87,8 +87,8 @@ export function BenefitsHelper() {
             ref={inputRef}
             id="q"
             type="text"
-            placeholder="Ask about Social Security or SSDI…"
-            aria-label="Ask a question about Social Security or SSDI"
+            placeholder="Explore a common question below…"
+            aria-label="Explore a common Social Security or SSDI question"
             defaultValue={suggestions[0] ?? ''}
           />
           <button className="go" type="submit" aria-label="Ask">

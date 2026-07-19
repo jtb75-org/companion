@@ -10,12 +10,13 @@ export function Hero() {
           <span className="eyebrow">Free · answers cited to official SSA rules</span>
           <h1>Disability benefits, explained without the runaround.</h1>
           <p className="lead">
-            Ask a plain-language question about Social Security or SSDI and get a clear, calm answer
-            — drawn straight from the official regulations, with the source cited.
+            Explore plain-language answers to common Social Security and SSDI questions — each one
+            drawn straight from the official regulations, with the source cited. When you’re ready, a
+            free account lets you ask your own.
           </p>
           <div className="hero-cta">
             <a href={CREATE_ACCOUNT_URL} className="btn btn-primary btn-lg">
-              Ask your first question
+              Ask your own question, free
             </a>
             <a href="#how" className="btn btn-ghost btn-lg">
               See how it works
