@@ -10,25 +10,11 @@ PODS:
     - GoogleUtilities/UserDefaults (~> 8.0)
     - PromisesObjC (~> 2.4)
   - FBLazyVector (0.84.1)
-  - Firebase/Auth (12.10.0):
-    - Firebase/CoreOnly
-    - FirebaseAuth (~> 12.10.0)
   - Firebase/CoreOnly (12.10.0):
     - FirebaseCore (~> 12.10.0)
   - Firebase/Messaging (12.10.0):
     - Firebase/CoreOnly
     - FirebaseMessaging (~> 12.10.0)
-  - FirebaseAppCheckInterop (12.10.0)
-  - FirebaseAuth (12.10.0):
-    - FirebaseAppCheckInterop (~> 12.10.0)
-    - FirebaseAuthInterop (~> 12.10.0)
-    - FirebaseCore (~> 12.10.0)
-    - FirebaseCoreExtension (~> 12.10.0)
-    - GoogleUtilities/AppDelegateSwizzler (~> 8.1)
-    - GoogleUtilities/Environment (~> 8.1)
-    - GTMSessionFetcher/Core (< 6.0, >= 3.4)
-    - RecaptchaInterop (~> 101.0)
-  - FirebaseAuthInterop (12.10.0)
   - FirebaseCore (12.10.0):
     - FirebaseCoreInternal (~> 12.10.0)
     - GoogleUtilities/Environment (~> 8.1)
@@ -1969,7 +1955,6 @@ PODS:
     - React-utils (= 0.84.1)
     - ReactNativeDependencies
   - ReactNativeDependencies (0.84.1)
-  - RecaptchaInterop (101.0.0)
   - RNAudioRecorderPlayer (3.6.14):
     - React-Core
   - RNCAsyncStorage (2.2.0):
@@ -2016,30 +2001,6 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
-    - Yoga
-  - RNFBAuth (24.0.0):
-    - Firebase/Auth (= 12.10.0)
-    - hermes-engine
-    - RCTRequired
-    - RCTTypeSafety
-    - React-Core
-    - React-Core-prebuilt
-    - React-debug
-    - React-Fabric
-    - React-featureflags
-    - React-graphics
-    - React-ImageManager
-    - React-jsi
-    - React-NativeModulesApple
-    - React-RCTFabric
-    - React-renderercss
-    - React-rendererdebug
-    - React-utils
-    - ReactCodegen
-    - ReactCommon/turbomodule/bridging
-    - ReactCommon/turbomodule/core
-    - ReactNativeDependencies
-    - RNFBApp
     - Yoga
   - RNFBMessaging (24.0.0):
     - Firebase/Messaging (= 12.10.0)
@@ -2241,7 +2202,6 @@ DEPENDENCIES:
   - RNAudioRecorderPlayer (from `../node_modules/react-native-audio-recorder-player`)
   - "RNCAsyncStorage (from `../node_modules/@react-native-async-storage/async-storage`)"
   - "RNFBApp (from `../node_modules/@react-native-firebase/app`)"
-  - "RNFBAuth (from `../node_modules/@react-native-firebase/auth`)"
   - "RNFBMessaging (from `../node_modules/@react-native-firebase/messaging`)"
   - RNFS (from `../node_modules/react-native-fs`)
   - "RNGoogleSignin (from `../node_modules/@react-native-google-signin/google-signin`)"
@@ -2254,9 +2214,6 @@ SPEC REPOS:
     - AppAuth
     - AppCheckCore
     - Firebase
-    - FirebaseAppCheckInterop
-    - FirebaseAuth
-    - FirebaseAuthInterop
     - FirebaseCore
     - FirebaseCoreExtension
     - FirebaseCoreInternal
@@ -2269,7 +2226,6 @@ SPEC REPOS:
     - GTMSessionFetcher
     - nanopb
     - PromisesObjC
-    - RecaptchaInterop
 
 EXTERNAL SOURCES:
   FBLazyVector:
@@ -2427,8 +2383,6 @@ EXTERNAL SOURCES:
     :path: "../node_modules/@react-native-async-storage/async-storage"
   RNFBApp:
     :path: "../node_modules/@react-native-firebase/app"
-  RNFBAuth:
-    :path: "../node_modules/@react-native-firebase/auth"
   RNFBMessaging:
     :path: "../node_modules/@react-native-firebase/messaging"
   RNFS:
@@ -2447,9 +2401,6 @@ SPEC CHECKSUMS:
   AppCheckCore: cc8fd0a3a230ddd401f326489c99990b013f0c4f
   FBLazyVector: e97c19a5a442429d1988f182a1940fb08df514da
   Firebase: 99f203d3a114c6ba591f3b32263a9626e450af65
-  FirebaseAppCheckInterop: 2480ab50a070a6bc02e26e62733874361f017a11
-  FirebaseAuth: 7109e33998bbd96f983dc02b97289b535f6f4141
-  FirebaseAuthInterop: f9c841843d840cae6a7db7551452eac520ffa3bd
   FirebaseCore: f4428e22415ea3b3eca652c2098413dabf2a23a9
   FirebaseCoreExtension: 3473a6ec16a91aee29fb75994a86c0220d2cddf3
   FirebaseCoreInternal: e7bbaeb00ab73011298f35ed223aa7371e212948
@@ -2535,11 +2486,9 @@ SPEC CHECKSUMS:
   ReactCodegen: 0e0907edc20b929e55e45572f6650ef92f927302
   ReactCommon: 309419492d417c4cbb87af06f67735afa40ecb9d
   ReactNativeDependencies: 2c5f7b786d787aa25d0bf738c822ca56ad4d7bb5
-  RecaptchaInterop: 11e0b637842dfb48308d242afc3f448062325aba
   RNAudioRecorderPlayer: 76b1d9ea2b22bf5ece274c0ff99c341daca42dc4
   RNCAsyncStorage: 0574155b95b96b89a51717c4dd42fb6057926bbc
   RNFBApp: 4052cfce86c5cfb14097e839868bfe0920d9d2b6
-  RNFBAuth: 9c06df9ef48feaa409ab3b807702d546d85deef0
   RNFBMessaging: a56cd7ef521417a3f1dc255114bd453af7c7e38e
   RNFS: 4ac0f0ea233904cb798630b3c077808c06931688
   RNGoogleSignin: c51c12e511eefc780f7aa498f969a2989798e16f

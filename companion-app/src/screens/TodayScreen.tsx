@@ -4,7 +4,6 @@ import { useNavigation, useFocusEffect } from '@react-navigation/native'
 import messaging from '@react-native-firebase/messaging'
 import { api } from '../api/client'
 import { colors, brand } from '../theme/colors'
-import { useAuth } from '../auth/AuthProvider'
 import { ScanButton } from '../components/ScanButton'
 import { TodoCheckbox } from '../components/TodoCheckbox'
 
@@ -62,7 +61,6 @@ interface TodayData {
 }
 
 export function TodayScreen() {
-  const { user } = useAuth()
   const navigation = useNavigation<any>()
   const [data, setData] = useState<TodayData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -199,7 +197,7 @@ export function TodayScreen() {
     )
   }
 
-  const name = user?.displayName?.split(' ')[0] || 'there'
+  const name = 'there'
   const activeMeds = data?.medications?.filter((m: any) => m.is_active !== false) || []
   const upcomingAppts = data?.appointments?.slice(0, 3) || []
   const pendingTodos = data?.todos?.filter((t: any) => !t.completed_at)?.slice(0, 5) || []
