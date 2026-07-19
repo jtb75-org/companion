@@ -72,6 +72,12 @@ async def test_summarization_prompt_defaults_without_db():
         ("$10.15 CR", -10.15),
         ("10.15 CREDIT", -10.15),
         ("CREDIT", 0.0),
+        # Attached / spaced CR, DO NOT PAY, and CREDIT BALANCE variants (niru).
+        (".15CR", -0.15),
+        ("CR .15", -0.15),
+        ("10.15 DO NOT PAY", -10.15),
+        (".15 DO NOT PAY", -0.15),
+        ("CREDIT BALANCE .15", -0.15),
         ("$1,234.56", 1234.56),
         ("51.24", 51.24),
         (10.15, 10.15),
@@ -144,6 +150,62 @@ def test_credit_guard_rewrites_payment_language():
     assert not _has_payment_language(new_card)
     assert "credit" in new_spoken.lower()
     assert "10.15" in new_spoken
+
+
+@pytest.mark.parametrize(
+    "spoken,card",
+    [
+        (
+            "Please make a payment of $10.15 to City of Kirkwood.",
+            "City of Kirkwood — payment required",
+        ),
+        (
+            "Send money to City of Kirkwood by July 22.",
+            "City of Kirkwood — send money",
+        ),
+        (
+            "You need to remit $10.15 to City of Kirkwood.",
+            "City of Kirkwood — remit $10.15",
+        ),
+    ],
+)
+def test_credit_guard_rewrites_even_without_forbidden_words(spoken, card):
+    """The guard is UNCONDITIONAL for amount_due <= 0: payment phrasings that
+    dodge the pay/owe/due keyword list ('make a payment', 'send money', 'remit')
+    are still rewritten to credit-safe wording."""
+    fields = {"sender": "City of Kirkwood", "amount_due": -10.15}
+    new_spoken, new_card = _apply_credit_guard(
+        spoken, card, _classification("bill"), fields
+    )
+    assert (new_spoken, new_card) != (spoken, card)
+    assert "credit" in new_spoken.lower()
+    assert "make a payment" not in new_spoken.lower()
+    assert "send money" not in new_spoken.lower()
+    assert "remit" not in new_spoken.lower()
+
+
+def test_credit_guard_high_confidence_is_flat():
+    """>= 0.90 confidence -> flat credit-safe statement, no 'together' hedge."""
+    fields = {"sender": "City of Kirkwood", "amount_due": -10.15}
+    new_spoken, new_card = _apply_credit_guard(
+        "You should pay $10.15.", "card", _classification("bill", 0.95), fields
+    )
+    assert "together" not in new_spoken.lower()
+    assert "do not need to send" in new_spoken.lower()
+    assert not _has_payment_language(new_spoken)
+
+
+def test_credit_guard_low_confidence_is_collaborative():
+    """< 0.90 confidence -> collaborative wording that invites review, so an
+    uncertain credit read never confidently suppresses a real payment."""
+    fields = {"sender": "City of Kirkwood", "amount_due": -10.15}
+    new_spoken, new_card = _apply_credit_guard(
+        "You should pay $10.15.", "card", _classification("bill", 0.70), fields
+    )
+    assert "together" in new_spoken.lower()
+    assert "10.15" in new_spoken
+    assert not _has_payment_language(new_spoken)
+    assert not _has_payment_language(new_card)
 
 
 def test_credit_guard_leaves_positive_amount_untouched():
@@ -235,3 +297,43 @@ async def test_summarize_template_fallback_credit_safe(monkeypatch):
     assert not _has_payment_language(result.spoken_summary)
     assert not _has_payment_language(result.card_summary)
     assert "credit" in result.spoken_summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_summarize_reading_grade_matches_post_guard_text(monkeypatch):
+    """reading_grade must be computed on the text the member actually receives
+    (post credit-guard), not the discarded pre-rewrite LLM text."""
+    import app.conversation.llm as llm_module
+    from app.pipeline.text_complexity import get_flesch_kincaid_grade
+    from tests.stub_llm import StubGeminiClient
+
+    # Deliberately long, complex pre-rewrite spoken so its grade differs from the
+    # short credit-safe replacement.
+    payment_json = json.dumps(
+        {
+            "reasoning": "Utility statement.",
+            "spoken": (
+                "This comprehensive municipal utility statement from the "
+                "City of Kirkwood indicates that a substantial remittance "
+                "obligation of approximately ten dollars must be satisfied "
+                "expeditiously to avoid subsequent penalties."
+            ),
+            "card": "City of Kirkwood — payment required",
+        }
+    )
+    stub = StubGeminiClient(reply=payment_json)
+    monkeypatch.setattr(llm_module, "get_llm_client", lambda: stub)
+
+    classification = _classification("bill")
+    extraction = ExtractionResult(
+        document_id=classification.document_id,
+        extracted_fields={"sender": "City of Kirkwood", "amount_due": -10.15},
+    )
+
+    result = await summarize(classification, extraction, db=None)
+
+    # The recorded grade equals the grade of the FINAL (rewritten) spoken text.
+    assert result.reading_grade == pytest.approx(
+        get_flesch_kincaid_grade(result.spoken_summary)
+    )
+    assert not _has_payment_language(result.spoken_summary)

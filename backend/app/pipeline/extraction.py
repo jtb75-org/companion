@@ -227,10 +227,11 @@ def _parse_amount(raw: object) -> float | None:
     """Parse a money value into a SIGNED float, preserving credits/negatives.
 
     Accounting statements express a credit (money the customer does NOT owe) in
-    several ways: a parenthesized amount '($10.15)', a leading minus '-$10.15',
-    or a trailing 'CR'/'CREDIT' marker. All of these must map to a value <= 0 so
-    downstream logic never tells a member to pay a balance they don't owe.
-    Returns None when no number can be recovered.
+    many ways: a parenthesized amount '($10.15)', a leading minus '-$10.15', a
+    'CR'/'CREDIT' marker (leading, trailing, or attached like '.15CR'), a
+    'CREDIT BALANCE' label, or a 'DO NOT PAY' notice next to the number. All of
+    these must map to a value <= 0 so downstream logic never tells a member to
+    pay a balance they don't owe. Returns None when no number can be recovered.
     """
     s = str(raw).strip()
     if not s:
@@ -243,10 +244,21 @@ def _parse_amount(raw: object) -> float | None:
         negative = True
         s = s[1:-1].strip()
 
-    # Trailing/leading credit markers: "10.15 CR", "10.15 CREDIT", "CREDIT 10.15"
-    if re.search(r"(?i)(^\s*credit\b|\bcr\s*$|\bcredit\s*$)", s):
-        negative = True
-        s = re.sub(r"(?i)(^\s*credit\b|\s*cr\s*$|\s*credit\s*$)", "", s).strip()
+    # Credit markers anywhere in the value. Order matters: strip the multi-word
+    # phrases before the bare "credit" so no stray "balance"/"pay" is left to
+    # break float parsing. "cr" is matched only as a standalone token (letters
+    # on neither side) so ".15CR" and "CR .15" hit but words like "credit" or
+    # "accrual" do not.
+    credit_markers = (
+        r"do\s*not\s*pay",
+        r"credit\s*balance",
+        r"credit",
+        r"(?<![a-z])cr(?![a-z])",
+    )
+    for pat in credit_markers:
+        if re.search(pat, s, flags=re.IGNORECASE):
+            negative = True
+            s = re.sub(pat, " ", s, flags=re.IGNORECASE).strip()
 
     s = s.replace("$", "").replace(",", "").strip()
 

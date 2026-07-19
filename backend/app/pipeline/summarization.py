@@ -7,7 +7,6 @@ Falls back to templates if LLM is unavailable.
 
 import json
 import logging
-import re
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -120,22 +119,24 @@ async def summarize(
         "urgent": "Today",
     }.get(classification.urgency_level, "Soon")
 
-    # Reading complexity check
+    # Apply confidence-based hedging (Trust Layer)
+    spoken = _apply_confidence_hedging(spoken, classification.confidence_score)
+
+    # Credit safety guard (defense-in-depth): never instruct a member to pay a
+    # credit or zero balance, even if the LLM ignored the prompt guidance. This
+    # may fully replace `spoken`, so the reading-grade check MUST run after it.
+    spoken, card = _apply_credit_guard(
+        spoken, card, classification, extraction.extracted_fields
+    )
+
+    # Reading complexity check — computed on the FINAL text the member receives
+    # (post-hedging, post-credit-guard) so the audited grade matches reality.
     grade = get_flesch_kincaid_grade(spoken)
     if grade > 6.0:
         logger.warning(
             "COMPLEX_TEXT_WARNING: doc=%s grade=%.1f summary=%s",
             classification.document_id, grade, spoken
         )
-
-    # Apply confidence-based hedging (Trust Layer)
-    spoken = _apply_confidence_hedging(spoken, classification.confidence_score)
-
-    # Credit safety guard (defense-in-depth): never instruct a member to pay a
-    # credit or zero balance, even if the LLM ignored the prompt guidance.
-    spoken, card = _apply_credit_guard(
-        spoken, card, classification, extraction.extracted_fields
-    )
 
     return SummarizationResult(
         document_id=classification.document_id,
@@ -183,10 +184,6 @@ def _apply_confidence_hedging(text: str, confidence: float) -> str:
     return text + suffix
 
 
-# Words that would (wrongly) tell a member to pay when they owe nothing.
-_PAYMENT_INSTRUCTION_RE = re.compile(r"(?i)\b(pay|paid|owe|owed|due)\b")
-
-
 def _coerce_amount(raw: object) -> float | None:
     """Best-effort convert an extracted amount_due into a float."""
     if raw is None:
@@ -203,13 +200,19 @@ def _apply_credit_guard(
     classification: ClassificationResult,
     fields: dict,
 ) -> tuple[str, str]:
-    """Rewrite bill summaries that tell a member to pay a credit/zero balance.
+    """Replace bill summaries for a credit/zero balance with credit-safe wording.
 
-    Runs only for bills whose extracted amount_due is present and <= 0 (a credit
-    or zero balance). If either the spoken or card summary contains payment-
-    instruction language ('pay', 'owe', 'due'), both are replaced with warm,
-    plain-language, credit-safe wording. This is a deliberate belt-and-suspenders
-    check that does NOT trust the LLM to have followed the prompt.
+    Runs for any bill whose extracted amount_due is present and <= 0 (a credit or
+    zero balance). The rewrite is UNCONDITIONAL — it does NOT try to detect
+    payment-instruction language first. amount_due <= 0 definitively means the
+    member owes nothing, and no keyword list can reliably catch every way an LLM
+    might phrase a payment ("make a payment", "payment required", "send money",
+    "remit", "mail a check"). Always rewriting is the only LLM-independent
+    guarantee that a member is never told to pay a credit.
+
+    When the classification confidence is below 0.90, the wording is
+    COLLABORATIVE (invites review) rather than a flat statement, so an uncertain
+    read never confidently suppresses a payment the member may actually owe.
     """
     if classification.classification != "bill":
         return spoken, card
@@ -218,16 +221,25 @@ def _apply_credit_guard(
     if amount is None or amount > 0:
         return spoken, card
 
-    if not (
-        _PAYMENT_INSTRUCTION_RE.search(spoken)
-        or _PAYMENT_INSTRUCTION_RE.search(card)
-    ):
-        # Already credit-safe; leave the (warmer) LLM wording intact.
-        return spoken, card
-
     sender = fields.get("sender") or "this company"
     credit = abs(amount)
-    if credit > 0:
+    low_confidence = classification.confidence_score < 0.90
+
+    if low_confidence:
+        # Uncertain read — invite a look together instead of a flat claim.
+        if credit > 0:
+            spoken = (
+                f"I think this statement from {sender} shows a credit of "
+                f"${credit:.2f} — want to look at it together?"
+            )
+            card = f"{sender} — maybe ${credit:.2f} credit, let's check"
+        else:
+            spoken = (
+                f"I think this statement from {sender} shows a zero balance "
+                "— want to look at it together?"
+            )
+            card = f"{sender} — maybe $0 balance, let's check"
+    elif credit > 0:
         spoken = (
             f"This statement from {sender} shows a credit of ${credit:.2f}. "
             "Your account is ahead, so you do not need to send any money."
@@ -242,8 +254,9 @@ def _apply_credit_guard(
         card = f"{sender} — $0 balance, all set"
 
     logger.info(
-        "CREDIT_GUARD_APPLIED: doc=%s amount_due=%s rewrote payment language",
-        classification.document_id, amount,
+        "CREDIT_GUARD_APPLIED: doc=%s amount_due=%s confidence=%.2f "
+        "rewrote summary to credit-safe wording",
+        classification.document_id, amount, classification.confidence_score,
     )
     return spoken, card
 
