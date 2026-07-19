@@ -1,17 +1,15 @@
-"""Authentik invite-accept flow: an invitee can authenticate with their Authentik BFF
-session (no Firebase bearer) to accept/decline THEIR OWN invitation, while the endpoint
-stays byte-identical on the Firebase default.
+"""Authentik invite-accept flow: an invitee authenticates with their Authentik BFF
+session to accept/decline THEIR OWN invitation.
 
-The only change is in ``app/api/v1/invitations.py``: ``/accept`` + ``/decline`` now
-resolve the session holder's IdP-verified email via ``resolve_caregiver_session`` before
-falling back to the Firebase bearer path. There is NO login-admission change — an invitee
-already gets a session because ``create_member_invitation`` seeds an INVITED ``users`` stub
-for their email, which ``/auth/login`` admits (INVITED is not an inactive status) and binds
-to their subject; ``_email_for_subject`` then recovers the email from that stub. The real
-authorization stays the invitation token + ``contact_email`` match inside the service.
+``/accept`` + ``/decline`` in ``app/api/v1/invitations.py`` resolve the session holder's
+IdP-verified email via ``resolve_caregiver_session``. There is NO login-admission change —
+an invitee already gets a session because ``create_member_invitation`` seeds an INVITED
+``users`` stub for their email, which ``/auth/login`` admits (INVITED is not an inactive
+status) and binds to their subject; ``_email_for_subject`` then recovers the email from
+that stub. The real authorization stays the invitation token + ``contact_email`` match
+inside the service.
 
 Covers:
-  * ``/accept`` Firebase path is byte-identical when the switch is off (inert).
   * ``/accept`` + ``/decline`` under an Authentik session (subject bound to the stub).
   * the full production cascade against the REAL ``/auth/login`` endpoint.
 
@@ -128,54 +126,7 @@ def _mute_accept_side_effects(monkeypatch) -> None:
     )
 
 
-# ── 1. /invitations/accept Firebase path is unchanged (inert on the default) ──
-
-
-@requires_db
-async def test_accept_endpoint_firebase_path_unchanged(monkeypatch):
-    """With the switch off (firebase default) resolve_caregiver_session returns None, so the
-    endpoint runs the Firebase bearer path: a bearer whose verified email matches the
-    invite's contact_email accepts the invitation."""
-    monkeypatch.setattr(settings, "auth_provider", "firebase")  # explicit: inert branch
-    assert settings.authentik_login_enabled is False  # sanity
-    member_email = f"acc-member-{uuid.uuid4()}@t.io"
-    cg_email = f"acc-cg-{uuid.uuid4()}@t.io"
-    token = f"tok-{uuid.uuid4().hex}"
-    await _delete_user(member_email)
-    await _delete_user(cg_email)
-    await _seed_member_with_pending_invitee(member_email, cg_email, token=token)
-
-    # Firebase verifier used inside _extract_bearer_token (app.auth.dependencies).
-    async def _fake_verify(t):  # noqa: ARG001
-        return {"email": cg_email}
-
-    monkeypatch.setattr("app.auth.dependencies.verify_firebase_token", _fake_verify)
-    _mute_accept_side_effects(monkeypatch)
-
-    async with _client() as ac:
-        r = await ac.post(
-            "/api/v1/invitations/accept",
-            json={"token": token},
-            headers={"Authorization": "Bearer dummy"},
-        )
-    assert r.status_code == 200
-    assert r.json()["accepted"] is True
-
-    # The invitation was accepted + the contact activated (token consumed).
-    async with db_module.async_session_factory() as s:
-        tc = (
-            await s.execute(
-                select(TrustedContact).where(TrustedContact.contact_email == cg_email)
-            )
-        ).scalar_one()
-        assert tc.invitation_status == InvitationStatus.ACCEPTED
-        assert tc.is_active is True
-        assert tc.invitation_token is None
-    await _delete_user(member_email)
-    await _delete_user(cg_email)
-
-
-# ── 2. /invitations/accept + /decline under an Authentik BFF session ──
+# ── /invitations/accept + /decline under an Authentik BFF session ──
 
 
 @requires_db

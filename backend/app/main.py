@@ -35,6 +35,17 @@ async def lifespan(app: FastAPI):
             "This exposes all endpoints without authentication. "
             "Set COMPANION_DEV_AUTH_BYPASS=false and redeploy."
         )
+    # Startup: Authentik is the SOLE authentication provider (Firebase auth was
+    # retired). There is no Firebase path to fall back to, so a non-"authentik"
+    # auth_provider would leave every endpoint's session resolver inert and lock
+    # out all users. Fail loud on boot in production rather than serve a broken auth
+    # surface.
+    if settings.environment == "prod" and settings.auth_provider != "authentik":
+        raise RuntimeError(
+            "FATAL: COMPANION_AUTH_PROVIDER must be 'authentik' in production "
+            f"(got {settings.auth_provider!r}). Firebase authentication has been "
+            "removed; there is no other provider. Set it and redeploy."
+        )
     # Startup: require the maintenance (BYPASSRLS) DB URL in production. Every
     # per-member table is under FORCE RLS, so admin/cross-member/bootstrap paths
     # depend on the companion_maintenance connection. If it is unset,
@@ -100,9 +111,8 @@ app.include_router(pipeline_router)
 app.include_router(admin_router)
 app.include_router(internal_router)
 app.include_router(auth_router)
-# Additive BFF native-login surface (Firebase→Authentik migration, PR #2).
-# The endpoints self-gate on settings.authentik_enabled (DEFAULT False → 404),
-# so including the router here is inert until the master auth_provider flag flips.
+# BFF native-login surface (Authentik). The endpoints self-gate on
+# settings.authentik_enabled, which is the sole supported provider.
 app.include_router(authentik_auth_router)
 app.include_router(seed_admin_router)
 if settings.dev_auth_bypass:

@@ -1,35 +1,18 @@
-"""Pipeline event publisher — writes stage updates to Firestore."""
+"""Pipeline event publisher.
 
-import asyncio
+Firestore-backed pipeline observability events were retired in the self-hosted
+migration (document status now lives in the DB — ``documents.status`` + the admin
+pipeline-health endpoint). This module remains as a no-op seam so callers need not
+change; ``publish_pipeline_event`` returns immediately.
+"""
+
 import logging
-from datetime import datetime
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_firestore_available: bool | None = None
-
-
-def _get_firestore():
-    """Get Firestore client, initializing Firebase if needed."""
-    global _firestore_available
-    if _firestore_available is False:
-        return None
-
-    try:
-        from app.auth.firebase import _ensure_initialized
-
-        _ensure_initialized()
-        from firebase_admin import firestore
-
-        client = firestore.client()
-        _firestore_available = True
-        return client
-    except Exception:
-        logger.warning("Firestore client unavailable")
-        _firestore_available = False
-        return None
+_warned_disabled = False
 
 
 async def publish_pipeline_event(
@@ -39,50 +22,19 @@ async def publish_pipeline_event(
     metadata: dict | None = None,
     user_id: str | None = None,
 ) -> None:
-    """Write pipeline stage status to Firestore.
+    """No-op: Firestore pipeline events were retired in the migration.
 
-    Fails fast (2s timeout) to avoid blocking the pipeline.
+    Document status lives in the DB now. The ``firestore_pipeline_events`` setting is
+    vestigial — if it is ever enabled we log once and still do nothing, since the
+    Firestore backend (and the firebase-admin dependency) has been removed.
     """
-    # Firestore was retired in the self-hosted migration; skip entirely when
-    # disabled (default) so the pipeline doesn't attempt a doomed write and log
-    # a warning per stage. Document status lives in the DB now.
     if not settings.firestore_pipeline_events:
         return
-
-    doc_id = str(document_id)
-
-    try:
-        db = _get_firestore()
-        if db is None:
-            return
-
-        update = {
-            stage: status,
-            "updated_at": datetime.utcnow().isoformat(),
-        }
-        if user_id:
-            update["user_id"] = str(user_id)
-        if metadata:
-            update[f"{stage}_metadata"] = metadata
-
-        await asyncio.wait_for(
-            asyncio.to_thread(
-                db.collection("pipeline_events")
-                .document(doc_id)
-                .set,
-                update,
-                merge=True,
-            ),
-            timeout=2.0,
-        )
-    except TimeoutError:
+    global _warned_disabled
+    if not _warned_disabled:
+        _warned_disabled = True
         logger.warning(
-            "Firestore write timed out for doc %s",
-            document_id,
-        )
-    except Exception:
-        logger.warning(
-            "Failed to write pipeline event to Firestore"
-            " for doc %s",
-            document_id,
+            "firestore_pipeline_events is enabled but Firestore pipeline events were "
+            "retired in the self-hosted migration — ignoring. Document status lives in "
+            "the DB (documents.status)."
         )

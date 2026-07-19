@@ -2,7 +2,7 @@
 
 A first-time caregiver invitee sets their Authentik password through Companion's
 branded UI (``POST /api/v1/invitations/set-password``) so they can then log in and
-accept. The whole surface is INERT under ``auth_provider=firebase`` (404).
+accept. The whole surface is INERT when ``auth_provider`` is not authentik (404).
 
 The key signal is the invitee's ``users`` stub ``account_status``:
   * INVITED ⇒ never set a password ⇒ set-password proceeds; ``needs_password_setup``.
@@ -118,12 +118,12 @@ class _Spies:
         )
 
 
-# ── 1. set-password 404 under firebase (inert) ──────────────────────────────────
+# ── 1. set-password 404 when provider is not authentik (inert) ──────────────────
 
 
 @requires_db
-async def test_set_password_404_under_firebase(monkeypatch):
-    monkeypatch.setattr(settings, "auth_provider", "firebase")
+async def test_set_password_404_when_not_authentik(monkeypatch):
+    monkeypatch.setattr(settings, "auth_provider", "disabled")
     assert settings.authentik_login_enabled is False  # sanity
     spies = _Spies(monkeypatch)
     member_email = f"sp-fb-member-{uuid.uuid4()}@t.io"
@@ -275,8 +275,8 @@ async def test_validate_needs_password_setup_true_under_authentik(monkeypatch):
 
 
 @requires_db
-async def test_validate_needs_password_setup_false_under_firebase(monkeypatch):
-    monkeypatch.setattr(settings, "auth_provider", "firebase")
+async def test_validate_needs_password_setup_false_when_not_authentik(monkeypatch):
+    monkeypatch.setattr(settings, "auth_provider", "disabled")
     member_email = f"val-f-member-{uuid.uuid4()}@t.io"
     cg_email = f"val-f-cg-{uuid.uuid4()}@t.io"
     token = f"tok-{uuid.uuid4().hex}"
@@ -289,7 +289,7 @@ async def test_validate_needs_password_setup_false_under_firebase(monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["contact_email"] == cg_email
-    assert body["needs_password_setup"] is False  # inert under firebase
+    assert body["needs_password_setup"] is False  # inert when not authentik
     await _delete_user(member_email)
     await _delete_user(cg_email)
 

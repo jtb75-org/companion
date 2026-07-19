@@ -1,8 +1,9 @@
-"""BFF /auth/login endpoint: flag-gating + Companion's invite-only refusal.
+"""BFF /auth/login endpoint: gating + Companion's invite-only refusal.
 
-Authentik and Redis are mocked — we never reach a live IdP or Redis. The flag
-default (auth_provider="firebase") must make the endpoint 404/inert; the DB-backed
-tests flip the flag and assert the invite-only gate mirrors complete_profile.
+Authentik and Redis are mocked — we never reach a live IdP or Redis. Authentik is the
+sole provider (auth_provider defaults to "authentik"); as defense-in-depth the surface
+still 404s if the provider is somehow not "authentik". The DB-backed tests assert the
+invite-only gate mirrors complete_profile.
 """
 
 from __future__ import annotations
@@ -24,19 +25,31 @@ def _client():
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
-# ── flag-gating: no DB / Redis needed (the gate fires before anything else) ──
+# ── gating: no DB / Redis needed (the gate fires before anything else) ──
 
-async def test_login_404_when_authentik_disabled():
-    """DEFAULT auth_provider=firebase → the BFF surface does not exist (404)."""
+async def test_default_provider_is_authentik():
+    """Authentik is the sole provider — the default must be 'authentik' (Firebase auth
+    was retired; a non-authentik default would leave the app with no auth path)."""
     from app.config import settings
 
-    assert settings.auth_provider == "firebase"  # sanity: default keeps Firebase live
+    assert settings.auth_provider == "authentik"
+
+
+async def test_login_404_when_provider_not_authentik(monkeypatch):
+    """Defense-in-depth: the BFF surface 404s if auth_provider is somehow not 'authentik'
+    (the prod startup guard prevents this configuration from ever booting)."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "auth_provider", "disabled")
     async with _client() as ac:
         r = await ac.post(_LOGIN, json={"username": "a@b.com", "password": "x"})
     assert r.status_code == 404
 
 
-async def test_logout_404_when_authentik_disabled():
+async def test_logout_404_when_provider_not_authentik(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "auth_provider", "disabled")
     async with _client() as ac:
         r = await ac.post("/auth/logout")
     assert r.status_code == 404

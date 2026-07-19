@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth_authentik import _require_authentik_enabled
 from app.api.v1.activation import _revoke_sessions_for_email
-from app.auth.dependencies import User, _extract_bearer_token, require_complete_profile
+from app.auth.dependencies import User, require_complete_profile
 from app.auth.principal import resolve_caregiver_session
 from app.config import settings
 from app.db import get_db
@@ -79,21 +79,16 @@ async def accept_invitation(
 ):
     """Caregiver (incl. a not-yet-active invitee) accepts an invitation by token.
 
-    DUAL-RUN: under Authentik the web sends an ambient cookie session (no bearer), so we
-    resolve the session holder's IdP-verified email via ``resolve_caregiver_session``. An
-    invitee resolves even before they are an active caregiver because
-    ``create_member_invitation`` seeds an INVITED ``users`` stub for their email, which
-    Authentik ``/auth/login`` admits and binds to their subject — ``_email_for_subject``
-    then recovers the email from that stub. When the switch is off/firebase or there is no
-    session this returns None and the Firebase bearer path runs UNCHANGED (byte-identical).
-    The real authorization is still the token + ``contact_email`` match inside
+    The web sends an ambient cookie session, so we resolve the session holder's
+    IdP-verified email via ``resolve_caregiver_session``. An invitee resolves even before
+    they are an active caregiver because ``create_member_invitation`` seeds an INVITED
+    ``users`` stub for their email, which Authentik ``/auth/login`` admits and binds to
+    their subject — ``_email_for_subject`` then recovers the email from that stub. The
+    real authorization is still the token + ``contact_email`` match inside
     ``accept_invitation``."""
     email = await resolve_caregiver_session(request)
-    if email is None:
-        decoded = await _extract_bearer_token(authorization)
-        email = decoded.get("email")
-        if not email:
-            raise HTTPException(401, "Firebase token missing email claim")
+    if not email:
+        raise HTTPException(401, "Not authenticated")
 
     contact = await invitation_service.accept_invitation(db, data.token, email)
     if contact is None:
@@ -133,17 +128,13 @@ async def decline_invitation(
 ):
     """Caregiver (incl. a not-yet-active invitee) declines an invitation.
 
-    DUAL-RUN mirror of ``accept_invitation``: resolve the session holder's IdP-verified
-    email via ``resolve_caregiver_session`` (an invitee resolves through their seeded
-    INVITED ``users`` stub); otherwise fall back to the Firebase bearer path UNCHANGED.
-    The token + ``contact_email`` match inside ``decline_invitation`` remains the real
-    authorization."""
+    Mirror of ``accept_invitation``: resolve the session holder's IdP-verified email via
+    ``resolve_caregiver_session`` (an invitee resolves through their seeded INVITED
+    ``users`` stub). The token + ``contact_email`` match inside ``decline_invitation``
+    remains the real authorization."""
     email = await resolve_caregiver_session(request)
-    if email is None:
-        decoded = await _extract_bearer_token(authorization)
-        email = decoded.get("email")
-        if not email:
-            raise HTTPException(401, "Firebase token missing email claim")
+    if not email:
+        raise HTTPException(401, "Not authenticated")
 
     contact = await invitation_service.decline_invitation(db, data.token, email)
     if contact is None:

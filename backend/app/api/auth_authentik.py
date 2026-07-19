@@ -1,15 +1,14 @@
-"""BFF native-login endpoints (companion-authentik, PR #2 — ADDITIVE AND INERT).
+"""BFF native-login endpoints (companion-authentik).
 
 The SPA/app posts credentials here; we authenticate against Authentik server-side
 (no redirect/hosted UI), enforce Companion's invite-only gate, and set an httpOnly
 session cookie + a double-submit CSRF cookie.
 
-CRITICAL: this whole surface is gated behind ``settings.authentik_enabled``
-(DEFAULT False). While the master ``auth_provider`` is "firebase" these endpoints
-return 404 and touch nothing — Firebase stays the live auth for every existing
-endpoint, and no session minted here is consumed yet (the auth deps still read
-only the Firebase bearer). The actual cutover — resolving requests from this
-session and rewiring the ~10 verify_firebase_token call sites — is a later PR.
+Authentik is the SOLE authentication provider — Firebase auth has been retired. Every
+endpoint resolves the caller from the session minted here (see app/auth/principal.py);
+there is no other auth path. This surface is gated behind ``settings.authentik_enabled``
+as defense-in-depth, which is always True in a running deployment (the prod startup
+guard enforces ``auth_provider == "authentik"``).
 
 Companion adaptations vs the HealthCostClarity original:
   * Invite-only: HCC JIT-provisions on first login; Companion REFUSES an email

@@ -1,10 +1,19 @@
-"""complete-profile is invite-only: no pre-existing User row => rejected."""
+"""complete-profile is invite-only: it resolves ONLY an existing member from the
+Authentik BFF session, so it can never self-provision an account.
+
+Invite-only enforcement + the signup_refused audit live at /auth/login (see
+test_authentik_login.test_login_refuses_uninvited_email); a session only exists for an
+already-invited member, so complete-profile is unreachable for an uninvited email.
+"""
 
 from __future__ import annotations
 
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
 
+import app.auth.session as session_module
+from app.auth.session import InMemorySessionStore
+from app.config import settings
 from app.db import session as db_module
 from app.main import app
 from app.models.audit import AccountAuditLog
@@ -17,12 +26,11 @@ pytestmark = requires_db
 _ENDPOINT = "/api/v1/auth/complete-profile"
 
 
-def _patch_token_email(monkeypatch, email: str):
-    async def _fake_verify(token: str):
-        return {"email": email}
-
-    # complete_profile imports verify_firebase_token into its own module.
-    monkeypatch.setattr("app.api.v1.profile.verify_firebase_token", _fake_verify)
+def _session_for(monkeypatch, subject: str) -> InMemorySessionStore:
+    monkeypatch.setattr(settings, "dev_auth_bypass", False)
+    store = InMemorySessionStore()
+    monkeypatch.setattr(session_module, "_store", store)
+    return store
 
 
 async def _delete_user(email: str):
@@ -48,24 +56,26 @@ def _client() -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
-async def test_uninvited_email_is_rejected(monkeypatch):
+async def test_uninvited_subject_is_rejected(monkeypatch):
+    """A session whose subject maps to no member row → 401; no account is created
+    (invite-only: complete-profile never self-provisions)."""
     email = "uninvited-invite-test@example.com"
     await _delete_user(email)  # ensure no row exists
-    _patch_token_email(monkeypatch, email)
+    store = _session_for(monkeypatch, "sub-uninvited")
+    sid = await store.create("sub-uninvited")
     async with _client() as ac:
         r = await ac.post(
             _ENDPOINT,
             json={"first_name": "Mallory", "last_name": "Nope"},
-            headers={"Authorization": "Bearer dummy"},
+            cookies={settings.session_cookie_name: sid, settings.csrf_cookie_name: "t"},
+            headers={"X-CSRF-Token": "t"},
         )
-    assert r.status_code == 403
+    assert r.status_code == 401
     # And no account was created.
     async with db_module.async_session_factory() as s:
         assert (
             await s.execute(select(User).where(User.email == email))
         ).scalar_one_or_none() is None
-    # The refused signup is audited.
-    assert "signup_refused" in await _audit_events(email)
     await _delete_user(email)
 
 
@@ -73,21 +83,25 @@ async def test_invited_stub_is_completed_and_activated(monkeypatch):
     email = "invited-invite-test@example.com"
     await _delete_user(email)
     async with db_module.async_session_factory() as s:
+        # The invited stub carries the subject bound at /auth/login.
         s.add(
             User(
                 email=email,
                 preferred_name="Inv",
                 display_name="Inv",
                 account_status=AccountStatus.INVITED,
+                external_subject_id="sub-invited",
             )
         )
         await s.commit()
-    _patch_token_email(monkeypatch, email)
+    store = _session_for(monkeypatch, "sub-invited")
+    sid = await store.create("sub-invited")
     async with _client() as ac:
         r = await ac.post(
             _ENDPOINT,
             json={"first_name": "Jane", "last_name": "Doe"},
-            headers={"Authorization": "Bearer dummy"},
+            cookies={settings.session_cookie_name: sid, settings.csrf_cookie_name: "t"},
+            headers={"X-CSRF-Token": "t"},
         )
     assert r.status_code == 200
     async with db_module.async_session_factory() as s:

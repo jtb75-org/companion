@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.authorize import caregiver_authorized_for_member
-from app.auth.firebase import verify_firebase_token
 from app.auth.principal import resolve_caregiver_session
 from app.config import settings
 from app.db import get_db
@@ -33,18 +32,10 @@ async def get_alerts(
         alerts = await caregiver_service.get_alerts(db, user_id)
         return {"alerts": alerts}
 
-    # DUAL-RUN: prefer an Authentik caregiver session (inert unless auth_provider ==
-    # "authentik"); else the Firebase bearer path runs UNCHANGED.
+    # Resolve the caregiver's verified email from the Authentik BFF session.
     email = await resolve_caregiver_session(request)
-    if email is None:
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="No token")
-        token = authorization.removeprefix("Bearer ").strip()
-        try:
-            decoded = await verify_firebase_token(token)
-        except ValueError as e:
-            raise HTTPException(status_code=401, detail=str(e)) from None
-        email = decoded.get("email")
+    if not email:
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
     # Verify this email is an active trusted contact for this member (on the
     # maintenance session — no member GUC yet → RLS would fail closed). This IS

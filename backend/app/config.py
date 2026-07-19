@@ -84,19 +84,18 @@ class Settings(BaseSettings):
     s3_bucket_documents: str = "companion-documents"
     s3_region: str = "us-east-1"
 
-    # Firebase
+    # Firebase project id — retained ONLY for the FCM push path (see
+    # services/push_notification_service.py, which uses the FCM v1 HTTP API via a
+    # service-account key, NOT firebase-admin). Firebase AUTHENTICATION has been
+    # retired; nothing here verifies Firebase ID tokens any more.
     firebase_project_id: str = "companion-dev"
 
-    # ── Authentik BFF native login (PR #2 of the Firebase→Authentik migration) ──
-    # Master auth switch. DEFAULT "firebase": every existing endpoint keeps
-    # verifying Firebase ID tokens exactly as it does today — this PR does NOT
-    # rewire the ~10 verify_firebase_token call sites. Setting "authentik" only
-    # turns ON the additive BFF /auth/login|/auth/logout endpoints below (which
-    # are otherwise 404/inert); it does NOT yet change how existing endpoints
-    # authenticate. The real cutover (rewiring get_current_user et al.) is a
-    # later PR. So this flag is safe to leave at "firebase" in prod: nothing
-    # authenticates via Authentik until then.
-    auth_provider: str = "firebase"  # firebase | authentik
+    # ── Authentik BFF native login ──
+    # Auth provider. Authentik is now the SOLE authentication path; the Firebase
+    # auth path has been removed. This setting is retained for the prod startup
+    # guard in main.py (which fails fast if it is ever set to anything else) and
+    # for the BFF endpoint gates. There is no "firebase" provider any more.
+    auth_provider: str = "authentik"  # authentik (only supported value)
 
     # companion-authentik OIDC — consumed ONLY by the BFF path above. In-cluster
     # base URL for the server-side flow driver + token exchange (no browser).
@@ -241,21 +240,20 @@ class Settings(BaseSettings):
 
     @property
     def authentik_enabled(self) -> bool:
-        """True only when the master switch selects Authentik. Gates the additive
-        BFF /auth endpoints; DEFAULT False keeps Firebase the sole live auth."""
+        """True when Authentik is the active provider (the only supported value).
+
+        Gates the BFF /auth endpoints. With ``auth_provider`` defaulting to
+        "authentik" and the prod startup guard enforcing it, this is always True in
+        a running deployment; it remains as defense-in-depth for the endpoint gate."""
         return self.auth_provider == "authentik"
 
     @property
     def authentik_login_enabled(self) -> bool:
-        """DUAL-RUN switch for request-time auth resolution.
+        """True when Authentik request-time auth resolution is active.
 
-        When True (auth_provider == "authentik"), the auth dependencies ACCEPT a
-        BFF Authentik session cookie (preferred when present) AND still accept a
-        Firebase bearer as a fallback, so no client is locked out mid-migration.
-        When False (DEFAULT "firebase"), the Authentik resolution branch is inert
-        — behavior is byte-identical to the pre-dual-run Firebase-only path. There
-        is deliberately NO mode that rejects Firebase; Firebase retirement is a
-        later PR."""
+        Authentik is now the sole authentication path (Firebase auth removed), so the
+        session resolvers in ``app/auth/principal.py`` are always active. Kept as a
+        named alias of ``authentik_enabled`` for the call sites that read it."""
         return self.auth_provider == "authentik"
 
     @property

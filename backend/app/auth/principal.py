@@ -1,17 +1,14 @@
-"""Unified principal resolution for the Firebase->Authentik DUAL-RUN switch.
+"""Unified principal resolution for the Authentik BFF session.
 
 This is the request-time counterpart to ``app/api/auth_authentik.py`` (which mints
-the BFF session). Here we CONSUME that session on existing endpoints, controlled by
-``settings.authentik_login_enabled``:
+the BFF session). Here we CONSUME that session on every endpoint. Authentik is the
+sole authentication path — Firebase auth was retired, so ``None`` from a resolver
+means "no valid session" and the caller returns 401 (there is no fallback).
 
-  * auth_provider == "firebase" (DEFAULT): ``resolve_session_subject`` short-circuits
-    to ``None`` on its first line, so every dependency falls through to its existing
-    Firebase bearer path UNCHANGED — byte-identical to the pre-dual-run behavior.
-  * auth_provider == "authentik": a valid ``companion_sid`` cookie is resolved to the
-    opaque Authentik subject and the member ``User`` is looked up by
-    ``external_subject_id`` (RLS-bootstrapped via the login-subject GUC, exactly like
-    auth_authentik.login). A Firebase bearer is still accepted as a fallback when no
-    session cookie is present, so no client is locked out mid-migration.
+A valid ``companion_sid`` cookie (web) or ``Authorization: Bearer <session_token>``
+(mobile) is resolved to the opaque Authentik subject and the member ``User`` is looked
+up by ``external_subject_id`` (RLS-bootstrapped via the login-subject GUC, exactly like
+auth_authentik.login).
 
 Invite-only is already enforced at ``/auth/login`` (a session only exists for a member
 whose row pre-existed), so a live session that maps to NO member row is an anomaly →
@@ -19,20 +16,16 @@ whose row pre-existed), so a live session that maps to NO member row is an anoma
 
 CSRF: a session cookie is an ambient/automatic credential, so once it authenticates a
 STATE-CHANGING request we enforce the double-submit CSRF check (X-CSRF-Token header ==
-companion_csrf cookie). Firebase bearer requests are not cookie-ambient and are not
-subject to this check.
+companion_csrf cookie). A bearer session is not cookie-ambient and is not subject to
+this check.
 
 MOBILE bearer session: a React Native client cannot use the httpOnly cookie, so it
 presents the SAME opaque session id as ``Authorization: Bearer <session_token>``. Being
-non-ambient (a bearer can't be attached cross-site by a browser), it needs NO CSRF, just
-like a Firebase bearer. The bearer session is tried FIRST — BEFORE the cookie — because a
-native client's HTTP stack (NSURLSession/OkHttp) auto-re-sends the login cookie too, and
-resolving the cookie first would wrongly force CSRF onto the bearer client's POSTs. A
-browser never sends a session bearer (the sid cookie is httpOnly), so web still takes the
-CSRF-enforced cookie path. The session store holds opaque ``token_urlsafe`` ids, so a
-Firebase id_token (a dotted JWT) simply misses the lookup → ``None`` → the caller falls
-through to the existing Firebase-bearer verification. A Firebase JWT is therefore never
-mis-resolved as a session, and Firebase verification is untouched.
+non-ambient (a bearer can't be attached cross-site by a browser), it needs NO CSRF. The
+bearer session is tried FIRST — BEFORE the cookie — because a native client's HTTP stack
+(NSURLSession/OkHttp) auto-re-sends the login cookie too, and resolving the cookie first
+would wrongly force CSRF onto the bearer client's POSTs. A browser never sends a session
+bearer (the sid cookie is httpOnly), so web still takes the CSRF-enforced cookie path.
 """
 
 from __future__ import annotations
@@ -55,7 +48,7 @@ from app.models.user import User
 
 log = logging.getLogger("companion.auth.principal")
 
-# Mirrors the Firebase path (get_current_user) and auth_authentik.login.
+# Mirrors auth_authentik.login's inactive-account handling.
 _INACTIVE_STATUSES = ("deactivated", "pending_deletion")
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
@@ -74,7 +67,7 @@ def _enforce_csrf(request: Request) -> None:
 
     Compares the ``X-CSRF-Token`` header against the non-httpOnly ``companion_csrf``
     cookie set at login. Safe/idempotent methods are exempt (they don't mutate state).
-    Firebase bearer requests never reach here (they resolve to ``None`` above)."""
+    Bearer session requests never reach here (they resolve before the cookie above)."""
     if request.method in _SAFE_METHODS:
         return
     header = request.headers.get("x-csrf-token") or ""
@@ -86,9 +79,8 @@ def _enforce_csrf(request: Request) -> None:
 def _bearer_session_token(request: Request) -> str | None:
     """Extract an ``Authorization: Bearer <token>`` value, or ``None``.
 
-    The value may be a Companion session id (opaque ``token_urlsafe``) OR a Firebase
-    id_token (a dotted JWT). We do not distinguish here — the session-store lookup does:
-    a JWT is not a session key and simply misses, so it falls through to Firebase."""
+    The value is a Companion session id (opaque ``token_urlsafe``). A non-session value
+    simply misses the session-store lookup and resolves to no session."""
     header = request.headers.get("authorization") or ""
     if not header.startswith("Bearer "):
         return None
@@ -99,12 +91,10 @@ def _bearer_session_token(request: Request) -> str | None:
 async def resolve_session_subject(request: Request) -> str | None:
     """Return the Authentik subject for a valid BFF session, else ``None``.
 
-    ``None`` means "no Authentik session — fall back to the Firebase bearer path".
+    ``None`` means "no valid session"; the caller returns 401 (there is no fallback).
     Returns ``None`` when:
-      * the dual-run switch is off (auth_provider != "authentik") — the branch is
-        inert; this is the first check so the Firebase default is untouched, OR
       * neither a valid ``companion_sid`` cookie NOR a bearer session token is present, OR
-      * neither credential maps to a live session (expired / logged out / a Firebase JWT).
+      * neither credential maps to a live session (expired / logged out).
 
     Two credential shapes carry the same opaque session id:
       * BEARER (``Authorization: Bearer``) — non-ambient (a browser can't attach it
@@ -121,17 +111,11 @@ async def resolve_session_subject(request: Request) -> str | None:
     (correctly, being non-ambient) carries no token for — and every POST/PUT/DELETE would
     spuriously 403. Trying the bearer first resolves the native client without CSRF; a
     browser never sends a session bearer (the ``companion_sid`` cookie is httpOnly and
-    unreadable to JS), so web is unaffected and still takes the CSRF-enforced cookie path.
-
-    A Firebase id_token presented as the bearer is not a session key → misses the store →
-    falls through → ``None`` → the caller uses the existing Firebase verification.
-    Firebase JWTs are never mis-resolved and Firebase verification is not weakened."""
-    if not settings.authentik_login_enabled:
-        return None
+    unreadable to JS), so web is unaffected and still takes the CSRF-enforced cookie path."""
     store = get_session_store()
     # 1) Bearer session FIRST (non-ambient → no CSRF). Native clients present this AND
     #    auto-resend the login cookie; resolving the cookie first would wrongly force CSRF
-    #    onto their POSTs. A Firebase JWT misses the store lookup and falls through.
+    #    onto their POSTs.
     token = _bearer_session_token(request)
     if token:
         subject = await store.get(token)
@@ -154,17 +138,16 @@ async def resolve_session_principal(
     *,
     allow_inactive: bool = False,
 ) -> SessionPrincipal | None:
-    """Resolve the member ``User`` from a BFF session, or ``None`` to fall back to
-    Firebase.
+    """Resolve the member ``User`` from a BFF session, or ``None`` when there is no
+    valid session (the caller then returns 401).
 
     Reuses the exact by-subject / login-subject-GUC bootstrap from
     ``auth_authentik.login`` so the RLS ``users`` policy (migration 036) admits the
     pre-context read. Sets the tenant GUC (``app.current_user_id``) for the rest of
     the request, mirroring ``set_user_context`` in the Firebase path.
 
-    ``allow_inactive`` mirrors ``get_current_user_allow_inactive`` (reactivation /
-    cancel-deletion): when False, deactivated/pending_deletion accounts are refused
-    exactly like the Firebase path."""
+    ``allow_inactive`` supports ``get_current_user_allow_inactive`` (reactivation /
+    cancel-deletion): when False, deactivated/pending_deletion accounts are refused."""
     subject = await resolve_session_subject(request)
     if subject is None:
         return None
@@ -183,7 +166,7 @@ async def resolve_session_principal(
         raise HTTPException(status_code=401, detail="Session does not map to a known member")
     if not allow_inactive and user.account_status in _INACTIVE_STATUSES:
         raise HTTPException(status_code=403, detail="Account is deactivated")
-    # Tenant context for the rest of the request (same as the Firebase path).
+    # Tenant context for the rest of the request.
     await set_user_context(db, user.id)
     return SessionPrincipal(user=user, email=user.email, subject=subject)
 
@@ -234,11 +217,9 @@ async def resolve_session_email(request: Request) -> str | None:
     its own role check (``authorize_by_email`` / ``caregiver_authorized_for_member`` / the
     ``admin_users`` + ``is_active`` lookup), and that check remains the real authorization.
 
-    ``None`` (→ Firebase fallback) when the switch is off (inert; first line), there is no
-    session, or the subject maps to no known account. CSRF on state-changing methods is
-    enforced inside ``resolve_session_subject`` for cookie sessions."""
-    if not settings.authentik_login_enabled:
-        return None
+    ``None`` (→ 401) when there is no session or the subject maps to no known account.
+    CSRF on state-changing methods is enforced inside ``resolve_session_subject`` for
+    cookie sessions."""
     subject = await resolve_session_subject(request)
     if subject is None:
         return None
@@ -247,11 +228,8 @@ async def resolve_session_email(request: Request) -> str | None:
     if email is None:
         # Keep this signal. A LIVE session whose subject binds to no account is an
         # anomaly worth seeing (a row deleted post-login, or an un-backfilled subject).
-        # resolve_session_principal used to surface it as a distinct 401 "Session does
-        # not map to a known member"; resolving role-agnostically returns None instead,
-        # which falls silently through to the Firebase branch and a generic 401 — losing
-        # the signal entirely unless we log it here. No PII: the subject is opaque and
-        # is not logged.
+        # Resolving role-agnostically returns None here (a generic 401), so log it so the
+        # signal is not lost. No PII: the subject is opaque and is not logged.
         log.warning("BFF session subject maps to no known account")
     return email
 
@@ -265,9 +243,9 @@ async def resolve_caregiver_session(request: Request) -> str | None:
     ``caregiver_authorized_for_member(email, user_id)`` gate is unchanged and remains
     the real authorization; a non-caregiver email simply fails that gate.
 
-    ``None`` (→ Firebase fallback) when the switch is off (inert; first line), there is
-    no session, or the subject maps to no known account. CSRF on state-changing methods
-    is enforced inside ``resolve_session_subject`` for cookie sessions."""
+    ``None`` (→ 401) when there is no session or the subject maps to no known account.
+    CSRF on state-changing methods is enforced inside ``resolve_session_subject`` for
+    cookie sessions."""
     # Identical to resolve_session_email — kept as a named alias so each call site
     # documents which role gate it applies. Delegates so the three cannot drift.
     return await resolve_session_email(request)
@@ -281,11 +259,10 @@ async def resolve_admin_session(request: Request) -> str | None:
     authorization, so a non-admin email resolved here simply gets 403. Admins may have
     no ``users`` row (pure admin), which is why we recover the email from the subject.
 
-    ``None`` (→ Firebase fallback) when the switch is off (inert; first line), there is
-    no session, or the subject maps to no known account. Role-agnostic resolution (see
-    ``_email_for_subject``) so an admin who is ALSO a caregiver — whose login backfilled
-    only ``trusted_contacts`` — still resolves. CSRF on unsafe methods is enforced inside
-    ``resolve_session_subject`` for cookie sessions."""
+    ``None`` (→ 401) when there is no session or the subject maps to no known account.
+    Role-agnostic resolution (see ``_email_for_subject``) so an admin who is ALSO a
+    caregiver — whose login backfilled only ``trusted_contacts`` — still resolves. CSRF
+    on unsafe methods is enforced inside ``resolve_session_subject`` for cookie sessions."""
     # Identical to resolve_session_email — kept as a named alias so each call site
     # documents which role gate it applies. Delegates so the three cannot drift.
     return await resolve_session_email(request)

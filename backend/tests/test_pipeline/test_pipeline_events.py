@@ -1,23 +1,31 @@
-"""publish_pipeline_event is a no-op when Firestore is disabled (retired)."""
+"""publish_pipeline_event is a no-op (Firestore was retired with firebase-admin)."""
 
 from __future__ import annotations
-
-from unittest.mock import patch
 
 from app.config import settings
 from app.pipeline import events
 
 
 async def test_noop_when_firestore_disabled(monkeypatch):
+    """Default (disabled): returns immediately, nothing logged."""
     monkeypatch.setattr(settings, "firestore_pipeline_events", False)
-    with patch.object(events, "_get_firestore") as get_fs:
-        await events.publish_pipeline_event("doc-1", "ocr", "done")
-        get_fs.assert_not_called()  # never even tries to reach Firestore
+    monkeypatch.setattr(events, "_warned_disabled", False)
+    # Must not raise and must return None regardless of args.
+    assert await events.publish_pipeline_event("doc-1", "ocr", "done") is None
 
 
-async def test_attempts_when_enabled(monkeypatch):
+async def test_noop_and_warns_once_when_enabled(monkeypatch):
+    """If the vestigial setting is enabled, we still no-op (Firestore is gone) and warn
+    exactly once so logs aren't flooded per stage."""
     monkeypatch.setattr(settings, "firestore_pipeline_events", True)
-    with patch.object(events, "_get_firestore", return_value=None) as get_fs:
-        # client unavailable -> returns cleanly, but the gate let it try.
-        await events.publish_pipeline_event("doc-1", "ocr", "done")
-        get_fs.assert_called_once()
+    monkeypatch.setattr(events, "_warned_disabled", False)
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        events.logger, "warning", lambda msg, *a, **k: warnings.append(msg)
+    )
+
+    assert await events.publish_pipeline_event("doc-1", "ocr", "done") is None
+    assert await events.publish_pipeline_event("doc-2", "ocr", "done") is None
+    # Warned once, not per call.
+    assert len(warnings) == 1
