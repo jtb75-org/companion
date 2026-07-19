@@ -76,7 +76,7 @@ export function InviteCaregiverForm({ onSuccess, onSkip, showSkip = false }: Pro
   }
 
   return (
-    <View>
+    <View style={styles.root}>
       <TextInput
         style={styles.input}
         placeholder="Caregiver's name"
@@ -130,6 +130,9 @@ export function InviteCaregiverForm({ onSuccess, onSkip, showSkip = false }: Pro
 }
 
 const styles = StyleSheet.create({
+  root: {
+    alignSelf: 'stretch',
+  },
   input: {
     width: '100%',
     borderWidth: 2,
