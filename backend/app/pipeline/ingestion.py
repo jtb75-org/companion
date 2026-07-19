@@ -51,11 +51,18 @@ async def _resolve_ocr_provider(
     return str(value or "")
 
 
-def _mean_confidence(values: list[float]) -> float | None:
-    """Mean of reported per-page confidences in [0, 1], or None if none present."""
+def _min_confidence(values: list[float]) -> float | None:
+    """Worst (minimum) reported per-page confidence in [0, 1], or None if none.
+
+    The review-floor question is "should a human double-check this document?" and
+    the extracted fields can come from ANY single page, so a strong page must
+    never mask a weak one. Averaging did exactly that (a clean back page pulling
+    a garbled statement page above the floor), so the cross-page aggregate that
+    drives the floor is the *minimum*, not the mean — erring toward more review.
+    """
     if not values:
         return None
-    return max(0.0, min(1.0, sum(values) / len(values)))
+    return max(0.0, min(1.0, min(values)))
 
 
 async def _ocr_pages(
@@ -63,10 +70,12 @@ async def _ocr_pages(
 ) -> tuple[str, int, float | None]:
     """Run ``provider_name`` over one or more page images.
 
-    Returns ``(concatenated_text, total_ms, mean_confidence)``. For multi-page
+    Returns ``(concatenated_text, total_ms, min_confidence)``. For multi-page
     the per-page texts are concatenated with the same ``--- Page N ---`` framing
-    the primary uses. ``mean_confidence`` is the mean of the pages that reported
-    one, or ``None`` when the engine/service reported none.
+    the primary uses. The confidence handed upward is the *worst* page's
+    confidence (minimum over the pages that reported one), or ``None`` when the
+    engine/service reported none — this value drives the OCR review floor, so a
+    single bad page must not be averaged away by a good one.
     """
     provider = get_ocr_provider(provider_name)
     if len(page_datas) > 1:
@@ -78,7 +87,7 @@ async def _ocr_pages(
             for i, r in enumerate(results)
         )
         confs = [r.confidence for r in results if r.confidence is not None]
-        return text, sum(r.ms for r in results), _mean_confidence(confs)
+        return text, sum(r.ms for r in results), _min_confidence(confs)
     result = await provider.extract_text(page_datas[0], mime_type)
     return result.text, result.ms, result.confidence
 

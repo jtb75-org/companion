@@ -29,6 +29,7 @@ from app.pipeline.ocr.documentai_provider import _mean_token_confidence
 from app.pipeline.ocr.paddleocr_provider import PaddleOCRProvider
 from app.pipeline.schemas import ClassificationResult, ExtractionResult
 from app.pipeline.summarization import summarize
+from tests.conftest import requires_db
 
 # ---------------------------------------------------------------------------
 # Provider captures the service-reported confidence
@@ -323,3 +324,226 @@ def test_documentai_skips_only_missing_confidences():
 
 def test_documentai_no_tokens_is_none():
     assert _mean_token_confidence(_doc()) is None
+
+
+# ---------------------------------------------------------------------------
+# Bug 1: the CROSS-PAGE review-floor aggregate is the WORST page, not the mean
+#
+# Real failure: a 2-page bill scored page0=0.74 (garbled statement page that
+# misread the due date "2026"->"2020") and page1=0.97 (clean back page). The old
+# mean = 0.86 > the 0.80 floor, so the floor did NOT fire and the member got a
+# confident "pay by July 30, 2020" summary. The extracted fields can come from
+# ANY page, so a good page must never mask a bad one -> aggregate on the min.
+# ---------------------------------------------------------------------------
+
+
+def _patch_provider_sequence(monkeypatch, name, pages):
+    """Patch get_ocr_provider so successive extract_text calls return ``pages``.
+
+    ``pages`` is a list of ``(text, confidence)`` handed out in page order.
+    """
+    calls = {"i": 0}
+
+    class _Fake:
+        def __init__(self, _name):
+            self.name = _name
+
+        async def extract_text(self, image_bytes, mime_type):
+            text, conf = pages[calls["i"]]
+            calls["i"] += 1
+            return OcrResult(text=text, provider=name, ms=7, confidence=conf)
+
+    monkeypatch.setattr(ingestion, "get_ocr_provider", lambda n: _Fake(n))
+
+
+def test_min_confidence_picks_worst_page():
+    # The exact real-failure case: worst page 0.74 must win over the clean 0.97.
+    assert ingestion._min_confidence([0.74, 0.97]) == 0.74
+
+
+def test_min_confidence_empty_is_none():
+    assert ingestion._min_confidence([]) is None
+
+
+def test_min_confidence_clamps_into_range():
+    assert ingestion._min_confidence([1.5, 0.9]) == 0.9
+    assert ingestion._min_confidence([-0.2, 0.9]) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_ocr_pages_multipage_returns_worst_page_confidence(monkeypatch):
+    """[0.74, 0.97] -> aggregate 0.74, which forces review (regression)."""
+    _patch_provider_sequence(
+        monkeypatch, "paddleocr",
+        [("garbled due 2020", 0.74), ("clean back page", 0.97)],
+    )
+    text, _ms, conf = await ingestion._ocr_pages(
+        "paddleocr", [b"p0", b"p1"], "image/jpeg"
+    )
+    assert conf == 0.74
+    assert ocr_quality_forces_review(conf) is True
+    # Both pages' text is still concatenated with the --- Page N --- framing.
+    assert "--- Page 1 ---" in text and "--- Page 2 ---" in text
+
+
+@pytest.mark.asyncio
+async def test_ocr_pages_all_high_pages_not_flagged(monkeypatch):
+    _patch_provider_sequence(
+        monkeypatch, "paddleocr", [("clean", 0.95), ("clean", 0.97)],
+    )
+    _text, _ms, conf = await ingestion._ocr_pages(
+        "paddleocr", [b"p0", b"p1"], "image/jpeg"
+    )
+    assert conf == 0.95
+    assert ocr_quality_forces_review(conf) is False
+
+
+@pytest.mark.asyncio
+async def test_ocr_pages_single_page_confidence_unchanged(monkeypatch):
+    """A single-page scan passes the page's own confidence straight through."""
+    _patch_provider_sequence(monkeypatch, "paddleocr", [("only page", 0.62)])
+    text, _ms, conf = await ingestion._ocr_pages(
+        "paddleocr", [b"p0"], "image/jpeg"
+    )
+    assert conf == 0.62
+    assert text == "only page"
+
+
+@pytest.mark.asyncio
+async def test_ocr_pages_all_none_confidence_is_none(monkeypatch):
+    """No page reported a confidence -> None (floor stays inert)."""
+    _patch_provider_sequence(
+        monkeypatch, "paddleocr", [("a", None), ("b", None)],
+    )
+    _text, _ms, conf = await ingestion._ocr_pages(
+        "paddleocr", [b"p0", b"p1"], "image/jpeg"
+    )
+    assert conf is None
+    assert ocr_quality_forces_review(conf) is False
+
+
+@pytest.mark.asyncio
+async def test_multipage_scan_review_floor_uses_worst_page(monkeypatch):
+    """End-to-end: the worst page's 0.74 reaches NormalizedDocument.ocr_confidence
+    and would force review — the exact scan the mean let slip through."""
+    doc = _FakeDoc(
+        source_metadata={
+            "content_type": "image/jpeg",
+            "page_refs": ["r0", "r1"],
+        }
+    )
+    db = _FakeDB(doc)
+
+    async def _download(ref):
+        return b"imagebytes"
+
+    monkeypatch.setattr(ingestion.storage_service, "download", _download)
+    monkeypatch.setattr(ingestion.settings, "ocr_provider", "paddleocr")
+    monkeypatch.setattr(ingestion.settings, "ocr_shadow_provider", "")
+    _patch_provider_sequence(
+        monkeypatch, "paddleocr",
+        [("garbled due 2020", 0.74), ("clean back page", 0.97)],
+    )
+
+    result = await ingestion.process_camera_scan(db, doc.id)
+
+    assert result.ocr_confidence == 0.74
+    assert doc.source_metadata["ocr_confidence"] == 0.74
+    assert ocr_quality_forces_review(result.ocr_confidence) is True
+
+
+# ---------------------------------------------------------------------------
+# Bug 2: source_metadata is a tracked mutable so in-place OCR writes persist
+#
+# A plain JSON/JSONB dict is NOT marked dirty by SQLAlchemy on in-place key
+# assignment, so process_camera_scan's ``source_metadata["ocr_text"] = ...``
+# writes were silently dropped by flush() whenever the dict was already
+# non-empty (a real scan already carries page_refs/content_type from upload).
+# MutableDict.as_mutable(JSONB) fixes every in-place mutation site at once.
+# ---------------------------------------------------------------------------
+
+
+def test_source_metadata_is_mutable_tracked():
+    """Assigning a plain dict coerces to a MutableDict, so later in-place key
+    assignment marks the column dirty and actually persists."""
+    from sqlalchemy.ext.mutable import MutableDict
+
+    from app.models.document import Document
+
+    doc = Document(
+        user_id=uuid.uuid4(),
+        source_channel="camera_scan",
+        raw_text_ref="scans/x/page_000.jpg",
+    )
+    doc.source_metadata = {"content_type": "image/jpeg", "page_refs": ["r0"]}
+    assert isinstance(doc.source_metadata, MutableDict)
+    # In-place mutation on the already-populated dict is what silently failed.
+    doc.source_metadata["ocr_text"] = "enc:hello"
+    assert doc.source_metadata["ocr_text"] == "enc:hello"
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_process_camera_scan_persists_ocr_metadata(monkeypatch):
+    """Round-trip regression: after process_camera_scan on a document whose
+    source_metadata is ALREADY non-empty, a reload shows the OCR fields — the
+    in-place-mutation drop that produced un-persisted ocr_text/confidence."""
+    from app.db import session as db_module
+    from app.models.document import Document
+    from app.models.enums import SourceChannel
+    from app.models.user import User
+
+    async def _download(ref):
+        return b"imagebytes"
+
+    monkeypatch.setattr(ingestion.storage_service, "download", _download)
+    monkeypatch.setattr(ingestion.settings, "ocr_provider", "paddleocr")
+    monkeypatch.setattr(ingestion.settings, "ocr_shadow_provider", "")
+    _patch_provider_sequence(monkeypatch, "paddleocr", [("SOME TEXT", 0.74)])
+
+    async with db_module.async_session_factory() as s:
+        user = User(
+            email=f"ocr-persist-{uuid.uuid4()}@example.invalid",
+            first_name="Ocr",
+            last_name="Persist",
+            preferred_name="Ocr",
+            display_name="Ocr Persist",
+            primary_language="en",
+            voice_id="warm",
+            pace_setting="normal",
+            warmth_level="warm",
+        )
+        s.add(user)
+        await s.flush()
+        doc = Document(
+            user_id=user.id,
+            source_channel=SourceChannel.CAMERA_SCAN,
+            raw_text_ref="scans/x/page_000.jpg",
+            # Already non-empty at OCR time — the precondition for the bug.
+            source_metadata={"content_type": "image/jpeg"},
+        )
+        s.add(doc)
+        await s.commit()
+        doc_id = doc.id
+        user_id = user.id
+
+    async with db_module.async_session_factory() as s:
+        await ingestion.process_camera_scan(s, doc_id)
+        await s.commit()
+
+    try:
+        async with db_module.async_session_factory() as s:
+            reloaded = await s.get(Document, doc_id)
+            meta = reloaded.source_metadata
+            assert meta.get("ocr_provider") == "paddleocr"
+            assert meta.get("ocr_confidence") == 0.74
+            assert meta.get("ocr_complete") is True
+            # ocr_text was written (dev marker "enc:" in test env) and survived.
+            assert meta.get("ocr_text", "").startswith("enc:")
+    finally:
+        async with db_module.async_session_factory() as s:
+            await s.execute(
+                Document.__table__.delete().where(Document.id == doc_id)
+            )
+            await s.execute(User.__table__.delete().where(User.id == user_id))
+            await s.commit()

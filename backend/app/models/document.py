@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from sqlalchemy import ForeignKey, Numeric, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -49,7 +50,15 @@ class Document(Base):
     status: Mapped[DocumentStatus] = mapped_column(
         nullable=False, default=DocumentStatus.RECEIVED
     )
-    source_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # MutableDict-wrapped so in-place key assignments (e.g. the OCR block in
+    # ingestion.process_camera_scan setting source_metadata["ocr_text"] on an
+    # already-populated dict) mark the attribute dirty and actually persist.
+    # A plain JSON/JSONB dict is NOT tracked on in-place mutation, so those
+    # writes were silently dropped by flush() when the dict was non-empty.
+    # ORM-level change only — no DB migration needed.
+    source_metadata: Mapped[dict | None] = mapped_column(
+        MutableDict.as_mutable(JSONB), nullable=True
+    )
     # DB default is per-row wall clock, NOT now() (== transaction_timestamp(),
     # constant per transaction — which made two docs in one transaction share an
     # identical received_at). timezone('UTC', clock_timestamp()) returns a
