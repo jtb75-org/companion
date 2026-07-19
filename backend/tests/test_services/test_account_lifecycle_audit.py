@@ -65,6 +65,8 @@ async def test_execute_deletion_persists_full_audit_details(monkeypatch):
     assert details.get("admin_record_deleted") is True
     assert details.get("email") == email
     assert details.get("caregiver_roles_removed") == 0
+    # IdP cleanup is deferred (orphaned Authentik account) — documented, not silent.
+    assert details.get("idp_cleanup") == "deferred"
 
     async with db_module.async_session_factory() as s:
         await s.execute(delete(DeletionAuditLog).where(DeletionAuditLog.user_id == uid))
