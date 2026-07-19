@@ -8,11 +8,20 @@ from dataclasses import dataclass
 
 @dataclass
 class OcrResult:
-    """The text an OCR engine extracted, plus provenance for A/B comparison."""
+    """The text an OCR engine extracted, plus provenance for A/B comparison.
+
+    ``confidence`` is the engine's own mean recognition confidence in [0, 1],
+    or ``None`` when the engine/service did not report one. It is log-and-observe
+    telemetry ONLY — it does not currently gate routing (see
+    ``app.pipeline.confidence`` for why and for the tuning plan). Both PaddleOCR
+    (per-line ``(text, score)``) and Document AI (per-token ``layout.confidence``)
+    compute this natively; historically both providers discarded it.
+    """
 
     text: str
     provider: str
     ms: int
+    confidence: float | None = None
 
 
 class OcrProvider(ABC):

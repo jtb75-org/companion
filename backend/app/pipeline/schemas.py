@@ -15,6 +15,10 @@ class NormalizedDocument(BaseModel):
     raw_text: str
     metadata: dict = Field(default_factory=dict)
     quality_score: float = 1.0
+    # Mean OCR recognition confidence in [0, 1] the engine reported, or None
+    # when it reported none (older service builds, or the email channel). Pure
+    # telemetry today; see app.pipeline.confidence.
+    ocr_confidence: float | None = None
     ingested_at: datetime = Field(default_factory=datetime.utcnow)
 
 

@@ -89,8 +89,17 @@ async def summarize(
     classification: ClassificationResult,
     extraction: ExtractionResult,
     db: AsyncSession | None = None,
+    ocr_confidence: float | None = None,
 ) -> SummarizationResult:
-    """Generate plain-language spoken and card summaries."""
+    """Generate plain-language spoken and card summaries.
+
+    ``ocr_confidence`` is the OCR engine's mean recognition confidence (or None
+    when unknown). When it is present and below the conservative review floor,
+    the summary is forced into the review-inviting low-confidence tone even if
+    the classification confidence is high — garbled OCR can produce a
+    confident-but-wrong read, so we err toward a human look. Inert while OCR
+    confidence is unavailable (see app.pipeline.confidence).
+    """
 
     # Try LLM summarization
     llm_result = await _llm_summarize(
@@ -119,8 +128,26 @@ async def summarize(
         "urgent": "Today",
     }.get(classification.urgency_level, "Soon")
 
-    # Apply confidence-based hedging (Trust Layer)
-    spoken = _apply_confidence_hedging(spoken, classification.confidence_score)
+    # Apply confidence-based hedging (Trust Layer). A low *OCR* confidence pulls
+    # the effective confidence down to the review-inviting band, so a garbled
+    # scan never gets a falsely-direct summary just because the classifier was
+    # sure. Erring toward review is the safe default for this audience.
+    from app.pipeline.confidence import (
+        CLASSIFY_SOFTEN_TONE,
+        ocr_quality_forces_review,
+    )
+    effective_confidence = classification.confidence_score
+    if ocr_quality_forces_review(ocr_confidence):
+        effective_confidence = min(
+            effective_confidence, CLASSIFY_SOFTEN_TONE - 0.01
+        )
+        logger.info(
+            "OCR_QUALITY_REVIEW_FLOOR: doc=%s ocr_conf=%.3f class_conf=%.2f "
+            "-> review-inviting summary tone",
+            classification.document_id, ocr_confidence,
+            classification.confidence_score,
+        )
+    spoken = _apply_confidence_hedging(spoken, effective_confidence)
 
     # Credit safety guard (defense-in-depth): never instruct a member to pay a
     # credit or zero balance, even if the LLM ignored the prompt guidance. This

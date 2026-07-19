@@ -51,13 +51,22 @@ async def _resolve_ocr_provider(
     return str(value or "")
 
 
+def _mean_confidence(values: list[float]) -> float | None:
+    """Mean of reported per-page confidences in [0, 1], or None if none present."""
+    if not values:
+        return None
+    return max(0.0, min(1.0, sum(values) / len(values)))
+
+
 async def _ocr_pages(
     provider_name: str, page_datas: list[bytes], mime_type: str
-) -> tuple[str, int]:
+) -> tuple[str, int, float | None]:
     """Run ``provider_name`` over one or more page images.
 
-    Returns (concatenated_text, total_ms). For multi-page the per-page texts
-    are concatenated with the same ``--- Page N ---`` framing the primary uses.
+    Returns ``(concatenated_text, total_ms, mean_confidence)``. For multi-page
+    the per-page texts are concatenated with the same ``--- Page N ---`` framing
+    the primary uses. ``mean_confidence`` is the mean of the pages that reported
+    one, or ``None`` when the engine/service reported none.
     """
     provider = get_ocr_provider(provider_name)
     if len(page_datas) > 1:
@@ -68,9 +77,10 @@ async def _ocr_pages(
             f"--- Page {i + 1} ---\n\n{r.text}"
             for i, r in enumerate(results)
         )
-        return text, sum(r.ms for r in results)
+        confs = [r.confidence for r in results if r.confidence is not None]
+        return text, sum(r.ms for r in results), _mean_confidence(confs)
     result = await provider.extract_text(page_datas[0], mime_type)
-    return result.text, result.ms
+    return result.text, result.ms, result.confidence
 
 
 async def _run_shadow_ocr(
@@ -95,7 +105,7 @@ async def _run_shadow_ocr(
     if not shadow_provider or shadow_provider == primary_provider:
         return
     try:
-        shadow_text, shadow_ms = await _ocr_pages(
+        shadow_text, shadow_ms, shadow_conf = await _ocr_pages(
             shadow_provider, page_datas, mime_type
         )
         similarity = difflib.SequenceMatcher(
@@ -113,6 +123,7 @@ async def _run_shadow_ocr(
             "shadow_chars": len(shadow_text),
             "primary_ms": primary_ms,
             "shadow_ms": shadow_ms,
+            "shadow_confidence": shadow_conf,
             "similarity": similarity,
             "shadow_text": enc_shadow,
         }
@@ -142,6 +153,7 @@ async def process_camera_scan(
 
     raw_text = ""
     mime_type = "image/jpeg"
+    ocr_confidence: float | None = None
 
     # Get mime type from metadata
     if doc.source_metadata and isinstance(
@@ -176,12 +188,17 @@ async def process_camera_scan(
                 "Running OCR (%s) on %d page(s) (%s)",
                 primary_provider, len(page_datas), mime_type,
             )
-            raw_text, primary_ms = await _ocr_pages(
+            raw_text, primary_ms, ocr_confidence = await _ocr_pages(
                 primary_provider, page_datas, mime_type
             )
+            # Log-and-observe: the OCR engine's own recognition confidence is
+            # telemetry for tuning the review floor (see app.pipeline.confidence).
+            # Score/char-count are not PHI; the text itself is never logged.
             logger.info(
-                "OCR extracted %d characters from %d page(s)",
-                len(raw_text), len(page_datas),
+                "OCR extracted %d characters from %d page(s) "
+                "[provider=%s confidence=%s]",
+                len(raw_text), len(page_datas), primary_provider,
+                "n/a" if ocr_confidence is None else f"{ocr_confidence:.3f}",
             )
 
             # Store extracted text (keep original GCS path). PHI -> encrypt.
@@ -191,6 +208,8 @@ async def process_camera_scan(
                 db, doc.user_id, raw_text[:_OCR_TEXT_CAP]
             )
             doc.source_metadata["ocr_complete"] = True
+            doc.source_metadata["ocr_confidence"] = ocr_confidence
+            doc.source_metadata["ocr_provider"] = primary_provider
             await db.flush()
 
             # Shadow A/B comparison — best-effort, never affects the pipeline.
@@ -220,6 +239,7 @@ async def process_camera_scan(
         raw_text=raw_text,
         metadata=doc.source_metadata or {},
         quality_score=quality_score,
+        ocr_confidence=ocr_confidence,
     )
 
 

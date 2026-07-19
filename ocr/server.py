@@ -90,14 +90,20 @@ def _get_engine():
     return _ocr_engine
 
 
-def _ocr_image_bytes(body: bytes) -> str:
+def _ocr_image_bytes(body: bytes) -> tuple[str, list[float]]:
     """Decode raw image bytes and OCR them. Blocking — call via to_thread."""
     img = Image.open(io.BytesIO(body))
     return _ocr_image(img)
 
 
-def _ocr_image(img: Image.Image) -> str:
-    """Run PaddleOCR on a single PIL image and return its joined text lines."""
+def _ocr_image(img: Image.Image) -> tuple[str, list[float]]:
+    """Run PaddleOCR on a single PIL image.
+
+    Returns ``(joined_text, per_line_confidences)``. The confidences are the
+    scores PaddleOCR already emits per detection — historically discarded. They
+    are returned so the backend can build a real OCR-confidence distribution for
+    threshold tuning (log-and-observe; see backend app.pipeline.confidence).
+    """
     engine = _get_engine()
     rgb = img.convert("RGB")
     arr = np.asarray(rgb)
@@ -106,38 +112,54 @@ def _ocr_image(img: Image.Image) -> str:
     return _extract_lines(result)
 
 
-def _extract_lines(result) -> str:
-    """Flatten PaddleOCR's nested result into newline-joined text.
+def _extract_lines(result) -> tuple[str, list[float]]:
+    """Flatten PaddleOCR's nested result into (text, per-line confidences).
 
     PaddleOCR returns a per-image list; each entry is a list of
     ``[box, (text, confidence)]`` detections. Older/newer versions occasionally
     return ``None`` for a blank page, so guard every level.
     """
     if not result:
-        return ""
+        return "", []
     lines: list[str] = []
+    confidences: list[float] = []
     for page in result:
         if not page:
             continue
         for det in page:
             try:
                 text = det[1][0]
+                score = det[1][1]
             except (IndexError, TypeError):
                 continue
             if text:
                 lines.append(text)
-    return "\n".join(lines)
+                try:
+                    confidences.append(float(score))
+                except (TypeError, ValueError):
+                    pass
+    return "\n".join(lines), confidences
 
 
-def _extract_pdf(data: bytes) -> str:
+def _extract_pdf(data: bytes) -> tuple[str, list[float]]:
     """Rasterize each PDF page at _PDF_DPI, OCR it, join pages with blank line."""
     pages: list[str] = []
+    confidences: list[float] = []
     with fitz.open(stream=data, filetype="pdf") as doc:
         for page in doc:
             pix = page.get_pixmap(dpi=_PDF_DPI)
             img = Image.open(io.BytesIO(pix.tobytes("png")))
-            pages.append(_ocr_image(img))
-    return "\n\n".join(pages)
+            text, page_conf = _ocr_image(img)
+            pages.append(text)
+            confidences.extend(page_conf)
+    return "\n\n".join(pages), confidences
+
+
+def _mean(values: list[float]) -> float | None:
+    """Mean of ``values`` clamped to [0, 1], or ``None`` when empty."""
+    if not values:
+        return None
+    return max(0.0, min(1.0, sum(values) / len(values)))
 
 
 @app.on_event("startup")
@@ -170,9 +192,9 @@ async def ocr(request: Request) -> JSONResponse:
         # Offload ALL blocking work (model build + inference + PDF raster) to a
         # worker thread so the event loop — and /health — stay responsive.
         if mime in _PDF_MIMES:
-            text = await asyncio.to_thread(_extract_pdf, body)
+            text, confidences = await asyncio.to_thread(_extract_pdf, body)
         elif mime in _IMAGE_MIMES or mime.startswith("image/"):
-            text = await asyncio.to_thread(_ocr_image_bytes, body)
+            text, confidences = await asyncio.to_thread(_ocr_image_bytes, body)
         else:
             return JSONResponse(
                 {"error": f"unsupported content-type: {mime!r}"}, status_code=500
@@ -182,4 +204,6 @@ async def ocr(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
     ms = int((time.monotonic() - start) * 1000)
-    return JSONResponse({"text": text, "ms": ms})
+    # ``confidence`` is the mean per-line recognition score (or null on a blank
+    # page). Additive, backward-compatible field — older backends ignore it.
+    return JSONResponse({"text": text, "ms": ms, "confidence": _mean(confidences)})

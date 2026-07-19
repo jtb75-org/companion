@@ -74,7 +74,17 @@ async def process_document(
             normalized = await process_camera_scan(db, document_id)
         else:
             normalized = await process_email(db, document_id)
-        await _record_metric(db, document_id, "ingestion", "completed", stage_start)
+        # OCR confidence + char count are non-PHI telemetry recorded on the
+        # ingestion metric so a real PaddleOCR confidence distribution can be
+        # built for tuning the review floor (see app.pipeline.confidence).
+        await _record_metric(
+            db, document_id, "ingestion", "completed", stage_start,
+            {
+                "ocr_confidence": normalized.ocr_confidence,
+                "ocr_chars": len(normalized.raw_text),
+                "source_channel": normalized.source_channel,
+            },
+        )
         await publish_pipeline_event(
             document_id, "ingestion", "completed",
         )
@@ -149,7 +159,10 @@ async def process_document(
         await publish_pipeline_event(
             document_id, "summarization", "started",
         )
-        summarization_result = await summarize(classification_result, extraction_result, db)
+        summarization_result = await summarize(
+            classification_result, extraction_result, db,
+            ocr_confidence=normalized.ocr_confidence,
+        )
         from app.services.field_crypto import encrypt_for_user
         doc.spoken_summary = await encrypt_for_user(
             db, user_id, summarization_result.spoken_summary
@@ -235,6 +248,24 @@ async def process_document(
             "destination": routing_result.routing_destination,
             "records_created": len(routing_result.records_created),
         })
+        # Routing-decision traceability (mirrors the dedup #138 pattern): emit the
+        # scores that shaped this decision so thresholds can be tuned against real
+        # outcomes. No PHI — scores, tier, care model, and the review flag only.
+        logger.info(
+            "ROUTING_DECISION: doc=%s class=%s tier=%d class_conf=%.2f "
+            "ocr_conf=%s care_model=%s destination=%s sent_to_review=%s "
+            "records_created=%d",
+            document_id,
+            classification_result.classification,
+            classification_result.classifier_tier,
+            classification_result.confidence_score,
+            "n/a" if normalized.ocr_confidence is None
+            else f"{normalized.ocr_confidence:.3f}",
+            care_model,
+            routing_result.routing_destination,
+            routing_result.pending_review_id is not None,
+            len(routing_result.records_created),
+        )
         await publish_pipeline_event(
             document_id, "routing", "completed",
             {
