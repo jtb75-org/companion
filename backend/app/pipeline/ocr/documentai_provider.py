@@ -9,8 +9,16 @@ from app.config import settings
 from app.pipeline.ocr.base import OcrProvider, OcrResult
 
 
-def _ocr_with_document_ai(image_data: bytes, mime_type: str) -> str:
-    """Run OCR using Google Document AI. Synchronous (sync google client)."""
+def _ocr_with_document_ai(
+    image_data: bytes, mime_type: str
+) -> tuple[str, float | None]:
+    """Run OCR using Google Document AI. Synchronous (sync google client).
+
+    Returns ``(text, mean_confidence)``. ``mean_confidence`` is the mean of the
+    per-token ``layout.confidence`` values Document AI already returns (or
+    ``None`` if the response carries none). Best-effort telemetry — never raises
+    on a missing/odd confidence shape.
+    """
     from google.cloud import documentai_v1 as documentai
 
     client = documentai.DocumentProcessorServiceClient()
@@ -28,7 +36,31 @@ def _ocr_with_document_ai(image_data: bytes, mime_type: str) -> str:
     )
 
     result = client.process_document(request=request)
-    return result.document.text
+    return result.document.text, _mean_token_confidence(result.document)
+
+
+def _mean_token_confidence(document) -> float | None:
+    """Mean of per-token layout confidences across all pages, or ``None``.
+
+    A genuine ``0.0`` is a real reported confidence (an unreadable token) and
+    MUST count — dropping it would make the review floor go inert exactly when a
+    scan is worst, and would inflate the mean on mixed pages. Only genuinely
+    absent (``None``) confidences are skipped.
+    """
+    try:
+        scores: list[float] = []
+        for page in document.pages:
+            for token in page.tokens:
+                layout = getattr(token, "layout", None)
+                conf = getattr(layout, "confidence", None) if layout else None
+                if conf is None:
+                    continue
+                scores.append(float(conf))
+    except Exception:  # noqa: BLE001 — telemetry must never break OCR
+        return None
+    if not scores:
+        return None
+    return max(0.0, min(1.0, sum(scores) / len(scores)))
 
 
 class DocumentAIProvider(OcrProvider):
@@ -38,8 +70,10 @@ class DocumentAIProvider(OcrProvider):
 
     async def extract_text(self, image_bytes: bytes, mime_type: str) -> OcrResult:
         start = time.monotonic()
-        text = await asyncio.to_thread(
+        text, confidence = await asyncio.to_thread(
             _ocr_with_document_ai, image_bytes, mime_type
         )
         ms = int((time.monotonic() - start) * 1000)
-        return OcrResult(text=text, provider=self.name, ms=ms)
+        return OcrResult(
+            text=text, provider=self.name, ms=ms, confidence=confidence
+        )

@@ -54,4 +54,23 @@ class PaddleOCRProvider(OcrProvider):
         ms = body.get("ms")
         if not isinstance(ms, int):
             ms = int((time.monotonic() - start) * 1000)
-        return OcrResult(text=body.get("text", ""), provider=self.name, ms=ms)
+        return OcrResult(
+            text=body.get("text", ""),
+            provider=self.name,
+            ms=ms,
+            confidence=_coerce_confidence(body.get("confidence")),
+        )
+
+
+def _coerce_confidence(raw: object) -> float | None:
+    """Clamp a service-reported confidence to [0, 1], or ``None`` if absent/bad.
+
+    Older OCR service builds do not include a ``confidence`` key, so absence is
+    normal and must never raise. Confidence is telemetry, not a gate.
+    """
+    if raw is None:
+        return None
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return None
