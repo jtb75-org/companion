@@ -1,4 +1,4 @@
-"""documents.received_at default now() -> clock_timestamp()
+"""documents.received_at default now() -> timezone('UTC', clock_timestamp())
 
 Revision ID: 043
 Revises: 042
@@ -11,9 +11,12 @@ inherited that transaction's (potentially stale, past) start time rather than
 its own ingest moment.
 
 ``clock_timestamp()`` is the actual wall clock, re-read per row, so each INSERT
-gets an independent, accurate timestamp. This is DB-layer defense-in-depth; the
-application (document_service.create_document) also now stamps received_at
-explicitly per document, which is the primary fix.
+gets an independent, accurate timestamp. We wrap it in ``timezone('UTC', ...)``
+so the value is naive-UTC, matching the column type (``timestamp without time
+zone``), the app's ``datetime.utcnow()`` stamping, and retention's UTC cutoffs.
+This is DB-layer defense-in-depth; the application
+(document_service.create_document) also now stamps received_at explicitly per
+document, which is the primary fix.
 
 Column stays ``timestamp without time zone`` (unchanged type) — this only
 swaps the DEFAULT expression, so it is a metadata-only, reversible change.
@@ -28,7 +31,7 @@ down_revision = "042"
 def upgrade() -> None:
     op.execute(
         "ALTER TABLE documents "
-        "ALTER COLUMN received_at SET DEFAULT clock_timestamp()"
+        "ALTER COLUMN received_at SET DEFAULT timezone('UTC', clock_timestamp())"
     )
 
 

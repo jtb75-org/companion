@@ -111,3 +111,62 @@ def test_numbers_and_dates_are_exact_discriminators():
     assert dedup._value_similarity("amount_due", "42.00", "51.75") == 0.0
     assert dedup._value_similarity("due_date", "2026-07-22", "2026-07-22") == 1.0
     assert dedup._value_similarity("due_date", "2026-07-22", "2026-08-22") == 0.0
+
+
+# --- Missing-discriminator penalty (BLOCKER 2): a candidate can't score high by
+# simply OMITTING the field (amount/date/account) that would disagree. ---
+
+
+def test_sparse_candidate_missing_amount_does_not_match_different_amount():
+    """(a) An older sparse candidate with NO amount must not match a newer bill
+    whose amount differs — the differing amount can't be silently dropped."""
+    incoming = {
+        "sender": "CITY OF KIRKWOOD",
+        "amount_due": 51.75,
+        "due_date": "2026-07-22",
+    }
+    sparse_candidate = {"sender": "CITY OF KIRKWOOD", "due_date": "2026-07-22"}
+    assert dedup.field_similarity(incoming, sparse_candidate) < dedup._SIM_THRESHOLD
+
+
+def test_niru_probe_missing_amount_no_account_below_threshold():
+    """(b) niru probe 1: candidate missing amount_due → must be < 0.80."""
+    incoming = {
+        "sender": "CITY OF KIRKWOOD",
+        "amount_due": 51.75,
+        "due_date": "2026-07-22",
+    }
+    candidate = {"sender": "CITY OF KIRKWOOD", "due_date": "2026-07-22"}
+    assert dedup.field_similarity(incoming, candidate) < dedup._SIM_THRESHOLD
+
+
+def test_niru_probe_missing_amount_with_account_below_threshold():
+    """(b) niru probe 2: candidate has account but missing amount_due → < 0.80."""
+    incoming = {
+        "sender": "CITY OF KIRKWOOD",
+        "amount_due": 51.75,
+        "due_date": "2026-07-22",
+        "account_number_masked": "****5369",
+    }
+    candidate = {
+        "sender": "CITY OF KIRKWOOD",
+        "due_date": "2026-07-22",
+        "account_number_masked": "****5369",
+    }
+    assert dedup.field_similarity(incoming, candidate) < dedup._SIM_THRESHOLD
+
+
+def test_kirkwood_rephoto_still_flags_after_penalty():
+    """(c) The legitimate re-photo (amount + due_date + account all present and
+    matching) must STILL flag ~0.98 despite the missing-discriminator penalty."""
+    sim = dedup.field_similarity(_KIRKWOOD_A, _KIRKWOOD_B)
+    assert sim >= dedup._SIM_THRESHOLD
+    assert sim > 0.95
+
+
+def test_date_format_normalization():
+    """FOLD-IN A: equal dates in different formats compare equal (a real dup)."""
+    assert dedup._value_similarity("due_date", "2026-07-22", "07/22/2026") == 1.0
+    assert dedup._value_similarity("due_date", "2026-07-22", "July 22, 2026") == 1.0
+    # But genuinely different dates still score 0 (equality not relaxed).
+    assert dedup._value_similarity("due_date", "2026-07-22", "07/23/2026") == 0.0
