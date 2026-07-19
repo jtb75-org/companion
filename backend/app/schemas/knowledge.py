@@ -20,7 +20,18 @@ class SourceChunkInfo(BaseModel):
 
 class KnowledgeSearchResponse(BaseModel):
     query: str
+    # ``answer`` always carries the server-appended provenance line and not-legal-advice
+    # disclaimer (see knowledge_service.generate_rag_answer) — these are enforced in code,
+    # never left to the (untrusted) model.
     answer: str
+    # Server-computed provenance/as-of line and disclaimer, surfaced structurally so a
+    # client can render them independently of the model prose.
+    provenance: str
+    disclaimer: str
+    # Citation labels derived server-side from the retrieved chunks, independent of the
+    # model text. ``grounded`` is False when no chunk cleared retrieval (no citation).
+    citations: list[str]
+    grounded: bool
     sources: list[SourceChunkInfo]
 
 
