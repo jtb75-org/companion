@@ -21,6 +21,7 @@ user_id FK is ON DELETE CASCADE, which does not FK-null).
 from sqlalchemy.dialects.postgresql import UUID
 
 from alembic import op
+from app.db.rls_migration import rls_bypassed
 
 revision = "039"
 down_revision = "038"
@@ -51,9 +52,15 @@ def downgrade() -> None:
     # by the restored NOT NULL + CASCADE schema. Downgrade explicitly DISCARDS that
     # history so the revert is executable regardless of data state (they'd have been
     # CASCADE-erased under the old schema anyway).
-    op.execute(
-        "DELETE FROM caregiver_activity_log WHERE trusted_contact_id IS NULL"
-    )
+    # caregiver_activity_log is under FORCE ROW LEVEL SECURITY (migration 028);
+    # this owner-run DELETE sets no app.current_user_id GUC, so without the
+    # bypass it would silently match ZERO rows and the SET NOT NULL below would
+    # then fail on any retained NULL-contact row. rls_bypassed makes the discard
+    # actually happen so the revert is executable regardless of data state.
+    with rls_bypassed(op, "caregiver_activity_log"):
+        op.execute(
+            "DELETE FROM caregiver_activity_log WHERE trusted_contact_id IS NULL"
+        )
     op.drop_constraint(_FK, "caregiver_activity_log", type_="foreignkey")
     op.create_foreign_key(
         _FK,

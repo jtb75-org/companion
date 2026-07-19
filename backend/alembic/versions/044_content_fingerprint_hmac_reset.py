@@ -22,15 +22,22 @@ only migration.
 """
 
 from alembic import op
+from app.db.rls_migration import rls_bypassed
 
 revision = "044"
 down_revision = "043"
 
 
 def upgrade() -> None:
-    # Clear the stale SHA-256 fingerprints. Prod is test-data only; the cache
-    # rebuilds as members re-upload.
-    op.execute("UPDATE documents SET content_fingerprint = NULL")
+    # ``documents`` is under FORCE ROW LEVEL SECURITY, so this owner-run UPDATE
+    # sets no ``app.current_user_id`` GUC and would match ZERO rows silently
+    # (the original prod no-op — data since corrected manually via the BYPASSRLS
+    # maintenance role). Wrap in rls_bypassed so any DB rebuilt-with-data applies
+    # it correctly. On a fresh/empty DB this is a harmless no-op regardless.
+    with rls_bypassed(op, "documents"):
+        # Clear the stale SHA-256 fingerprints; the cache rebuilds as members
+        # re-upload.
+        op.execute("UPDATE documents SET content_fingerprint = NULL")
 
 
 def downgrade() -> None:
