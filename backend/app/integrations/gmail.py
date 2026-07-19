@@ -42,6 +42,11 @@ async def initiate_oauth(user_id: str, redirect_uri: str) -> str:
     # flow.redirect_uri = redirect_uri
     # auth_url, _ = flow.authorization_url(prompt='consent')
     # return auth_url
+    #
+    # SECURITY (pentest 2026-07-19, currently a non-functional stub so not exploitable):
+    # when wiring the real flow, the authorization URL MUST include a signed/opaque `state`
+    # param bound to the user's session and validated on the callback (else account-linking
+    # CSRF), use an HTTPS `redirect_uri` (no cleartext auth-code hop), and include client_id.
 
     logger.info(f"Gmail OAuth initiated for user {user_id}")
     return f"https://accounts.google.com/o/oauth2/auth?scope=gmail.readonly&redirect_uri={redirect_uri}&response_type=code"

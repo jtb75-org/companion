@@ -32,7 +32,11 @@ async def acknowledge_notification(
     db: AsyncSession = Depends(get_db),
 ):
     """Acknowledge/dismiss a notification."""
-    # TODO: update notification status in DB
+    # TODO: update notification status in DB.
+    # SECURITY (pentest 2026-07-19): this is a no-op stub — it returns 200 for ANY id with
+    # no existence/ownership check and ignores the body. Harmless now (notifications aren't
+    # persisted, list returns empty), but when implemented it MUST look the notification up
+    # scoped to `user.id` and 404 on miss/foreign-owner, or it's a straight IDOR.
     return {"id": notification_id, "acknowledged": True}
 
 

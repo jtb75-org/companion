@@ -63,11 +63,17 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 
+# Hardening: never expose the interactive docs / OpenAPI schema in prod — they enumerate
+# every endpoint + request/response schema for an attacker. Kept on in non-prod for dev.
+_docs_enabled = settings.environment != "prod"
 app = FastAPI(
     title=f"{BRAND_MID} API",
     description=f"{BRAND_LONG} — Independence Assistant for Adults with Developmental Disabilities",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
 )
 
 CORS_ORIGINS = {
@@ -103,6 +109,23 @@ app.add_middleware(
     # and inert — no client sends it until the Authentik session flow is live.
     allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
 )
+
+
+# Hardening: baseline security response headers on every API response. HSTS only in prod
+# (HTTPS terminates at the edge there). setdefault() so a route that sets its own header
+# (e.g. /auth/check's Cache-Control: no-store) is never clobbered.
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if settings.environment == "prod":
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
+    return response
+
 
 # Mount API routers
 app.include_router(v1_router)
