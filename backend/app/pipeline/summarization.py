@@ -7,6 +7,7 @@ Falls back to templates if LLM is unavailable.
 
 import json
 import logging
+import re
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,19 +35,31 @@ _DEFAULT_SUMMARIZATION_PROMPT = (
     "- Tone: Warm, helpful, and reassuring.\n"
     "- Structure: 'What it is' followed by 'What to do'.\n"
     "- Safety: If the document is about money owed or medical news, "
-    "stay calm and suggest a small next step.\n\n"
+    "stay calm and suggest a small next step.\n"
+    "- CREDIT / ZERO BALANCE: If 'amount_due' is negative, zero, or the document "
+    "shows a credit ('CREDIT', 'DO NOT PAY', a parenthesized or negative amount), "
+    "the customer OWES NOTHING. NEVER tell them to pay, and never mention a due "
+    "date to pay by. Instead say the account has a credit or that there is nothing "
+    "to pay right now.\n\n"
     "## TASK\n"
     "1. Internal Reasoning: Briefly analyze the importance of this document.\n"
     "2. Spoken Summary: A 2-3 sentence friendly explanation for the user.\n"
     "3. Card Summary: A dashboard line (max 60 chars) in the format 'Sender — Key Detail'.\n\n"
     "## OUTPUT FORMAT\n"
     "Return ONLY valid JSON with these keys: 'reasoning', 'spoken', 'card'.\n"
-    "Example:\n"
+    "Example (amount owed):\n"
     '{{'
     '  "reasoning": "This is a utility bill with a clear due date.",'
     '  "spoken": "You have a bill from the Electric Company '
     'for $45. You should pay it by next Friday.",'
     '  "card": "Electric Co — $45 due Friday"'
+    '}}\n'
+    "Example (credit — nothing owed, amount_due is -10.15):\n"
+    '{{'
+    '  "reasoning": "This statement is a credit, so nothing is owed.",'
+    '  "spoken": "This statement from the City of Kirkwood shows a credit of '
+    '$10.15. Your account is ahead, so you do not need to send any money.",'
+    '  "card": "City of Kirkwood — $10.15 credit, all set"'
     '}}'
 )
 
@@ -118,6 +131,12 @@ async def summarize(
     # Apply confidence-based hedging (Trust Layer)
     spoken = _apply_confidence_hedging(spoken, classification.confidence_score)
 
+    # Credit safety guard (defense-in-depth): never instruct a member to pay a
+    # credit or zero balance, even if the LLM ignored the prompt guidance.
+    spoken, card = _apply_credit_guard(
+        spoken, card, classification, extraction.extracted_fields
+    )
+
     return SummarizationResult(
         document_id=classification.document_id,
         spoken_summary=spoken,
@@ -162,6 +181,71 @@ def _apply_confidence_hedging(text: str, confidence: float) -> str:
     if text.endswith(".") or text.endswith("!"):
         return text[:-1] + suffix
     return text + suffix
+
+
+# Words that would (wrongly) tell a member to pay when they owe nothing.
+_PAYMENT_INSTRUCTION_RE = re.compile(r"(?i)\b(pay|paid|owe|owed|due)\b")
+
+
+def _coerce_amount(raw: object) -> float | None:
+    """Best-effort convert an extracted amount_due into a float."""
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _apply_credit_guard(
+    spoken: str,
+    card: str,
+    classification: ClassificationResult,
+    fields: dict,
+) -> tuple[str, str]:
+    """Rewrite bill summaries that tell a member to pay a credit/zero balance.
+
+    Runs only for bills whose extracted amount_due is present and <= 0 (a credit
+    or zero balance). If either the spoken or card summary contains payment-
+    instruction language ('pay', 'owe', 'due'), both are replaced with warm,
+    plain-language, credit-safe wording. This is a deliberate belt-and-suspenders
+    check that does NOT trust the LLM to have followed the prompt.
+    """
+    if classification.classification != "bill":
+        return spoken, card
+
+    amount = _coerce_amount(fields.get("amount_due"))
+    if amount is None or amount > 0:
+        return spoken, card
+
+    if not (
+        _PAYMENT_INSTRUCTION_RE.search(spoken)
+        or _PAYMENT_INSTRUCTION_RE.search(card)
+    ):
+        # Already credit-safe; leave the (warmer) LLM wording intact.
+        return spoken, card
+
+    sender = fields.get("sender") or "this company"
+    credit = abs(amount)
+    if credit > 0:
+        spoken = (
+            f"This statement from {sender} shows a credit of ${credit:.2f}. "
+            "Your account is ahead, so you do not need to send any money."
+        )
+        card = f"{sender} — ${credit:.2f} credit, all set"
+    else:
+        spoken = (
+            f"This statement from {sender} shows a zero balance. "
+            "Your account is all set, so you do not need to send any money "
+            "right now."
+        )
+        card = f"{sender} — $0 balance, all set"
+
+    logger.info(
+        "CREDIT_GUARD_APPLIED: doc=%s amount_due=%s rewrote payment language",
+        classification.document_id, amount,
+    )
+    return spoken, card
 
 
 async def _llm_summarize(
