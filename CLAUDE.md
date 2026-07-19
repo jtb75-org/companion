@@ -84,14 +84,20 @@ prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
 
 ## Next steps / remaining work
 
-1. **Pre-real-PHI gates** (before onboarding real members): enable the OpenBao
-   **audit device** (declarative — add `audit "file"` to
-   `argocd-apps/applications/openbao.yaml` + restart); enable **OpenBao TLS**
-   (listener is `tls_disable=1`); **vault the encryption keys** off-cluster
-   (`~/companion-key-backup/` → 1Password); add an **egress NetworkPolicy** on
-   `companion-ocr` (it pulls models from `paddleocr.bj.bcebos.com` on first run
-   — bake models into the image or allow only that CDN + DNS); recalibrate OCR
-   confidence tiers now that PaddleOCR is primary.
+1. **Pre-real-PHI gates** — mostly CLOSED in the 2026-07-19 sweep. DONE:
+   `companion-ocr` egress NetworkPolicy (gitops #24); OpenBao audit device (was
+   already live); `content_fingerprint` → per-user HMAC (#140); chat-transcript
+   encryption (#141); `rls_guc_guard=on` in prod (#23); conversation-persistence
+   fix (#139); RLS-safe migration helper + audit (#144). STILL OPEN: **OpenBao
+   TLS** later phases (listener `tls_disable=1`; Phase A CA-trust shipped inert
+   in #143, cert→dual-listener→addr-flip deferred, each needs its own safety
+   review + owner go); **vault the encryption keys** off-cluster
+   (`~/companion-key-backup/` → 1Password + shred, OWNER); OCR confidence
+   real-data tuning (instrumentation + review floor shipped #142, tuning waits
+   for post-onboarding telemetry); §6 emotional-disclosure-persistence
+   reconciliation + a `chat_messages` retention TTL. See the auto-memory
+   (`migrations-silent-noop-force-rls`, `conversation-transcript-persistence`,
+   `argocd-partial-sync-skips-hooks`) and `RESUME.md` for the live detail.
 2. **Firebase finish:** publish the OAuth consent screen; build/sign mobile
    binaries + register the Android release SHA-1.
 3. **OCR primary flip resolved:** PaddleOCR is primary as of 2026-07-12,
@@ -101,7 +107,9 @@ prefixes `feature/ fix/ chore/ docs/ refactor/`. See `CONTRIBUTING.md` and
 4. **CI image builds:** `build-and-push.yml` last 5 runs all succeeded in
    ~9-11 min and auto-bumps gitops image tags after pushes to `main` (last
    checked 2026-07-11).
-5. Owner one-offs: revoke any bootstrap OpenBao token; key rotation automation.
+5. Owner one-offs: **vault `~/companion-key-backup/` → 1Password + shred**; revoke
+   any bootstrap OpenBao token; merge argocd-apps #69 (audit-log fullness alert;
+   ~1.6yr runway so low-urgency); key rotation automation.
 
 ## Open decisions (mostly resolved)
 
