@@ -1,6 +1,5 @@
 """App API — Document routes."""
 
-import hashlib
 import logging
 import uuid
 
@@ -21,7 +20,7 @@ from app.db import get_db
 from app.models.document import Document
 from app.models.enums import DocumentStatus, SourceChannel
 from app.schemas.document import DocumentStatusUpdate
-from app.services import document_service, storage_service
+from app.services import document_service, field_crypto, storage_service
 
 logger = logging.getLogger(__name__)
 
@@ -128,15 +127,19 @@ async def scan_document(
             )
         pages_data.append((data, content_type))
 
-    # Exact-duplicate check: hash the page bytes and, if this member already has
-    # a document with the same fingerprint (and it didn't fail), return that one
-    # instead of creating a second copy — the "I thought it glitched, tap again"
-    # double-submit. RLS scopes the lookup to this member; the FAILED exclusion
-    # lets a genuine retry of a failed upload through.
-    fingerprint = hashlib.sha256()
-    for data, _ in pages_data:
-        fingerprint.update(data)
-    content_fingerprint = fingerprint.hexdigest()
+    # Exact-duplicate check: fingerprint the page bytes and, if this member
+    # already has a document with the same fingerprint (and it didn't fail),
+    # return that one instead of creating a second copy — the "I thought it
+    # glitched, tap again" double-submit. RLS scopes the lookup to this member;
+    # the FAILED exclusion lets a genuine retry of a failed upload through.
+    #
+    # The fingerprint is a PER-MEMBER keyed HMAC (field_crypto.fingerprint_for_
+    # user), not a bare SHA-256: identical bytes under two members yield unrelated
+    # fingerprints, so a privileged DB/maintenance breach can't correlate the same
+    # document across members or confirm a known document by guessing its hash.
+    content_fingerprint = await field_crypto.fingerprint_for_user(
+        db, user.id, b"".join(data for data, _ in pages_data)
+    )
 
     existing = (
         await db.execute(

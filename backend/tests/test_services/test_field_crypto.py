@@ -8,6 +8,7 @@ get-or-create, wrap/unwrap, AAD binding, KEK rotation) is exercised.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import uuid
@@ -133,6 +134,83 @@ async def test_json_roundtrip():
     # None passes through.
     assert await field_crypto.encrypt_json_for_user(db, uid, None) is None
     assert await field_crypto.decrypt_json_for_user(db, uid, None) is None
+
+
+# --------------------------------------------------------------------------
+# Per-user keyed content fingerprint (exact-duplicate detection)
+# --------------------------------------------------------------------------
+
+
+async def test_fingerprint_same_user_same_bytes_is_stable():
+    """Same member + same bytes -> identical fingerprint (exact-dedup fires)."""
+    db = FakeDB()
+    uid = uuid.uuid4()
+    data = b"\xff\xd8\xff\xe0scanned-page-bytes" * 10
+    a = await field_crypto.fingerprint_for_user(db, uid, data)
+    b = await field_crypto.fingerprint_for_user(db, uid, data)
+    assert a == b
+    # Hex HMAC-SHA-256 -> 64 hex chars, and it is NOT the bare SHA-256.
+    assert len(a) == 64
+    assert a != hashlib.sha256(data).hexdigest()
+
+
+async def test_fingerprint_different_users_do_not_correlate():
+    """Same bytes under two members -> different fingerprints (no cross-member
+    correlation; a DB breach can't link identical documents across members)."""
+    db = FakeDB()
+    a, b = uuid.uuid4(), uuid.uuid4()
+    data = b"IDENTICAL-DOCUMENT-BYTES" * 20
+    fa = await field_crypto.fingerprint_for_user(db, a, data)
+    fb = await field_crypto.fingerprint_for_user(db, b, data)
+    assert fa != fb
+
+
+async def test_fingerprint_different_bytes_same_user_differ():
+    db = FakeDB()
+    uid = uuid.uuid4()
+    fa = await field_crypto.fingerprint_for_user(db, uid, b"page-one")
+    fb = await field_crypto.fingerprint_for_user(db, uid, b"page-two")
+    assert fa != fb
+
+
+async def test_fingerprint_dedup_lookup_finds_same_user_duplicate():
+    """The exact-dedup lookup key: a re-upload by the SAME member recomputes the
+    SAME fingerprint and so matches the stored value, while another member's
+    fingerprint of the same bytes does not."""
+    db = FakeDB()
+    uid, other = uuid.uuid4(), uuid.uuid4()
+    data = b"\x89PNG\r\n" + b"BILL" * 100
+    stored = await field_crypto.fingerprint_for_user(db, uid, data)
+    # Same member re-uploads identical bytes -> matches (dedup hits).
+    assert await field_crypto.fingerprint_for_user(db, uid, data) == stored
+    # A different member uploading identical bytes -> no match (stays distinct).
+    assert await field_crypto.fingerprint_for_user(db, other, data) != stored
+
+
+async def test_fingerprint_dev_fallback_deterministic_and_per_user(monkeypatch):
+    """No keyring in dev/test: still deterministic per (user, bytes) and still
+    per-user (so hermetic dedup works without KMS)."""
+    monkeypatch.setattr(settings, "field_encryption_key", "")
+    monkeypatch.setattr(settings, "field_keyring", "")
+    monkeypatch.setattr(settings, "environment", "test")
+    field_crypto.reset_keyring_cache()
+    db = FakeDB()
+    a, b = uuid.uuid4(), uuid.uuid4()
+    data = b"dev-bytes" * 30
+    fa1 = await field_crypto.fingerprint_for_user(db, a, data)
+    fa2 = await field_crypto.fingerprint_for_user(db, a, data)
+    fb = await field_crypto.fingerprint_for_user(db, b, data)
+    assert fa1 == fa2  # deterministic for a member
+    assert fa1 != fb  # still uncorrelatable across members
+
+
+async def test_fingerprint_fails_closed_without_keyring_in_prod(monkeypatch):
+    monkeypatch.setattr(settings, "field_encryption_key", "")
+    monkeypatch.setattr(settings, "field_keyring", "")
+    monkeypatch.setattr(settings, "environment", "production")
+    field_crypto.reset_keyring_cache()
+    with pytest.raises(RuntimeError):
+        await field_crypto.fingerprint_for_user(FakeDB(), uuid.uuid4(), b"x")
 
 
 # --------------------------------------------------------------------------
