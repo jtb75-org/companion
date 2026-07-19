@@ -29,14 +29,22 @@ a no-op — there is nothing schema-wise to reverse.
 """
 
 from alembic import op
+from app.db.rls_migration import rls_bypassed
 
 revision = "045"
 down_revision = "044"
 
 
 def upgrade() -> None:
-    op.execute("DELETE FROM chat_messages")
-    op.execute("DELETE FROM chat_sessions")
+    # Both tables are under FORCE ROW LEVEL SECURITY; an owner-run DELETE with no
+    # ``app.current_user_id`` GUC matches ZERO rows silently (the original prod
+    # no-op — data since corrected manually via the BYPASSRLS maintenance role).
+    # rls_bypassed makes this correct for any DB rebuilt-with-data; on a fresh/
+    # empty DB it is a harmless no-op. chat_messages FKs chat_sessions ON DELETE
+    # CASCADE; we delete children first so the intent is explicit.
+    with rls_bypassed(op, "chat_messages", "chat_sessions"):
+        op.execute("DELETE FROM chat_messages")
+        op.execute("DELETE FROM chat_sessions")
 
 
 def downgrade() -> None:
