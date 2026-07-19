@@ -25,6 +25,7 @@ import pytest
 from app.config import settings
 from app.integrations import authentik_admin
 from app.integrations.authentik_admin import (
+    delete_authentik_account,
     provision_authentik_account,
     set_authentik_password,
 )
@@ -230,6 +231,87 @@ async def test_set_password_raises_on_5xx(monkeypatch):
     _install_client(monkeypatch, handler, rec)
     with pytest.raises(httpx.HTTPStatusError):
         await set_authentik_password("x@example.com", "pw12345678")
+
+
+# ── 5c. delete_authentik_account — member account-deletion cleanup ──────────────
+@pytest.mark.asyncio
+async def test_delete_skipped_when_not_enabled(monkeypatch):
+    # Best-effort deletion path: a missing gate is a benign no-op, NOT a raise.
+    monkeypatch.setattr(settings, "auth_provider", "disabled")
+    monkeypatch.setattr(settings, "authentik_api_token", "tok")
+    rec = Recorder()
+    _install_client(monkeypatch, _make_handler(rec, existing=[]), rec)
+
+    outcome = await delete_authentik_account("x@example.com")
+
+    assert outcome == "skipped"
+    assert rec.instantiations == 0  # zero HTTP
+
+
+@pytest.mark.asyncio
+async def test_delete_skipped_when_token_empty(monkeypatch):
+    monkeypatch.setattr(settings, "auth_provider", "authentik")
+    monkeypatch.setattr(settings, "authentik_api_token", "")
+    rec = Recorder()
+    _install_client(monkeypatch, _make_handler(rec, existing=[]), rec)
+
+    outcome = await delete_authentik_account("x@example.com")
+
+    assert outcome == "skipped"
+    assert rec.instantiations == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_not_found_when_no_account(monkeypatch):
+    _enable_authentik(monkeypatch)
+    rec = Recorder()
+    _install_client(monkeypatch, _make_handler(rec, existing=[]), rec)
+
+    outcome = await delete_authentik_account("missing@example.com")
+
+    assert outcome == "not_found"
+    assert [r.method for r in rec.requests] == ["GET"]  # no DELETE
+
+
+@pytest.mark.asyncio
+async def test_delete_success(monkeypatch):
+    _enable_authentik(monkeypatch, token="tok-del")
+    rec = Recorder()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        rec.requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"results": [{"pk": 13, "email": "x"}]})
+        # DELETE
+        rec.post_auth = request.headers.get("Authorization")
+        return httpx.Response(204)
+
+    _install_client(monkeypatch, handler, rec)
+
+    outcome = await delete_authentik_account("x@example.com")
+
+    assert outcome == "deleted"
+    assert [r.method for r in rec.requests] == ["GET", "DELETE"]
+    assert rec.requests[1].url.path == "/api/v3/core/users/13/"
+    assert rec.post_auth == "Bearer tok-del"
+    assert rec.requests[0].url.params.get("email") == "x@example.com"
+
+
+@pytest.mark.asyncio
+async def test_delete_raises_on_5xx(monkeypatch):
+    # Genuine HTTP errors PROPAGATE — the lifecycle caller wraps them best-effort.
+    _enable_authentik(monkeypatch)
+    rec = Recorder()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        rec.requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"results": [{"pk": 9}]})
+        return httpx.Response(500, json={"detail": "boom"})
+
+    _install_client(monkeypatch, handler, rec)
+    with pytest.raises(httpx.HTTPStatusError):
+        await delete_authentik_account("x@example.com")
 
 
 # ── 6. seam — get_or_create_stub_user provisions only when the switch is on ─────

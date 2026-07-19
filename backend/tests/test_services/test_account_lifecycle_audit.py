@@ -34,6 +34,12 @@ async def test_execute_deletion_persists_full_audit_details(monkeypatch):
 
     monkeypatch.setattr(als, "clear_redis_keys", _noop_redis)
 
+    # IdP cleanup is hermetic — never hit a real Authentik in tests.
+    async def _fake_delete_idp(email):
+        return "deleted"
+
+    monkeypatch.setattr(als, "delete_authentik_account", _fake_delete_idp)
+
     email = f"del-{uuid4().hex[:8]}@example.com"
     async with db_module.async_session_factory() as s:
         user = User(
@@ -65,8 +71,8 @@ async def test_execute_deletion_persists_full_audit_details(monkeypatch):
     assert details.get("admin_record_deleted") is True
     assert details.get("email") == email
     assert details.get("caregiver_roles_removed") == 0
-    # IdP cleanup is deferred (orphaned Authentik account) — documented, not silent.
-    assert details.get("idp_cleanup") == "deferred"
+    # IdP cleanup: the Authentik account is hard-DELETEd (mocked here) — outcome recorded.
+    assert details.get("idp_cleanup") == "deleted"
 
     async with db_module.async_session_factory() as s:
         await s.execute(delete(DeletionAuditLog).where(DeletionAuditLog.user_id == uid))

@@ -139,3 +139,44 @@ async def set_authentik_password(email: str, password: str) -> None:
         )
         resp.raise_for_status()
     log.info("set Authentik password for %s", email)
+
+
+async def delete_authentik_account(email: str) -> str:
+    """Hard-DELETE the Authentik user for ``email`` (member account-deletion cleanup).
+
+    Called from the best-effort account-deletion flow (``execute_deletion`` step 10),
+    AFTER the email has been purged from every Companion cohort (member/caregiver/admin
+    rows). A full DELETE — not a disable — is deliberate: it satisfies the CCPA
+    right-to-delete (removes the residual PII) and closes the stale-password-on-reinvite
+    hazard (a deleted-then-reinvited email would otherwise keep its OLD Authentik
+    password, since login binds by email to the surviving account; a hard delete forces a
+    re-invite to provision a FRESH account).
+
+    Unlike ``set_authentik_password`` this must NOT raise on a missing gate — it runs on a
+    best-effort deletion path, so an unconfigured Authentik is a benign no-op, not a
+    programming error. Returns a status string instead:
+
+    * ``"deleted"``   — an account was found and DELETEd;
+    * ``"not_found"`` — no Authentik user for that email (e.g. never provisioned);
+    * ``"skipped"``   — Authentik not enabled / no admin token (inert).
+
+    Genuine HTTP/network errors PROPAGATE — the lifecycle caller wraps them for its
+    best-effort + audit semantics; they are not swallowed here.
+    """
+    # Gate: not enabled (or no admin token) ⇒ inert no-op, zero HTTP.
+    if not settings.authentik_enabled or not settings.authentik_api_token:
+        return "skipped"
+
+    async with _admin_client() as client:
+        found = await client.get("/api/v3/core/users/", params={"email": email})
+        found.raise_for_status()
+        results = found.json().get("results") or []
+        if not results:
+            log.info("no Authentik account to delete for %s", email)
+            return "not_found"
+        pk = results[0]["pk"]
+
+        resp = await client.delete(f"/api/v3/core/users/{pk}/")
+        resp.raise_for_status()
+    log.info("deleted Authentik account for %s", email)
+    return "deleted"
