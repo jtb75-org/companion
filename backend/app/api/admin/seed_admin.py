@@ -49,19 +49,6 @@ async def bootstrap_first_admin(
     db.add(admin)
     await db.flush()
 
-    # Set Firebase custom claim for Firestore security rules
-    try:
-        from firebase_admin import auth as fb_auth
-
-        from app.auth.firebase import _ensure_initialized
-        _ensure_initialized()
-        fb_user = fb_auth.get_user_by_email(email)
-        fb_auth.set_custom_user_claims(
-            fb_user.uid, {"admin": True}
-        )
-    except Exception:
-        pass  # Non-critical — polling fallback works
-
     return {
         "created": True,
         "email": email,

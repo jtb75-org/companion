@@ -1,7 +1,7 @@
 """Tests for the generic, email-keyed account-activation flow.
 
 Covers the service (issue / resolve / consume single-use), the public /activation
-endpoints (validate + branded set-password, INERT under firebase), and the admin-
+endpoints (validate + branded set-password, INERT when provider != authentik), and the admin-
 creation wiring (activation email under Authentik only). A real Postgres session is
 used (mirrors test_set_password_authentik.py); the Authentik admin HTTP seam is
 monkeypatched as async spies. ``auth_provider`` is set via monkeypatch, not env.
@@ -74,12 +74,12 @@ class _Spies:
         )
 
 
-# ── 1. set-password 404 under firebase (inert) ──────────────────────────────────
+# ── 1. set-password 404 when provider is not authentik (inert) ──────────────────
 
 
 @requires_db
-async def test_set_password_404_under_firebase(monkeypatch):
-    monkeypatch.setattr(settings, "auth_provider", "firebase")
+async def test_set_password_404_when_not_authentik(monkeypatch):
+    monkeypatch.setattr(settings, "auth_provider", "disabled")
     assert settings.authentik_login_enabled is False  # sanity
     spies = _Spies(monkeypatch)
     email = f"act-fb-{uuid.uuid4()}@t.io"
@@ -330,13 +330,13 @@ async def test_create_admin_calls_activation_helper(monkeypatch):
     await _delete_admin(email)
 
 
-# ── 8. send_activation_if_enabled: inert under firebase, issues+sends on authentik ─
+# ── 8. send_activation_if_enabled: inert when not authentik, issues+sends on authentik ─
 
 
 @requires_db
-async def test_send_activation_if_enabled_inert_under_firebase(monkeypatch):
-    """The shared helper is a no-op on the Firebase default: no email, no token row."""
-    monkeypatch.setattr(settings, "auth_provider", "firebase")
+async def test_send_activation_if_enabled_inert_when_not_authentik(monkeypatch):
+    """The shared helper is a no-op when the provider is not authentik: no email, no token row."""
+    monkeypatch.setattr(settings, "auth_provider", "disabled")
     sent: list = []
 
     async def _send(to_email: str, to_name: str, token: str) -> bool:

@@ -161,5 +161,5 @@ async def test_unknown_subject_still_falls_back_and_401s(monkeypatch):
     _enable_authentik(monkeypatch, subject="subject-that-maps-to-nobody")
     async with _client() as ac:
         r = await ac.get("/api/v1/auth/check")
-    # No session email -> Firebase fallback -> no bearer -> 401.
+    # No session email (subject maps to no account) -> 401.
     assert r.status_code == 401

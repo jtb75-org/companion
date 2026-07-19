@@ -4,15 +4,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.firebase import verify_firebase_token
 from app.auth.principal import resolve_session_principal
 from app.config import settings
 from app.db import get_db
-from app.db.context import set_login_email_context, set_user_context
 from app.models.audit import AccountAuditLog
 from app.models.enums import AccountStatus
 from app.models.trusted_contact import TrustedContact
-from app.models.user import User
 
 router = APIRouter(tags=["Profile"])
 
@@ -25,40 +22,12 @@ async def get_my_profile(
 ):
     """Get current user's profile. Any authenticated member can call this.
 
-    DUAL-RUN: accepts a BFF Authentik session when auth_provider == "authentik",
-    else the existing Firebase bearer path (byte-identical under "firebase")."""
-    # DUAL-RUN Authentik-session branch (inert unless auth_provider == "authentik").
+    Resolved from the Authentik BFF session."""
     principal = await resolve_session_principal(request, db)
-    if principal is not None:
-        # Session resolves the member by subject and already set the tenant GUC.
-        user = principal.user
-    else:
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(401, "No token")
-
-        token = authorization.removeprefix("Bearer ").strip()
-        try:
-            decoded = await verify_firebase_token(token)
-        except ValueError as e:
-            raise HTTPException(401, str(e)) from None
-
-        email = decoded.get("email")
-        if not email:
-            raise HTTPException(401, "No email")
-
-        # RLS bootstrap: this endpoint doesn't use get_current_user, so set the
-        # login-email GUC so the users policy admits the by-email lookup (Phase 2).
-        await set_login_email_context(db, email)
-        result = await db.execute(select(User).where(User.email == email))
-        user = result.scalar_one_or_none()
-
-        if not user:
-            return {"exists": False, "profile_complete": False}
-
-        # Now the user id is known, set the tenant GUC so the encrypted-phone DEK
-        # row (user_encryption_keys is under per-user RLS) is visible; without it
-        # get_user_phone would fail closed as "no DEK row".
-        await set_user_context(db, user.id)
+    if principal is None:
+        raise HTTPException(401, "Not authenticated")
+    # Session resolves the member by subject and already set the tenant GUC.
+    user = principal.user
 
     from app.services.field_crypto import get_user_phone
     return {
@@ -82,40 +51,12 @@ async def get_my_caregivers(
 ):
     """Get the current member's caregivers.
 
-    DUAL-RUN: accepts a BFF Authentik session when auth_provider == "authentik",
-    else the existing Firebase bearer path (byte-identical under "firebase")."""
-    # DUAL-RUN Authentik-session branch (inert unless auth_provider == "authentik").
+    Resolved from the Authentik BFF session."""
     principal = await resolve_session_principal(request, db)
-    if principal is not None:
-        # Session resolves the member by subject and already set the tenant GUC.
-        user = principal.user
-    else:
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(401, "No token")
-
-        token = authorization.removeprefix("Bearer ").strip()
-        try:
-            decoded = await verify_firebase_token(token)
-        except ValueError as e:
-            raise HTTPException(401, str(e)) from None
-
-        email = decoded.get("email")
-        if not email:
-            raise HTTPException(401, "No email")
-
-        # RLS bootstrap: this endpoint doesn't use get_current_user, so set the
-        # login-email GUC so the users policy admits the by-email lookup (Phase 2).
-        await set_login_email_context(db, email)
-        result = await db.execute(select(User).where(User.email == email))
-        user = result.scalar_one_or_none()
-
-        if not user:
-            return {"caregivers": []}
-
-        # Set the tenant GUC now that the member id is known: this route reads the
-        # member's own trusted_contacts (and will need it once trusted_contacts RLS
-        # lands next), so scope the session to this member.
-        await set_user_context(db, user.id)
+    if principal is None:
+        raise HTTPException(401, "Not authenticated")
+    # Session resolves the member by subject and already set the tenant GUC.
+    user = principal.user
 
     contacts_result = await db.execute(
         select(TrustedContact).where(TrustedContact.user_id == user.id)
@@ -147,59 +88,21 @@ async def complete_profile(
 ):
     """Complete user profile with first name, last name, phone.
 
-    DUAL-RUN: accepts a BFF Authentik session when auth_provider == "authentik"
-    (a session only exists for an already-invited member, so the invite-only gate
-    is satisfied upstream), else the existing Firebase bearer path (byte-identical
-    under "firebase"). As a state-changing POST, the session path enforces the
-    double-submit CSRF check inside resolve_session_principal."""
+    Resolved from the Authentik BFF session (a session only exists for an
+    already-invited member, so the invite-only gate is satisfied upstream). As a
+    state-changing POST, the session path enforces the double-submit CSRF check inside
+    resolve_session_principal."""
     # Dev bypass
     if settings.dev_auth_bypass and not authorization:
         return {"completed": True}
 
-    # DUAL-RUN Authentik-session branch (inert unless auth_provider == "authentik").
     principal = await resolve_session_principal(request, db)
-    if principal is not None:
-        # Session resolves the member by subject (invite-only already enforced at
-        # /auth/login) and already set the tenant GUC.
-        user = principal.user
-        email = principal.email
-    else:
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(401, "No token")
-
-        token = authorization.removeprefix("Bearer ").strip()
-        try:
-            decoded = await verify_firebase_token(token)
-        except ValueError as e:
-            raise HTTPException(401, str(e)) from None
-
-        email = decoded.get("email")
-        if not email:
-            raise HTTPException(401, "No email")
-
-        # RLS bootstrap: this endpoint doesn't use get_current_user, so set the
-        # login-email GUC so the users policy admits the by-email lookup (Phase 2).
-        await set_login_email_context(db, email)
-        result = await db.execute(select(User).where(User.email == email))
-        user = result.scalar_one_or_none()
-
-        # Invite-only: every invited or admin-provisioned account already has a
-        # (stub) User row created at invite time. No row means this email was
-        # never invited, so we refuse to self-provision an account here.
-        if user is None:
-            # Audit the refused signup. Commit it on its own so it survives the
-            # request rollback triggered by the 403 below.
-            db.add(AccountAuditLog(event="signup_refused", email=email))
-            await db.commit()
-            raise HTTPException(
-                status_code=403,
-                detail="No invitation found for this account.",
-            )
-
-        # Now that the invited stub is resolved, set the tenant GUC to its id so the
-        # activation UPDATE + the encrypted-phone DEK create pass WITH CHECK under
-        # RLS (this is the onboarding write path; it never runs get_current_user).
-        await set_user_context(db, user.id)
+    if principal is None:
+        raise HTTPException(401, "Not authenticated")
+    # Session resolves the member by subject (invite-only already enforced at
+    # /auth/login) and already set the tenant GUC.
+    user = principal.user
+    email = principal.email
 
     first_name = data.get("first_name", "")
     last_name = data.get("last_name", "")

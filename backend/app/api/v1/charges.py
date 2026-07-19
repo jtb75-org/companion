@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.firebase import verify_firebase_token
 from app.auth.principal import resolve_caregiver_session
 from app.config import settings
 from app.db.session import get_maintenance_db
@@ -42,22 +41,10 @@ async def get_my_charges(
                 ]
             }
 
-    # DUAL-RUN: prefer an Authentik caregiver session (inert unless auth_provider ==
-    # "authentik"); else the Firebase bearer path runs UNCHANGED.
+    # Resolve the caregiver's verified email from the Authentik BFF session.
     email = await resolve_caregiver_session(request)
-    if email is None:
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="No token")
-
-        token = authorization.removeprefix("Bearer ").strip()
-        try:
-            decoded = await verify_firebase_token(token)
-        except ValueError as e:
-            raise HTTPException(status_code=401, detail=str(e)) from None
-
-        email = decoded.get("email")
     if not email:
-        raise HTTPException(status_code=401, detail="No email in token")
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
     # Find trusted_contacts where this email is the contact
     result = await db.execute(

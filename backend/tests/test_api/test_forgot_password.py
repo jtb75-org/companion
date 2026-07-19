@@ -2,7 +2,7 @@
 activation/set-password redemption for an ACTIVE account.
 
 /auth/forgot-password is UNAUTHENTICATED and security-sensitive, so the tests pin the
-same envelope as signup: firebase-inert (404), anti-enumeration (byte-identical
+same envelope as signup: inert when not authentik (404), anti-enumeration (byte-identical
 response whether or not the account exists), the per-IP rate limit, and that a real
 activation token is issued + a reset email is attempted ONLY for an existing account.
 The final test proves the reset link redeems through the UNCHANGED
@@ -143,12 +143,12 @@ def _enable_authentik(monkeypatch) -> InMemoryRateLimiter:
     return limiter
 
 
-# ── 1. firebase-inert: 404 + no side effects ────────────────────────────────────
+# ── 1. inert when provider is not authentik: 404 + no side effects ──────────────
 
 
 @requires_db
-async def test_forgot_404_under_firebase(monkeypatch):
-    monkeypatch.setattr(settings, "auth_provider", "firebase")
+async def test_forgot_404_when_not_authentik(monkeypatch):
+    monkeypatch.setattr(settings, "auth_provider", "disabled")
     assert settings.authentik_enabled is False  # sanity
     spies = _Spies(monkeypatch)
     email = f"fp-fb-{uuid.uuid4()}@t.io"

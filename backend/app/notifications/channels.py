@@ -21,14 +21,8 @@ async def deliver_push(
         f"title=\"{title}\" body=\"{body[:60]}...\""
     )
 
-    # TODO: Firebase Cloud Messaging integration
-    # from firebase_admin import messaging
-    # message = messaging.Message(
-    #     notification=messaging.Notification(title=title, body=body),
-    #     data=data or {},
-    #     token=user_fcm_token,
-    # )
-    # messaging.send(message)
+    # FCM delivery is handled by services/push_notification_service.py (FCM v1 HTTP
+    # API via a service-account key + httpx). This channel emits the delivery event.
 
     await event_publisher.publish(
         "notification.delivered",

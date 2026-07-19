@@ -1,8 +1,7 @@
 """Authentik cutover-hardening gates: #3 (client-IP / XFF trust) + #6 (CORS).
 
-Both are inert on the live Firebase path — #3 only affects the (404-guarded) login
-throttle bucket, and #6 only matters once a browser SPA sends the CSRF header — but we
-lock the behavior in so the cutover flip is safe.
+#3 affects the login throttle bucket and #6 the browser SPA CSRF-header preflight; we
+lock the behavior in so the Authentik login surface stays safe.
 """
 
 from __future__ import annotations

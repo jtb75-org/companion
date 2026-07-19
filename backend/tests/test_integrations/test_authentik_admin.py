@@ -6,7 +6,7 @@ we monkeypatch ``authentik_admin.httpx.AsyncClient`` with a factory that injects
 MockTransport handler (and drops the ``verify`` kwarg, which MockTransport ignores).
 
 Coverage:
-1. inert on the Firebase default — no client is ever constructed;
+1. inert when the provider is not authentik — no client is ever constructed;
 2. inert when the admin token is empty even under auth_provider=authentik;
 3. idempotent — an existing account (GET returns results) issues no POST;
 4. creates — GET empty ⇒ POST to /api/v3/core/users/ with the expected body + Bearer;
@@ -69,10 +69,10 @@ def _enable_authentik(monkeypatch, *, token: str = "test-admin-token") -> None:
     monkeypatch.setattr(settings, "authentik_api_token", token)
 
 
-# ── 1. inert on the Firebase default ────────────────────────────────────────────
+# ── 1. inert when the provider is not authentik ─────────────────────────────────
 @pytest.mark.asyncio
-async def test_inert_when_provider_firebase(monkeypatch):
-    monkeypatch.setattr(settings, "auth_provider", "firebase")
+async def test_inert_when_provider_not_authentik(monkeypatch):
+    monkeypatch.setattr(settings, "auth_provider", "disabled")
     monkeypatch.setattr(settings, "authentik_api_token", "test-admin-token")
     rec = Recorder()
     _install_client(monkeypatch, _make_handler(rec, existing=[]), rec)
@@ -174,7 +174,7 @@ async def test_does_not_raise_on_5xx(monkeypatch):
 @pytest.mark.asyncio
 async def test_set_password_raises_when_not_configured(monkeypatch):
     # No switch / no token ⇒ programming error (only called from the gated endpoint).
-    monkeypatch.setattr(settings, "auth_provider", "firebase")
+    monkeypatch.setattr(settings, "auth_provider", "disabled")
     monkeypatch.setattr(settings, "authentik_api_token", "tok")
     rec = Recorder()
     _install_client(monkeypatch, _make_handler(rec, existing=[]), rec)
@@ -258,7 +258,7 @@ async def test_stub_seam_provisions_when_switch_on(monkeypatch):
 
 @requires_db
 @pytest.mark.asyncio
-async def test_stub_seam_inert_when_firebase(monkeypatch):
+async def test_stub_seam_inert_when_not_authentik(monkeypatch):
     import app.services.invitation_service as inv
 
     calls: list[tuple[str, str]] = []
@@ -267,7 +267,7 @@ async def test_stub_seam_inert_when_firebase(monkeypatch):
         calls.append((email, name))
 
     monkeypatch.setattr(inv, "provision_authentik_account", spy)
-    monkeypatch.setattr(settings, "auth_provider", "firebase")
+    monkeypatch.setattr(settings, "auth_provider", "disabled")
 
     email = f"seam-off-{uuid.uuid4().hex[:8]}@example.com"
     await inv.get_or_create_stub_user(email, "Seam Off")

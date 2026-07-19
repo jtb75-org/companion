@@ -22,9 +22,10 @@ dependencies = [
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
 
-    # Auth
-    "firebase-admin>=6.5.0",
-    # OIDC id_token verification for the Authentik BFF path (RS256 via cryptography)
+    # Auth — OIDC id_token verification for the Authentik BFF path (RS256 via cryptography).
+    # NOTE: firebase-admin was removed with Firebase auth retirement. FCM push
+    # (services/push_notification_service.py) does NOT use it — it calls the FCM v1 HTTP
+    # API directly with a service-account key via google.auth + httpx.
     "pyjwt[crypto]>=2.8.0",
 
     # Object storage (S3-compatible MinIO; replaces GCS)

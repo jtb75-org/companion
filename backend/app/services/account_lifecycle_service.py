@@ -296,15 +296,19 @@ async def execute_deletion(db: AsyncSession, user_id: UUID) -> dict:
         await db.delete(admin_record)
         audit_details["admin_record_deleted"] = True
 
-    # 10. Delete Firebase Auth user
-    from app.auth.firebase import delete_firebase_user
-    firebase_deleted = delete_firebase_user(user.email)
-    audit_details["firebase_auth_deleted"] = firebase_deleted
+    # 10. Identity-provider account cleanup: Firebase auth was retired, so there is no
+    # Firebase user to delete here. Deleting the corresponding Authentik account is a
+    # separate follow-up (needs the Authentik admin API + its own safety review); until
+    # then a deleted member may leave an orphaned Authentik account (which can no longer
+    # log in — the invite-only `users` row is gone, so /auth/login refuses it). Record the
+    # deferral explicitly so every deletion audit documents the known orphan rather than
+    # silently omitting IdP cleanup.
+    audit_details["idp_cleanup"] = "deferred"
 
     # audit_details was mutated in-place AFTER db.add(audit) and after the admin lookup
     # above triggered an autoflush that serialized a PARTIAL dict. Plain-dict mutations to
     # a JSONB column aren't change-tracked (no MutableDict), so flag it dirty to persist
-    # the complete details (incl. firebase_auth_deleted / admin_record_deleted) on flush.
+    # the complete details (incl. admin_record_deleted / idp_cleanup) on flush.
     flag_modified(audit, "details")
 
     # 11. Delete user row (CASCADE handles member's own data)

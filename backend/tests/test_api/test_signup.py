@@ -3,7 +3,8 @@
 Self-signup opens self-registration (previously closed): an individual creates their
 own INVITED, self_directed member account and gets a branded activation email; the
 activation link is the email-ownership proof. This surface is UNAUTHENTICATED and
-security-sensitive, so the tests pin the security envelope: firebase-inert (404),
+security-sensitive, so the tests pin the security envelope: inert when not
+authentik (404),
 anti-enumeration (byte-identical response regardless of account existence), the
 per-IP rate limit, and that activation flips the member ACTIVE.
 
@@ -101,12 +102,12 @@ def _enable_authentik(monkeypatch) -> InMemoryRateLimiter:
     return limiter
 
 
-# ── 1. firebase-inert: 404 + no side effects ────────────────────────────────────
+# ── 1. inert when provider is not authentik: 404 + no side effects ──────────────
 
 
 @requires_db
-async def test_signup_404_under_firebase(monkeypatch):
-    monkeypatch.setattr(settings, "auth_provider", "firebase")
+async def test_signup_404_when_not_authentik(monkeypatch):
+    monkeypatch.setattr(settings, "auth_provider", "disabled")
     assert settings.authentik_enabled is False  # sanity
     spies = _Spies(monkeypatch)
     email = f"su-fb-{uuid.uuid4()}@t.io"
