@@ -109,22 +109,43 @@ processor, since deleted — 0 remain.)
 
 ## Remaining work / gates
 
-**Pre-real-PHI gates** (before onboarding real members):
-1. **Egress NetworkPolicy** on `companion-ocr` — it pulls models from
-   `paddleocr.bj.bcebos.com` on first run (only model dl leaves cluster, no
-   PHI). Either bake models into the image or allow only that CDN + DNS.
-2. OpenBao **audit device** (declarative) + **TLS** (listener is
-   `tls_disable=1`); **vault the encryption keys** off-cluster
-   (`~/companion-key-backup/` → 1Password, then shred).
-3. Recalibrate OCR confidence tiers now that PaddleOCR is primary.
-4. **`documents.content_fingerprint` → per-user keyed HMAC** (safety-reviewer
-   follow-up, #68). It's currently an unsalted SHA-256 of the document bytes for
-   exact-dup detection; a privileged DB/maintenance-role breach could correlate
-   which members hold the identical document and run a known-document guess
-   attack. Switch to HMAC-SHA-256 under the member's DEK before real-PHI
-   onboarding (preserves per-user exact dedup, removes cross-member linkage).
+**Pre-real-PHI gates — CLOSED in the 2026-07-19 sweep:**
+1. ✅ **Egress NetworkPolicy** on `companion-ocr` — gitops #24 (default-deny
+   egress, allow only DNS + the model CDN; deployed). Follow-up: bake models into
+   the image so egress can be denied entirely.
+2. ✅ **OpenBao audit device** — already live (the docs listing it as remaining
+   were stale; `audit.log` actively appending, ~1.6yr PVC runway). Alert PR
+   argocd-apps #69 pending owner merge; rotation sidecar deferred (maintenance
+   window — `selfHeal:true` auto-applies podSpec changes → unseal).
+3. ✅ **`content_fingerprint` → per-user HMAC** — #140 (HKDF subkey off the member
+   DEK, domain-separated; removes cross-member correlation, keeps same-user dedup).
+4. ✅ **Chat transcript encryption** — #141 (`chat_messages.content` now `f2:`
+   per-user envelope, parity with RAG/OCR/extracted-fields).
+5. ✅ **`rls_guc_guard=on` in prod** — gitops #23 (the no-tenant-context tripwire
+   was disabled in prod under `auto`).
+6. ✅ **Conversation persistence** — #139 (transcripts were silently dropping every
+   turn after the greeting; transaction-local RLS GUC cleared by a mid-request
+   commit). See [[conversation-transcript-persistence]].
+7. ✅ **RLS-safe migration helper** — #144 (`app/db/rls_migration.py`); migrations
+   doing DML on the 18 FORCE-RLS tenant tables were silently affecting 0 rows +
+   recording as applied. Audit found only 044/045/039-downgrade affected, all
+   fixed. See [[migrations-silent-noop-force-rls]].
+8. ◻ **OCR confidence recalibration** — instrumentation + a conservative review
+   floor shipped (#142); the actual close-out (real-data threshold tuning) stays
+   OPEN until telemetry accumulates post-onboarding.
+9. ◻ **OpenBao TLS** — Phase A (inert CA-trust prerequisite) shipped (#143); later
+   phases (cert-manager server cert → dual-listener cutover → addr flip) DEFERRED,
+   each needs its own safety review + owner per-phase go. Blast radius: a bad flip
+   breaks all field-crypto (but not the auto-unseal — revertible). See
+   [[argocd-partial-sync-skips-hooks]] for the deploy caveats.
 
-Done: `source_metadata.ocr_text` is encrypted in `process_camera_scan`
+**Still open pre-PHI:** OpenBao TLS later phases (#9); OCR real-data tuning (#8);
+**vault the encryption keys** off-cluster (`~/companion-key-backup/` → 1Password,
+then shred — OWNER); §6 emotional-disclosure-persistence reconciliation + a
+`chat_messages` retention TTL (deferred owner decision — see
+[[conversation-transcript-persistence]]).
+
+Done earlier: `source_metadata.ocr_text` is encrypted in `process_camera_scan`
 (`encrypt_for_user` in `backend/app/pipeline/ingestion.py`).
 
 **Tracked follow-ups (non-blocking):**
@@ -154,7 +175,9 @@ Done: `source_metadata.ocr_text` is encrypted in `process_camera_scan`
     on a physical device. Detail in [[document-pipeline-prod-gaps]].
   - Publish OAuth consent screen; build/sign mobile binaries + register the
     Android release SHA-1.
-- Owner one-offs: revoke bootstrap OpenBao token; key rotation automation.
+- Owner one-offs: **vault `~/companion-key-backup/` → 1Password + shred**; revoke
+  bootstrap OpenBao token; merge argocd-apps #69 (audit-log alert); key rotation
+  automation.
 
 > NOTE: DB currently has **1 member user** (`smoketest@mydailydignity.com`,
 > active) + **1 admin** (`joe.buhr@gmail.com`). See [[prod-access-model]].
