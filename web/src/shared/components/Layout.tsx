@@ -46,10 +46,9 @@ function currentSection(pathname: string): string {
 export function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation()
   const section = currentSection(location.pathname)
-  const { user, logout, role, getToken } = useAuth()
+  const { user, logout, role } = useAuth()
   const navigate = useNavigate()
   const [menuOpen, setMenuOpen] = useState(false)
-  const [copied, setCopied] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
   // Close menu on outside click
@@ -62,15 +61,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [])
-
-  const copyToken = async () => {
-    const token = await getToken()
-    if (token) {
-      await navigator.clipboard.writeText(token)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    }
-  }
 
   return (
     <div className="flex h-screen bg-companion-cream">
@@ -154,23 +144,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
                   >
                     <span className="text-gray-400">👤</span> My Profile
                   </button>
-                  {role === 'admin' && (
-                    <>
-                      <div className="px-4 py-1.5 mt-1">
-                        <p className="text-[10px] font-bold uppercase tracking-wider text-gray-300">Developer</p>
-                      </div>
-                      <button
-                        onClick={copyToken}
-                        className="w-full text-left px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 flex items-center gap-2"
-                      >
-                        {copied ? (
-                          <><span className="text-green-500">✓</span> Copied!</>
-                        ) : (
-                          <><span className="text-gray-400">🔑</span> Copy Token</>
-                        )}
-                      </button>
-                    </>
-                  )}
                   <div className="border-t border-gray-100 mt-1">
                     <button
                       onClick={() => { setMenuOpen(false); logout(); window.location.href = '/login' }}

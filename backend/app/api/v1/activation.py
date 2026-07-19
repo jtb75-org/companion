@@ -6,10 +6,6 @@ link, sets their Authentik password in Companion's branded UI, then signs in via
 ``/auth/login``. This surface is generic on purpose — keyed by EMAIL, not a cohort id
 — so admin and member activation share one backend.
 
-INERT under ``auth_provider=firebase``: ``set-password`` 404s (``_require_authentik_
-enabled``); the token itself is only ever issued from Authentik-gated seams, so on the
-Firebase default nothing here is reachable with a real token.
-
 Set-password capability note (for reviewers): a token could in principle target an
 account that is ALREADY established. The guard is SINGLE-USE + EXPIRY (migration 040):
 a token is consumed on the first successful password set and cannot reset an account
@@ -243,9 +239,9 @@ async def validate_activation_token(token: str):
 async def set_activation_password(data: ActivationSetPassword):
     """Redeem an activation token and set the holder's Authentik password.
 
-    Authentik-only (404s under firebase). Does NOT mint a session or log the user in —
-    the web calls ``/auth/login`` next. The token is consumed only AFTER a successful
-    password set, so an IdP failure leaves it usable for a retry."""
+    Authentik-only (404s if Authentik login is disabled). Does NOT mint a session or log
+    the user in — the web calls ``/auth/login`` next. The token is consumed only AFTER a
+    successful password set, so an IdP failure leaves it usable for a retry."""
     _require_authentik_enabled()
 
     # Atomically CLAIM the token BEFORE any IdP side effect — this guarded consume is

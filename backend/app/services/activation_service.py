@@ -29,9 +29,9 @@ async def send_activation_if_enabled(email: str, name: str) -> None:
 
     Shared by every account-creation seam (admin + member). BEST-EFFORT: a token/mail
     failure must NEVER fail the already-committed account creation — log and continue
-    (a re-issue on the next admin action recovers). NO-OP on the Firebase default
-    (``authentik_login_enabled`` False), so those accounts keep Google sign-in and the
-    default path stays byte-identical. Call it AFTER the account row is committed."""
+    (a re-issue on the next admin action recovers). Guarded by ``authentik_login_enabled``
+    (always True in prod — Authentik is the sole auth path; the guard only no-ops in a
+    dev env that overrides auth_provider). Call it AFTER the account row is committed."""
     if not settings.authentik_login_enabled:
         return
     try:

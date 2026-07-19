@@ -169,9 +169,9 @@ async def validate_invitation_token(
             )
         ).scalar_one_or_none()
 
-    # First-time setup ⇒ under Authentik AND the invitee's stub is still INVITED
-    # (never activated ⇒ never set a password). Under firebase authentik_login_enabled
-    # is False so this is always False (the web ignores it in firebase mode anyway).
+    # First-time setup ⇒ the invitee's stub is still INVITED (never activated ⇒ never
+    # set a password). authentik_login_enabled is always True now (Authentik is the sole
+    # auth path), so this is driven purely by the stub's INVITED status.
     needs_password_setup = (
         settings.authentik_login_enabled
         and stub is not None
@@ -193,7 +193,7 @@ async def validate_invitation_token(
 async def set_invitation_password(data: SetPasswordRequest):
     """First-time invitee sets their Authentik password in Companion's branded UI.
 
-    Authentik-only (404s under firebase). Does NOT log the invitee in or accept the
+    Authentik-only (404s if Authentik login is disabled). Does NOT log the invitee in or accept the
     invite — the web calls /auth/login + /invitations/accept next. Enforces
     first-time-only: only an INVITED stub may set a password here, so a leaked/reused
     invite token can't reset an already-established (ACTIVE) account's credentials."""

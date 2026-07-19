@@ -105,8 +105,7 @@ class Settings(BaseSettings):
     # CA bundle (PEM path) to verify Authentik's TLS when authentik_internal_url is https.
     # Empty → httpx default (system CAs). In prod set to the mounted internal-CA ca.crt so
     # the BFF↔Authentik channel — which carries the user password (flow executor) + the
-    # id_token — is encrypted AND server-authenticated (cutover gate #2). Inert while
-    # auth_provider=firebase (the flow authenticator is never constructed).
+    # id_token — is encrypted AND server-authenticated (cutover gate #2).
     authentik_ca_bundle_path: str = ""
     # The Authentik authentication flow slug the executor drives.
     authentik_auth_flow_slug: str = "companion-authentication-flow"
