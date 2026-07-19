@@ -223,8 +223,20 @@ async def list_documents(
     db: AsyncSession = Depends(get_db),
 ):
     """List documents with optional filters."""
+    # Coerce the client-supplied status to the enum up front. An unrecognized value
+    # (e.g. ?status=processed, which is not a DocumentStatus) previously reached the
+    # query and 500'd; validate → 422 instead. (classification/urgency take the same
+    # raw-string path — worth the same treatment in a follow-up.)
+    parsed_status: DocumentStatus | None = None
+    if document_status is not None:
+        try:
+            parsed_status = DocumentStatus(document_status)
+        except ValueError:
+            raise HTTPException(
+                status_code=422, detail=f"Invalid status filter: {document_status!r}"
+            ) from None
     docs = await document_service.list_documents(
-        db, user.id, status=document_status, classification=classification, urgency=urgency
+        db, user.id, status=parsed_status, classification=classification, urgency=urgency
     )
     serialized = [await _serialize_document(db, d) for d in docs]
     return {"documents": serialized, "total": len(serialized)}
