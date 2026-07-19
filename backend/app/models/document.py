@@ -50,8 +50,12 @@ class Document(Base):
         nullable=False, default=DocumentStatus.RECEIVED
     )
     source_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # DB default is clock_timestamp() (per-row wall clock), NOT now()
+    # (== transaction_timestamp(), constant per transaction — which made two docs
+    # in one transaction share an identical received_at). The application also
+    # stamps received_at explicitly per document in create_document (migration 043).
     received_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default="now()"
+        nullable=False, server_default="clock_timestamp()"
     )
     processed_at: Mapped[datetime | None] = mapped_column(nullable=True)
     acknowledged_at: Mapped[datetime | None] = mapped_column(nullable=True)
