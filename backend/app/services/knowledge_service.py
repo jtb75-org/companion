@@ -412,8 +412,8 @@ async def search_regulations(
                 effective_date,
                 0.85 AS similarity
             FROM disability_reg_chunks
-            WHERE (CAST(:program_filter AS VARCHAR) IS NULL 
-                   OR program = CAST(:program_filter AS VARCHAR) 
+            WHERE (CAST(:program_filter AS VARCHAR) IS NULL
+                   OR program = CAST(:program_filter AS VARCHAR)
                    OR program = 'Both')
               AND (text_content ILIKE :query_like OR citation ILIKE :query_like)
             LIMIT :limit
@@ -452,8 +452,8 @@ async def search_regulations(
                 effective_date,
                 1 - (embedding <=> :query_vec) AS similarity
             FROM disability_reg_chunks
-            WHERE (CAST(:program_filter AS VARCHAR) IS NULL 
-                   OR program = CAST(:program_filter AS VARCHAR) 
+            WHERE (CAST(:program_filter AS VARCHAR) IS NULL
+                   OR program = CAST(:program_filter AS VARCHAR)
                    OR program = 'Both')
             ORDER BY embedding <=> :query_vec
             LIMIT :limit

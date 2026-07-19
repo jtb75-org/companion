@@ -4,8 +4,9 @@ Revision ID: 046
 Revises: 045
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "046"
 down_revision = "045"
@@ -32,7 +33,12 @@ def upgrade() -> None:
     op.create_table(
         "disability_reg_chunks",
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("jurisdiction", sa.String(length=50), nullable=False, server_default="US_Federal"),
+        sa.Column(
+            "jurisdiction",
+            sa.String(length=50),
+            nullable=False,
+            server_default="US_Federal",
+        ),
         sa.Column("source_corpus", sa.String(length=50), nullable=False),
         sa.Column("source_url", sa.Text(), nullable=False),
         sa.Column("citation", sa.Text(), nullable=False),

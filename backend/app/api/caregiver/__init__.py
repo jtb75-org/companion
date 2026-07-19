@@ -10,4 +10,3 @@ router.include_router(activity.router)
 router.include_router(alerts.router)
 router.include_router(dashboard.router)
 router.include_router(knowledge.router)
-
