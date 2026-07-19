@@ -18,6 +18,7 @@ from app.conversation.tool_executor import execute_tool
 from app.conversation.tools import get_dd_tools
 from app.conversation.tts import synthesize_speech
 from app.db import get_db
+from app.db.context import set_user_context
 from app.models.system_config import SystemConfig
 from app.schemas.conversation import (
     ConversationMessageRequest,
@@ -353,6 +354,14 @@ async def send_message(
     # even if chat persistence fails.
     await db.commit()
 
+    # The commit above ended the request transaction, which released the
+    # transaction-local `app.current_user_id` GUC. Re-establish the tenant
+    # context (same authenticated user) so the ChatSession lookup + message
+    # INSERTs below run inside RLS instead of matching zero rows. This
+    # set_config is the autobegin execute for the next transaction, so the
+    # SELECT/INSERT/commit that follow all share it.
+    await set_user_context(db, user.id)
+
     # Add assistant response to session
     session.add_message("assistant", response_text)
     await state_manager.update_session(session)
@@ -487,6 +496,15 @@ async def send_message_stream(
                     ChatMessage,
                     ChatSession,
                 )
+
+                # The SSE generator runs after the request handler returned,
+                # so the request transaction (and its transaction-local
+                # `app.current_user_id` GUC) is gone. Re-establish the tenant
+                # context for the same authenticated user before the RLS-
+                # protected ChatSession lookup + message INSERTs, or RLS
+                # matches zero rows and the turn is silently dropped.
+                await set_user_context(db, user.id)
+
                 res = await db.execute(
                     sa_sel(ChatSession).where(
                         ChatSession.session_id
