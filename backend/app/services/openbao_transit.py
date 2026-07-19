@@ -76,6 +76,7 @@ class OpenBaoTransitClient:
         k8s_role: str = "companion",
         k8s_auth_mount: str = "kubernetes",
         sa_token_path: str = _SA_TOKEN_PATH,
+        ca_bundle_path: str = "",
         http_client: httpx.Client | None = None,
     ) -> None:
         self._addr = addr.rstrip("/")
@@ -84,9 +85,19 @@ class OpenBaoTransitClient:
         self._k8s_role = k8s_role
         self._k8s_auth_mount = k8s_auth_mount.strip("/")
         self._sa_token_path = sa_token_path
+        self._ca_bundle_path = ca_bundle_path
 
         # Owned client unless one is injected (tests inject a mock-friendly one).
-        self._http = http_client or httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS)
+        # When a CA bundle path is set, verify OpenBao's TLS against it (used once
+        # the listener flips to https). Empty → httpx default trust (today's
+        # behavior over plaintext http; a no-op override).
+        if http_client is not None:
+            self._http = http_client
+        else:
+            verify: str | bool = self._ca_bundle_path or True
+            self._http = httpx.Client(
+                timeout=_HTTP_TIMEOUT_SECONDS, verify=verify
+            )
 
         self._lock = threading.Lock()
         self._client_token: str | None = None
@@ -241,6 +252,7 @@ def get_client() -> OpenBaoTransitClient:
                 k8s_role=settings.openbao_k8s_role,
                 k8s_auth_mount=settings.openbao_k8s_auth_mount,
                 sa_token_path=settings.openbao_sa_token_path,
+                ca_bundle_path=settings.openbao_ca_bundle_path,
             )
         return _client
 
