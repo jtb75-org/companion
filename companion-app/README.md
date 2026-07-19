@@ -55,8 +55,7 @@ Open `ios/CompanionApp.xcworkspace` in Xcode, select your device as the run targ
 
 ### Auth
 
-`src/auth/AuthProvider.tsx` manages authentication via Firebase Auth with two methods:
-- Google Sign-In (`@react-native-google-signin/google-signin`)
+`src/auth/AuthProvider.tsx` manages authentication:
 - Email/password
 
 The auth state is exposed via a React context (`useAuth` hook). On sign-out, the FCM device token is deactivated on the backend.
