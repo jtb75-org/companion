@@ -9,9 +9,11 @@ import { ProfileScreen } from '../screens/ProfileScreen'
 import { AuthentikLoginScreen } from '../auth/AuthentikLoginScreen'
 import { AuthentikActivateScreen } from '../auth/AuthentikActivateScreen'
 import { OnboardingScreen } from '../auth/OnboardingScreen'
+import { MemberOnlyScreen } from '../auth/MemberOnlyScreen'
 import { useAuth } from '../auth/AuthProvider'
 import { ActivationLink, parseActivationLink } from './linking'
-import { api, ApiError } from '../api/client'
+import { api } from '../api/client'
+import { resolveAppAccess } from '../auth/memberGate'
 import { usePushNotifications } from '../hooks/usePushNotifications'
 import { colors } from '../theme/colors'
 
@@ -34,6 +36,9 @@ function TabIcon({ label, focused }: { label: string; focused: boolean }) {
 export function AppNavigator() {
   const { isAuthenticated, loading, signOut } = useAuth()
   const [profileComplete, setProfileComplete] = useState<boolean | null>(null)
+  // True when the signed-in person is a caregiver/admin on the member app — we
+  // show the calm member-only gate instead of bouncing them to login.
+  const [nonMember, setNonMember] = useState(false)
   // Pending account-activation link ({token, reset}) from an inbound /activate
   // deep link.
   const [activationLink, setActivationLink] = useState<ActivationLink | null>(null)
@@ -66,32 +71,38 @@ export function AppNavigator() {
   useEffect(() => {
     if (!isAuthenticated) {
       setProfileComplete(null)
+      setNonMember(false)
       return
     }
-    // Check if user has a profile in our backend
+    // Resolve who this signed-in person is and route accordingly. The decision
+    // lives in resolveAppAccess (pure + unit-tested): it calls /api/v1/me and,
+    // on a 401/403, disambiguates "non-member on the wrong app" from "genuinely
+    // invalid session" via the role-aware /api/v1/auth/check.
     const checkProfile = async () => {
-      try {
-        const data = await api<{ exists?: boolean; profile_complete?: boolean; first_name?: string; last_name?: string }>('/api/v1/me')
-        // Handle both structured response ({exists, profile_complete}) and raw user model ({first_name, last_name})
-        if ('profile_complete' in data) {
-          setProfileComplete(data.exists !== false && data.profile_complete === true)
-        } else {
-          setProfileComplete(Boolean(data.first_name && data.last_name))
-        }
-      } catch (err) {
-        console.log('[AppNavigator] /api/v1/me error:', err)
-        // A 401/403 means the session is invalid/expired — clear it and return to
-        // sign-in. Do NOT fall through to setProfileComplete(false): that misroutes an
-        // auth failure into the onboarding screen, whose complete-profile POST would then
-        // 401 too, trapping the user.
-        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+      setNonMember(false)
+      const access = await resolveAppAccess(api)
+      switch (access.kind) {
+        case 'member':
+          setProfileComplete(access.profileComplete)
+          break
+        case 'nonMember':
+          // A caregiver/admin signed in on the member app. Show the calm gate —
+          // do NOT signOut() into the login loop (that read as a broken login).
+          setNonMember(true)
+          break
+        case 'invalid':
+          // Genuinely invalid/expired session — clear it and return to sign-in.
+          // Do NOT fall through to onboarding: complete-profile would 401 too and
+          // trap the user.
           await signOut()
-          return
-        }
-        // Non-auth error (network / 5xx): we can't determine the profile; surface it as
-        // incomplete so the user isn't stranded on a spinner. (Completing the profile is
-        // idempotent; a stale transient error at worst re-shows onboarding once.)
-        setProfileComplete(false)
+          break
+        case 'unknown':
+          // Non-auth error (network / 5xx): we can't determine the profile; surface
+          // it as incomplete so the user isn't stranded on a spinner. (Completing the
+          // profile is idempotent; a stale transient error at worst re-shows
+          // onboarding once.)
+          setProfileComplete(false)
+          break
       }
     }
     checkProfile()
@@ -120,6 +131,13 @@ export function AppNavigator() {
       )
     }
     return <AuthentikLoginScreen />
+  }
+
+  // A caregiver/admin who signed in on the member app: show the calm member-only
+  // gate (with a Sign Out) instead of a login-loop bounce. Checked before the
+  // spinner because profileComplete stays null on this path.
+  if (nonMember) {
+    return <MemberOnlyScreen />
   }
 
   if (profileComplete === null) {

@@ -169,6 +169,29 @@ export const authStrings = {
   // them at the forgot-password screen instead of at an invite email.
   activateResetInvalidBody:
     'This link is old or is not right. Please go back and ask for a new link.',
+
+  // --- Member-only gate screen ---------------------------------------------
+  // Shown AFTER a successful sign-in when the person is NOT a member — they are
+  // a family helper or admin, who belong on the web page, not in this app.
+  // (Their login worked; the member app just isn't for them.) The screen must
+  // be calm and blame-free: they did nothing wrong, so no error wording, no
+  // "denied", no mention of "role"/"caregiver dashboard". Tell them plainly
+  // where to go instead, and give them a way out (Sign Out).
+  //
+  // Warm, short, ~6th-grade. Every string is safety-reviewed like the rest.
+
+  // Header. Explains, gently, who this app is for.
+  gateTitle: 'This app is for members',
+  // Body. Names the audience warmly ("family and helpers") and says what they
+  // do instead — no blame, no jargon.
+  gateBody: 'It looks like you help take care of someone. Family and helpers do that from a web page, not in this app.',
+  // Small line above the web address, telling them what to do next.
+  gateWebPrompt: 'To sign in and help, open this web page in a browser:',
+  // The web address to type in a browser. Kept as its own string so it can be
+  // shown big and clear.
+  gateWebAddress: 'app.mydailydignity.com',
+  // The button that signs them out of this app.
+  gateSignOutButton: 'Sign Out',
 } as const
 
 export type AuthStringKey = keyof typeof authStrings
