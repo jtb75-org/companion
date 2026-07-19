@@ -187,9 +187,16 @@ def _set_cookie(response: Response, name: str, value: str, *, http_only: bool) -
     response.set_cookie(**kwargs)
 
 
-def _clear_cookie(response: Response, name: str) -> None:
+def _clear_cookie(response: Response, name: str, *, http_only: bool = True) -> None:
     domain = settings.session_cookie_domain or None
-    response.delete_cookie(key=name, path="/", domain=domain)
+    response.delete_cookie(
+        key=name,
+        path="/",
+        domain=domain,
+        secure=settings.session_cookie_secure,
+        httponly=http_only,
+        samesite="lax",
+    )
 
 
 async def _mint_session(response: Response, *, subject: str, mobile: bool) -> dict:
@@ -848,7 +855,7 @@ async def logout(request: Request, response: Response) -> Response:
     bearer_sid = _bearer_session_token(request)
     for sid in {s for s in (cookie_sid, bearer_sid) if s}:
         await store.delete(sid)
-    _clear_cookie(response, settings.session_cookie_name)
-    _clear_cookie(response, settings.csrf_cookie_name)
+    _clear_cookie(response, settings.session_cookie_name, http_only=True)
+    _clear_cookie(response, settings.csrf_cookie_name, http_only=False)
     response.status_code = status.HTTP_204_NO_CONTENT
     return response

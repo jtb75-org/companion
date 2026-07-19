@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react'
-import { setCsrfToken, getCsrfToken } from '../api/client'
+import { setCsrfToken } from '../api/client'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
 
@@ -134,19 +134,16 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     try {
-      const headers: Record<string, string> = {}
-      // Use the body-delivered token (getCsrfToken), NOT the host-only cookie — which the
-      // SPA can't read cross-subdomain. Without it, logout's POST fails CSRF, the catch
-      // swallows it, and the server-side Redis session is NEVER revoked (a reload could
-      // silently re-authenticate).
-      const csrf = getCsrfToken()
-      if (csrf) {
-        headers['X-CSRF-Token'] = csrf
-      }
+      // Deliberately send NO custom headers (no X-CSRF-Token): /auth/logout does NOT
+      // enforce CSRF, and any custom header promotes this cross-subdomain credentialed
+      // POST into a CORS-preflighted request. Safari sends the OPTIONS preflight, it
+      // succeeds, but Safari then never sends the actual POST — so the backend never
+      // revokes the Redis session and a reload silently re-authenticates. With no custom
+      // header it's a "simple" request (no preflight) that reaches the backend and
+      // revokes server-side. The session cookie still rides along via credentials.
       await fetch(`${API_BASE}/auth/logout`, {
         method: 'POST',
         credentials: 'include',
-        headers,
       })
     } catch {
       // best-effort: swallow network errors, still clear local state
