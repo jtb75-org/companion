@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     # this path; point the transit client at it. Defaults to the k8s default token
     # for dev/test/back-compat (where the role has no audience requirement).
     openbao_sa_token_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/token"  # noqa: S105
+    # CA bundle (PEM path) to verify OpenBao's TLS when openbao_addr is https.
+    # Empty → httpx default (system/certifi CAs). In prod set to the mounted internal-CA
+    # ca.crt so the app↔OpenBao Transit channel — which carries wrapped/unwrapped DEKs —
+    # is server-authenticated once OpenBao's listener flips from tls_disable=1 to TLS
+    # (cert issued by cert-manager's internal-ca-issuer). Inert until the address flips
+    # to https AND this path is mounted; the api pod already mounts the same internal CA
+    # at /etc/authentik-ca/ca.crt. See services/openbao_transit.py.
+    openbao_ca_bundle_path: str = ""
 
     # Dedicated field-level key for high-sensitivity field TYPES (SSN, bank
     # account numbers, MRN, etc.) — a single per-field-type key, NOT
