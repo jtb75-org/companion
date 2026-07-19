@@ -14,6 +14,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      force_landing:
+        description: "Force-build + push companion-landing regardless of changed paths (bootstrap the first image)."
+        type: boolean
+        default: false
 
 env:
   REGISTRY: zot.lan.ng20.org
@@ -52,6 +57,11 @@ jobs:
         # when ocr/ actually changed; otherwise keep the existing OCR tag.
         env:
           BEFORE: ${{ github.event.before }}
+          # Bootstrap lever: a manual `workflow_dispatch` with force_landing=true
+          # forces the landing build/push even when landing/ is unchanged. Used to
+          # produce the FIRST companion-landing image (the wiring PR touches only
+          # the workflow, so the path-based trigger alone never fires it).
+          FORCE_LANDING: ${{ github.event_name == 'workflow_dispatch' && inputs.force_landing == true }}
         run: |
           # The checkout is owned by a different UID than this container's user,
           # so git refuses to operate ("dubious ownership") and every git call
@@ -75,6 +85,21 @@ jobs:
           else
             echo "ocr=true" >> "$GITHUB_OUTPUT"
             echo "ocr/ changed (or base unknown) → building OCR."
+          fi
+          # The public marketing landing (www.mydailydignity.com) is a separate
+          # static image, decoupled from the authed web app. It rarely changes,
+          # so — like OCR — only build/push it when landing/ or its Dockerfile/
+          # nginx changed; otherwise keep the existing companion-landing tag.
+          if [ "${FORCE_LANDING}" = "true" ]; then
+            echo "landing=true" >> "$GITHUB_OUTPUT"
+            echo "force_landing=true (workflow_dispatch) → building landing (bootstrap)."
+          elif [ -n "${base}" ] && git diff --quiet "${base}" HEAD -- \
+               landing/ infrastructure/Dockerfile.landing infrastructure/nginx.landing.conf; then
+            echo "landing=false" >> "$GITHUB_OUTPUT"
+            echo "landing/ unchanged → skipping landing build."
+          else
+            echo "landing=true" >> "$GITHUB_OUTPUT"
+            echo "landing/ changed (or base unknown) → building landing."
           fi
 
       - name: Configure registry auth (kaniko)
@@ -154,6 +179,37 @@ jobs:
             --push-retry=3 \
             --snapshot-mode=redo
 
+      - name: Build landing bundle (outside Docker)
+        # Static marketing bundle (landing/dist). Built outside the Dockerfile so
+        # the landing image stays single-stage (kaniko + multi-stage = registry
+        # push-auth bug), exactly like the web bundle above. No VITE_* / secrets —
+        # the landing page is public, unauthed, and touches no PHI. Only built
+        # when landing/ changed (see Detect changed paths).
+        if: steps.changes.outputs.landing == 'true'
+        working-directory: landing
+        env:
+          COREPACK_ENABLE_STRICT: "0"
+        run: |
+          npm install
+          npm run build
+          ls -la dist/
+
+      - name: Kaniko build + push — landing
+        # Single-stage Dockerfile.landing copies the prebuilt landing/dist; context
+        # is the repo root (for landing/dist + infrastructure/nginx.landing.conf).
+        # Only build when landing/ changed; when skipped, the existing
+        # companion-landing tag is kept in gitops.
+        if: steps.changes.outputs.landing == 'true'
+        run: |
+          /opt/kaniko/executor \
+            --context="${GITHUB_WORKSPACE}" \
+            --dockerfile="${GITHUB_WORKSPACE}/infrastructure/Dockerfile.landing" \
+            --destination="${REGISTRY}/companion-landing:${{ steps.sha.outputs.short }}" \
+            --destination="${REGISTRY}/companion-landing:main-latest" \
+            --build-arg="BUILD_COMMIT=${{ steps.sha.outputs.short }}" \
+            --push-retry=3 \
+            --snapshot-mode=redo
+
       - name: Checkout companion-gitops
         uses: actions/checkout@v4
         with:
@@ -167,15 +223,30 @@ jobs:
         env:
           NEW_TAG: ${{ steps.sha.outputs.short }}
           OCR_BUILT: ${{ steps.changes.outputs.ocr }}
+          LANDING_BUILT: ${{ steps.changes.outputs.landing }}
         run: |
-          # Only bump companion-ocr when it was actually rebuilt this run;
-          # otherwise its ${NEW_TAG} image doesn't exist in zot. backend + web
-          # build every run.
+          # Only bump companion-ocr / companion-landing when they were actually
+          # rebuilt this run; otherwise their ${NEW_TAG} image doesn't exist in
+          # zot. backend + web build every run.
           imgs="companion-backend companion-web"
           if [ "${OCR_BUILT}" = "true" ]; then
             imgs="${imgs} companion-ocr"
           else
             echo "OCR unchanged — leaving companion-ocr tag as-is."
+          fi
+          if [ "${LANDING_BUILT}" = "true" ]; then
+            # The companion-landing images entry lives on the gitops #25 branch and
+            # only reaches gitops main when #25 merges. On the bootstrap run the
+            # image is pushed to zot regardless, but there's no entry to bump yet —
+            # that's fine: sed below no-ops on a missing entry. Log it clearly so a
+            # missing bump isn't mistaken for a failure.
+            if grep -q "name: ${REGISTRY}/companion-landing$" kustomization.yaml; then
+              imgs="${imgs} companion-landing"
+            else
+              echo "companion-landing built + pushed to zot, but no images entry in gitops yet (gitops #25 not merged) — skipping tag bump (harmless)."
+            fi
+          else
+            echo "landing unchanged — leaving companion-landing tag as-is."
           fi
           # Quote so all-digit short SHAs don't parse as YAML integers.
           for img in ${imgs}; do
