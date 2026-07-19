@@ -14,6 +14,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      force_landing:
+        description: "Force-build + push companion-landing regardless of changed paths (bootstrap the first image)."
+        type: boolean
+        default: false
 
 env:
   REGISTRY: zot.lan.ng20.org
@@ -52,6 +57,11 @@ jobs:
         # when ocr/ actually changed; otherwise keep the existing OCR tag.
         env:
           BEFORE: ${{ github.event.before }}
+          # Bootstrap lever: a manual `workflow_dispatch` with force_landing=true
+          # forces the landing build/push even when landing/ is unchanged. Used to
+          # produce the FIRST companion-landing image (the wiring PR touches only
+          # the workflow, so the path-based trigger alone never fires it).
+          FORCE_LANDING: ${{ github.event_name == 'workflow_dispatch' && inputs.force_landing == true }}
         run: |
           # The checkout is owned by a different UID than this container's user,
           # so git refuses to operate ("dubious ownership") and every git call
@@ -80,7 +90,10 @@ jobs:
           # static image, decoupled from the authed web app. It rarely changes,
           # so — like OCR — only build/push it when landing/ or its Dockerfile/
           # nginx changed; otherwise keep the existing companion-landing tag.
-          if [ -n "${base}" ] && git diff --quiet "${base}" HEAD -- \
+          if [ "${FORCE_LANDING}" = "true" ]; then
+            echo "landing=true" >> "$GITHUB_OUTPUT"
+            echo "force_landing=true (workflow_dispatch) → building landing (bootstrap)."
+          elif [ -n "${base}" ] && git diff --quiet "${base}" HEAD -- \
                landing/ infrastructure/Dockerfile.landing infrastructure/nginx.landing.conf; then
             echo "landing=false" >> "$GITHUB_OUTPUT"
             echo "landing/ unchanged → skipping landing build."
@@ -222,7 +235,16 @@ jobs:
             echo "OCR unchanged — leaving companion-ocr tag as-is."
           fi
           if [ "${LANDING_BUILT}" = "true" ]; then
-            imgs="${imgs} companion-landing"
+            # The companion-landing images entry lives on the gitops #25 branch and
+            # only reaches gitops main when #25 merges. On the bootstrap run the
+            # image is pushed to zot regardless, but there's no entry to bump yet —
+            # that's fine: sed below no-ops on a missing entry. Log it clearly so a
+            # missing bump isn't mistaken for a failure.
+            if grep -q "name: ${REGISTRY}/companion-landing$" kustomization.yaml; then
+              imgs="${imgs} companion-landing"
+            else
+              echo "companion-landing built + pushed to zot, but no images entry in gitops yet (gitops #25 not merged) — skipping tag bump (harmless)."
+            fi
           else
             echo "landing unchanged — leaving companion-landing tag as-is."
           fi
