@@ -239,9 +239,9 @@ async def validate_activation_token(token: str):
 async def set_activation_password(data: ActivationSetPassword):
     """Redeem an activation token and set the holder's Authentik password.
 
-    Authentik-only (404s if Authentik login is disabled). Does NOT mint a session or log the user in —
-    the web calls ``/auth/login`` next. The token is consumed only AFTER a successful
-    password set, so an IdP failure leaves it usable for a retry."""
+    Authentik-only (404s if Authentik login is disabled). Does NOT mint a session or log
+    the user in — the web calls ``/auth/login`` next. The token is consumed only AFTER a
+    successful password set, so an IdP failure leaves it usable for a retry."""
     _require_authentik_enabled()
 
     # Atomically CLAIM the token BEFORE any IdP side effect — this guarded consume is
