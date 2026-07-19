@@ -1,8 +1,9 @@
 """Unit tests for the fuzzy near-duplicate field-similarity logic.
 
-The behavior that matters: an identical document (same extracted fields) scores
-~1.0, but a DIFFERENT bill from the same biller (same template, different amount/
-date) scores below the threshold — so we don't false-positive monthly bills.
+The behavior that matters: a re-photographed document (same values, DIFFERENT
+extraction formatting) is FLAGGED as a near-duplicate, but a DIFFERENT bill from
+the same biller (same template, different amount/date) stays below the threshold
+— so monthly bills are never false-positived.
 """
 
 from __future__ import annotations
@@ -45,3 +46,127 @@ def test_empty_fields_score_zero():
 def test_field_set_skips_empty_values():
     s = dedup._field_set({"biller": "Acme", "note": "", "amount": "10"})
     assert s == {"biller=acme", "amount=10"}
+
+
+# --- Value-aware similarity: the real re-photo the exact-string Jaccard missed ---
+
+# The two Kirkwood scans a member actually took: same bill, different extraction
+# formatting on sender (+/- "UTILITIES") and account mask ("*5369" vs "****5369"),
+# IDENTICAL amount_due + due_date. Old exact-string Jaccard scored this 0.33.
+_KIRKWOOD_A = {
+    "sender": "CITY OF KIRKWOOD",
+    "amount_due": -10.15,
+    "due_date": "2026-07-22",
+    "account_number_masked": "*5369",
+}
+_KIRKWOOD_B = {
+    "sender": "CITY OF KIRKWOOD UTILITIES",
+    "amount_due": -10.15,
+    "due_date": "2026-07-22",
+    "account_number_masked": "****5369",
+}
+
+
+def test_rephoto_with_formatting_variance_is_flagged():
+    """(a) The genuine re-photo MUST now cross the threshold."""
+    sim = dedup.field_similarity(_KIRKWOOD_A, _KIRKWOOD_B)
+    assert sim >= dedup._SIM_THRESHOLD
+    # Sanity: it clearly beats the old exact-string Jaccard (which was ~0.33).
+    assert sim > 0.9
+
+
+def test_same_biller_and_account_different_amount_and_date_not_flagged():
+    """(b) Precision guard: same sender + account, DIFFERENT amount AND due date
+    (next month's bill) MUST stay below the threshold."""
+    next_month = {
+        "sender": "CITY OF KIRKWOOD UTILITIES",
+        "amount_due": 84.30,
+        "due_date": "2026-08-22",
+        "account_number_masked": "****5369",
+    }
+    assert dedup.field_similarity(_KIRKWOOD_A, next_month) < dedup._SIM_THRESHOLD
+
+
+def test_masked_account_normalization():
+    """(c) Account-mask normalization: mask chars/length don't matter, the
+    trailing digits do."""
+    assert dedup._value_similarity("account_number_masked", "*5369", "****5369") == 1.0
+    assert dedup._value_similarity("account_number_masked", "5369", "****5369") == 1.0
+    assert dedup._value_similarity("account_number_masked", "*1234", "****5369") == 0.0
+
+
+def test_text_token_overlap():
+    """(c) Free-text fields use token-set overlap, not all-or-nothing."""
+    # Subset (one just adds a qualifier word) is a strong match.
+    assert dedup._value_similarity(
+        "sender", "city of kirkwood", "city of kirkwood utilities"
+    ) >= 0.75
+    # Wholly different senders share no tokens.
+    assert dedup._value_similarity("sender", "city of kirkwood", "ameren missouri") == 0.0
+
+
+def test_numbers_and_dates_are_exact_discriminators():
+    """(c) Amount/date keep exact-value comparison — the key discriminators."""
+    assert dedup._value_similarity("amount_due", "42.00", "42.0") == 1.0  # format-tolerant
+    assert dedup._value_similarity("amount_due", "42.00", "51.75") == 0.0
+    assert dedup._value_similarity("due_date", "2026-07-22", "2026-07-22") == 1.0
+    assert dedup._value_similarity("due_date", "2026-07-22", "2026-08-22") == 0.0
+
+
+# --- Missing-discriminator penalty (BLOCKER 2): a candidate can't score high by
+# simply OMITTING the field (amount/date/account) that would disagree. ---
+
+
+def test_sparse_candidate_missing_amount_does_not_match_different_amount():
+    """(a) An older sparse candidate with NO amount must not match a newer bill
+    whose amount differs — the differing amount can't be silently dropped."""
+    incoming = {
+        "sender": "CITY OF KIRKWOOD",
+        "amount_due": 51.75,
+        "due_date": "2026-07-22",
+    }
+    sparse_candidate = {"sender": "CITY OF KIRKWOOD", "due_date": "2026-07-22"}
+    assert dedup.field_similarity(incoming, sparse_candidate) < dedup._SIM_THRESHOLD
+
+
+def test_niru_probe_missing_amount_no_account_below_threshold():
+    """(b) niru probe 1: candidate missing amount_due → must be < 0.80."""
+    incoming = {
+        "sender": "CITY OF KIRKWOOD",
+        "amount_due": 51.75,
+        "due_date": "2026-07-22",
+    }
+    candidate = {"sender": "CITY OF KIRKWOOD", "due_date": "2026-07-22"}
+    assert dedup.field_similarity(incoming, candidate) < dedup._SIM_THRESHOLD
+
+
+def test_niru_probe_missing_amount_with_account_below_threshold():
+    """(b) niru probe 2: candidate has account but missing amount_due → < 0.80."""
+    incoming = {
+        "sender": "CITY OF KIRKWOOD",
+        "amount_due": 51.75,
+        "due_date": "2026-07-22",
+        "account_number_masked": "****5369",
+    }
+    candidate = {
+        "sender": "CITY OF KIRKWOOD",
+        "due_date": "2026-07-22",
+        "account_number_masked": "****5369",
+    }
+    assert dedup.field_similarity(incoming, candidate) < dedup._SIM_THRESHOLD
+
+
+def test_kirkwood_rephoto_still_flags_after_penalty():
+    """(c) The legitimate re-photo (amount + due_date + account all present and
+    matching) must STILL flag ~0.98 despite the missing-discriminator penalty."""
+    sim = dedup.field_similarity(_KIRKWOOD_A, _KIRKWOOD_B)
+    assert sim >= dedup._SIM_THRESHOLD
+    assert sim > 0.95
+
+
+def test_date_format_normalization():
+    """FOLD-IN A: equal dates in different formats compare equal (a real dup)."""
+    assert dedup._value_similarity("due_date", "2026-07-22", "07/22/2026") == 1.0
+    assert dedup._value_similarity("due_date", "2026-07-22", "July 22, 2026") == 1.0
+    # But genuinely different dates still score 0 (equality not relaxed).
+    assert dedup._value_similarity("due_date", "2026-07-22", "07/23/2026") == 0.0

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import ForeignKey, Numeric, Text
+from sqlalchemy import ForeignKey, Numeric, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -50,8 +50,17 @@ class Document(Base):
         nullable=False, default=DocumentStatus.RECEIVED
     )
     source_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # DB default is per-row wall clock, NOT now() (== transaction_timestamp(),
+    # constant per transaction — which made two docs in one transaction share an
+    # identical received_at). timezone('UTC', clock_timestamp()) returns a
+    # naive-UTC wall time, matching the column type (TIMESTAMP WITHOUT TIME ZONE),
+    # the app's datetime.utcnow() stamping, and retention's UTC cutoffs. Passed as
+    # a text() SQL expression so it renders as an unquoted function call, not a
+    # string literal. The application also stamps received_at explicitly per
+    # document in create_document (migration 043).
     received_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default="now()"
+        nullable=False,
+        server_default=text("timezone('UTC', clock_timestamp())"),
     )
     processed_at: Mapped[datetime | None] = mapped_column(nullable=True)
     acknowledged_at: Mapped[datetime | None] = mapped_column(nullable=True)

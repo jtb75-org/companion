@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import delete, select
@@ -78,6 +79,16 @@ async def create_document(
     # Ensure raw_text_ref has a value (will be set properly by pipeline)
     if "raw_text_ref" not in data:
         data["raw_text_ref"] = "pending"
+    # Stamp the ingest time in Python, per document. The column's DB default is
+    # ``now()`` == transaction_timestamp(), which is CONSTANT for a whole
+    # transaction — so two documents created in one transaction got an IDENTICAL
+    # received_at down to the microsecond, and any document created inside a
+    # reused/long-lived transaction inherited that transaction's (stale, past)
+    # start time instead of its own upload moment. Setting a fresh wall-clock
+    # value here decouples received_at from transaction boundaries so it always
+    # reflects the real ingest time. ``setdefault`` still lets a caller pass an
+    # explicit received_at (e.g. an email's own received date).
+    data.setdefault("received_at", datetime.utcnow())
     document = Document(user_id=user_id, **data)
     db.add(document)
     await db.flush()
