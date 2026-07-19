@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="My Daily Dignity">
+  <defs>
+    <radialGradient id="g" cx="30%" cy="20%" r="120%">
+      <stop offset="0" stop-color="#23625C"/>
+      <stop offset="1" stop-color="#174740"/>
+    </radialGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#g)"/>
+  <path d="M32 50s-16-9.9-16-22.9A9 9 0 0 1 32 21a9 9 0 0 1 16 6.1C48 40.1 32 50 32 50Z" fill="#F3E7D4"/>
+</svg>
