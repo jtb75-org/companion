@@ -12,9 +12,11 @@ logger = logging.getLogger(__name__)
 async def deliver_push(
     user_id: UUID, title: str, body: str, data: dict | None = None
 ) -> bool:
-    """Send a push notification via Firebase Cloud Messaging.
+    """Record a push-notification delivery on the event stream.
 
-    Stubbed for now — will integrate with Firebase Admin SDK.
+    The actual FCM send is performed by services/push_notification_service.py
+    (FCM v1 HTTP API via a service-account key + httpx); this channel emits the
+    delivery event.
     """
     logger.info(
         f"Push notification: user={user_id} "

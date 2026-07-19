@@ -19,7 +19,6 @@ interface AuthContextType {
   caregiverUsers: Array<CaregiverUser> | null
   loginWithEmail: (email: string, password: string) => Promise<void>
   logout: () => Promise<void>
-  getToken: () => Promise<string | null>
 }
 
 const AuthContext = createContext<AuthContextType | null>(null)
@@ -156,13 +155,11 @@ function AuthentikAuthProvider({ children }: { children: ReactNode }) {
     clearSession()
   }
 
-  const getToken = async (): Promise<string | null> => null
-
   return (
     <AuthContext.Provider value={{
       user,
       loading, role, adminRole, authorized, profileComplete, caregiverUsers,
-      loginWithEmail, logout, getToken,
+      loginWithEmail, logout,
     }}>
       {children}
     </AuthContext.Provider>

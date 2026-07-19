@@ -6,10 +6,6 @@ link, sets their Authentik password in Companion's branded UI, then signs in via
 ``/auth/login``. This surface is generic on purpose — keyed by EMAIL, not a cohort id
 — so admin and member activation share one backend.
 
-INERT under ``auth_provider=firebase``: ``set-password`` 404s (``_require_authentik_
-enabled``); the token itself is only ever issued from Authentik-gated seams, so on the
-Firebase default nothing here is reachable with a real token.
-
 Set-password capability note (for reviewers): a token could in principle target an
 account that is ALREADY established. The guard is SINGLE-USE + EXPIRY (migration 040):
 a token is consumed on the first successful password set and cannot reset an account

@@ -169,9 +169,9 @@ async def validate_invitation_token(
             )
         ).scalar_one_or_none()
 
-    # First-time setup ⇒ under Authentik AND the invitee's stub is still INVITED
-    # (never activated ⇒ never set a password). Under firebase authentik_login_enabled
-    # is False so this is always False (the web ignores it in firebase mode anyway).
+    # First-time setup ⇒ the invitee's stub is still INVITED (never activated ⇒ never
+    # set a password). authentik_login_enabled is always True now (Authentik is the sole
+    # auth path), so this is driven purely by the stub's INVITED status.
     needs_password_setup = (
         settings.authentik_login_enabled
         and stub is not None
