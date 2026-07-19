@@ -76,6 +76,18 @@ jobs:
             echo "ocr=true" >> "$GITHUB_OUTPUT"
             echo "ocr/ changed (or base unknown) → building OCR."
           fi
+          # The public marketing landing (www.mydailydignity.com) is a separate
+          # static image, decoupled from the authed web app. It rarely changes,
+          # so — like OCR — only build/push it when landing/ or its Dockerfile/
+          # nginx changed; otherwise keep the existing companion-landing tag.
+          if [ -n "${base}" ] && git diff --quiet "${base}" HEAD -- \
+               landing/ infrastructure/Dockerfile.landing infrastructure/nginx.landing.conf; then
+            echo "landing=false" >> "$GITHUB_OUTPUT"
+            echo "landing/ unchanged → skipping landing build."
+          else
+            echo "landing=true" >> "$GITHUB_OUTPUT"
+            echo "landing/ changed (or base unknown) → building landing."
+          fi
 
       - name: Configure registry auth (kaniko)
         env:
@@ -154,6 +166,37 @@ jobs:
             --push-retry=3 \
             --snapshot-mode=redo
 
+      - name: Build landing bundle (outside Docker)
+        # Static marketing bundle (landing/dist). Built outside the Dockerfile so
+        # the landing image stays single-stage (kaniko + multi-stage = registry
+        # push-auth bug), exactly like the web bundle above. No VITE_* / secrets —
+        # the landing page is public, unauthed, and touches no PHI. Only built
+        # when landing/ changed (see Detect changed paths).
+        if: steps.changes.outputs.landing == 'true'
+        working-directory: landing
+        env:
+          COREPACK_ENABLE_STRICT: "0"
+        run: |
+          npm install
+          npm run build
+          ls -la dist/
+
+      - name: Kaniko build + push — landing
+        # Single-stage Dockerfile.landing copies the prebuilt landing/dist; context
+        # is the repo root (for landing/dist + infrastructure/nginx.landing.conf).
+        # Only build when landing/ changed; when skipped, the existing
+        # companion-landing tag is kept in gitops.
+        if: steps.changes.outputs.landing == 'true'
+        run: |
+          /opt/kaniko/executor \
+            --context="${GITHUB_WORKSPACE}" \
+            --dockerfile="${GITHUB_WORKSPACE}/infrastructure/Dockerfile.landing" \
+            --destination="${REGISTRY}/companion-landing:${{ steps.sha.outputs.short }}" \
+            --destination="${REGISTRY}/companion-landing:main-latest" \
+            --build-arg="BUILD_COMMIT=${{ steps.sha.outputs.short }}" \
+            --push-retry=3 \
+            --snapshot-mode=redo
+
       - name: Checkout companion-gitops
         uses: actions/checkout@v4
         with:
@@ -167,15 +210,21 @@ jobs:
         env:
           NEW_TAG: ${{ steps.sha.outputs.short }}
           OCR_BUILT: ${{ steps.changes.outputs.ocr }}
+          LANDING_BUILT: ${{ steps.changes.outputs.landing }}
         run: |
-          # Only bump companion-ocr when it was actually rebuilt this run;
-          # otherwise its ${NEW_TAG} image doesn't exist in zot. backend + web
-          # build every run.
+          # Only bump companion-ocr / companion-landing when they were actually
+          # rebuilt this run; otherwise their ${NEW_TAG} image doesn't exist in
+          # zot. backend + web build every run.
           imgs="companion-backend companion-web"
           if [ "${OCR_BUILT}" = "true" ]; then
             imgs="${imgs} companion-ocr"
           else
             echo "OCR unchanged — leaving companion-ocr tag as-is."
+          fi
+          if [ "${LANDING_BUILT}" = "true" ]; then
+            imgs="${imgs} companion-landing"
+          else
+            echo "landing unchanged — leaving companion-landing tag as-is."
           fi
           # Quote so all-digit short SHAs don't parse as YAML integers.
           for img in ${imgs}; do
