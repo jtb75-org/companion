@@ -1,7 +1,7 @@
 """Clear pre-encryption chat transcripts before content field-encryption
 
-Revision ID: 044
-Revises: 043
+Revision ID: 045
+Revises: 044
 
 ``chat_messages.content`` becomes per-user envelope-encrypted (``f2:`` tagged,
 same scheme as RAG chunk_text / OCR text / document extracted_fields). The
@@ -30,8 +30,8 @@ a no-op — there is nothing schema-wise to reverse.
 
 from alembic import op
 
-revision = "044"
-down_revision = "043"
+revision = "045"
+down_revision = "044"
 
 
 def upgrade() -> None:
