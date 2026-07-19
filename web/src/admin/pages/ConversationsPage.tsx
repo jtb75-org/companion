@@ -53,8 +53,7 @@ async function downloadExport(dateFrom: string, dateTo: string) {
   // Authenticated by the ambient Authentik session cookie (credentials:'include').
   // This is a GET, so no CSRF token is needed. It returns a file blob, so it can't go
   // through the shared api() client (which parses JSON) — but it must still send the
-  // cookie, which the previous raw fetch did not (nor could it read a Firebase token
-  // under Authentik, so export always 401'd).
+  // cookie, which an earlier raw fetch did not, so export always 401'd.
   const res = await fetch(
     `${API_BASE}/admin/conversations/export?${params.toString()}`,
     { credentials: 'include', headers: { 'Content-Type': 'application/json' } },
