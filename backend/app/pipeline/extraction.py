@@ -175,52 +175,65 @@ async def extract(
     )
 
 
+_LLM_EXTRACT_MAX_ATTEMPTS = 3
+
+
 async def _llm_extract(
     text: str, doc_type: str, db: AsyncSession | None
 ) -> dict | None:
-    """Use Gemini to extract structured fields from document text."""
-    try:
-        from app.conversation.llm import get_llm_client
+    """Use Gemini to extract structured fields from document text.
 
-        llm = get_llm_client()
-        prompt = await _get_extraction_prompt(db, doc_type)
-        text_snippet = text[:4000]  # Limit to avoid token overflow
+    Gemini intermittently returns a truncated/short response (~10-20% observed
+    on real OCR text), which fails JSON parsing. Without a retry that drops us to
+    the lossy regex fallback (losing due_date / account number), so retry the
+    transient parse failure a few times before falling back — the failure is not
+    reproducible on the same input, so a re-call usually succeeds. A genuine
+    (non-parse) error is NOT retried — it falls straight to regex.
+    """
+    from app.conversation.llm import extract_json, get_llm_client
 
-        response = await llm.generate(
-            system_prompt=(
-                "You are a document data extractor. "
-                "Return ONLY valid JSON, no other text."
-            ),
-            messages=[
-                {"role": "user", "content": prompt + text_snippet}
-            ],
-            max_tokens=1000,
-            temperature=0.2,
-            response_json=True,
-            disable_thinking=False,
-        )
+    llm = get_llm_client()
+    prompt = await _get_extraction_prompt(db, doc_type)
+    text_snippet = text[:4000]  # Limit to avoid token overflow
 
-        from app.conversation.llm import extract_json
+    last_raw = "empty"
+    for attempt in range(1, _LLM_EXTRACT_MAX_ATTEMPTS + 1):
+        response = None
+        try:
+            response = await llm.generate(
+                system_prompt=(
+                    "You are a document data extractor. "
+                    "Return ONLY valid JSON, no other text."
+                ),
+                messages=[{"role": "user", "content": prompt + text_snippet}],
+                max_tokens=1000,
+                temperature=0.2,
+                response_json=True,
+                disable_thinking=False,
+            )
+            parsed = extract_json(response)
+            if isinstance(parsed, dict):
+                return parsed
+            logger.warning(
+                "LLM extraction returned non-dict (attempt %d/%d): %s",
+                attempt, _LLM_EXTRACT_MAX_ATTEMPTS, type(parsed),
+            )
+        except (json.JSONDecodeError, ValueError) as e:
+            last_raw = response[:500] if response else "empty"
+            logger.warning(
+                "LLM extraction JSON parse failed (attempt %d/%d): %s — raw: %s",
+                attempt, _LLM_EXTRACT_MAX_ATTEMPTS, e, last_raw,
+            )
+        except Exception:
+            # Client/network/etc. — unlikely to fix on retry; fall back now.
+            logger.exception("LLM extraction call errored — regex fallback")
+            return None
 
-        parsed = extract_json(response)
-        if isinstance(parsed, dict):
-            return parsed
-
-        logger.warning(
-            "LLM extraction returned non-dict: %s",
-            type(parsed),
-        )
-        return None
-    except (json.JSONDecodeError, ValueError) as e:
-        raw = response[:500] if response else "empty"
-        logger.warning(
-            "LLM extraction JSON parse failed: %s — raw: %s",
-            e, raw,
-        )
-        return None
-    except Exception:
-        logger.exception("LLM extraction failed")
-        return None
+    logger.warning(
+        "LLM extraction failed after %d attempts (last raw: %s) — regex fallback",
+        _LLM_EXTRACT_MAX_ATTEMPTS, last_raw,
+    )
+    return None
 
 
 def _parse_amount(raw: object) -> float | None:
