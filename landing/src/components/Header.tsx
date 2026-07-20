@@ -12,9 +12,8 @@ export function Header() {
           My Daily Dignity
         </span>
         <span className="navlinks">
-          <a href="#tool">Benefits helper</a>
-          <a href="#how">How it works</a>
-          <a href="#more">For caregivers</a>
+          <a href="#does">What it does</a>
+          <a href="#resource">Benefits helper</a>
           <a href={SIGN_IN_URL} className="btn btn-ghost">
             Sign in
           </a>

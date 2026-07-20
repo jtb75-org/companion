@@ -15,8 +15,8 @@ export function Footer() {
           <nav className="foot-links" aria-label="Footer">
             <div>
               <span className="k">Product</span>
-              <a href="#tool">Benefits helper</a>
-              <a href="#more">For caregivers</a>
+              <a href="#does">What it does</a>
+              <a href="#resource">Benefits helper</a>
               <a href={SIGN_IN_URL}>Sign in</a>
             </div>
             <div>
