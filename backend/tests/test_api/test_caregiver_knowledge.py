@@ -398,3 +398,176 @@ async def test_quota_limit_exceeded(monkeypatch):
             assert "limit reached" in resp.json()["detail"]
     finally:
         await _cleanup_accounts(cg_email, member_email)
+
+
+# ── Sub-chunking oversized sections (§ 404.211 root cause) ──────────────────────
+#
+# Confirmed bug: a dense eCFR section (§ 404.211, 15,902 chars) exceeds nomic-embed-text's
+# token window, so the gateway returns HTTP 400 and the whole ingestion run aborted with no
+# per-chunk resilience. These tests cover the fix: split oversized sections to the embed
+# budget (parent citation preserved), retry transient errors, and skip-and-log a chunk that
+# still fails instead of rolling back the corpus.
+
+_CAP = knowledge_service._MAX_EMBED_CHARS
+
+
+def test_split_keeps_small_section_as_single_chunk():
+    """A normal small section is returned unchanged as one chunk (no behaviour drift)."""
+    small = "We use a five-step sequential evaluation process to determine disability."
+    assert knowledge_service._split_text_for_embedding(small) == [small]
+
+
+def test_split_oversized_section_into_bounded_subchunks():
+    """A section longer than the cap splits into multiple sub-chunks, each within the cap,
+    on paragraph boundaries."""
+    paragraph = (
+        "Your average indexed monthly earnings is computed by indexing your covered "
+        "earnings and averaging the highest years, then dividing by the number of months."
+    )
+    big = "\n".join(paragraph for _ in range(120))  # well over the cap
+    assert len(big) > _CAP
+
+    subs = knowledge_service._split_text_for_embedding(big)
+    assert len(subs) > 1
+    assert all(len(s) <= _CAP for s in subs)
+    # No content is dropped: every source paragraph survives in some sub-chunk.
+    assert sum(s.count(paragraph) for s in subs) == 120
+
+
+async def test_embed_batch_resilient_retries_transient_then_succeeds(monkeypatch):
+    """A transient gateway error is retried with backoff and the batch still succeeds —
+    no chunk is lost to a single flaky call."""
+    monkeypatch.setattr(knowledge_service, "_EMBED_RETRY_BACKOFF_SECONDS", 0.0)
+
+    calls = {"n": 0}
+
+    async def flaky_embed(texts):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient 400 blip")
+        return [[0.1] * 768 for _ in texts]
+
+    monkeypatch.setattr(knowledge_service, "embed_documents", flaky_embed)
+
+    result = await knowledge_service._embed_batch_resilient(["a", "b"])
+    assert calls["n"] == 2  # failed once, retried, succeeded
+    assert all(vec is not None for vec in result)
+    assert len(result) == 2
+
+
+async def test_embed_batch_resilient_isolates_and_skips_bad_chunk(monkeypatch, caplog):
+    """A chunk that persistently fails to embed is retried, then isolated to None (skip)
+    while its neighbours still embed — the batch is never aborted. Skips are logged."""
+    monkeypatch.setattr(knowledge_service, "_EMBED_RETRY_BACKOFF_SECONDS", 0.0)
+
+    async def selective_embed(texts):
+        # Any batch/single containing the poison text 400s; everything else embeds fine.
+        if any("POISON" in t for t in texts):
+            raise RuntimeError("400 Bad Request: context length exceeded")
+        return [[0.2] * 768 for _ in texts]
+
+    monkeypatch.setattr(knowledge_service, "embed_documents", selective_embed)
+
+    with caplog.at_level("WARNING"):
+        result = await knowledge_service._embed_batch_resilient(["good1", "POISON", "good2"])
+
+    assert result[0] is not None
+    assert result[1] is None  # bad chunk skipped, not fatal
+    assert result[2] is not None
+    # Retried then skipped-with-log (not silently dropped).
+    assert any("per-chunk embedding" in r.message for r in caplog.records)
+    assert any("Skipping a chunk" in r.getMessage() for r in caplog.records)
+
+
+def _oversized_ecfr_html(section_id: str) -> str:
+    paragraph = (
+        "<p>Your average indexed monthly earnings is computed by indexing your covered "
+        "earnings and averaging the highest years, then dividing by the number of "
+        "months in the computation period as described in this section.</p>"
+    )
+    body = "\n".join(paragraph for _ in range(120))
+    return f"""
+    <div class="part" id="part-404">
+        <div class="section" id="{section_id}">
+            <h4>§ {section_id} Computing your average indexed monthly earnings.</h4>
+            {body}
+        </div>
+    </div>
+    """
+
+
+async def test_ecfr_oversized_section_split_shares_parent_citation(monkeypatch):
+    """End-to-end: § 404.211-style oversized section is split into multiple DB rows that ALL
+    carry the same parent citation, and each row's text stays within the embed budget. The
+    embedding client is stubbed (autouse fixture), so this is hermetic."""
+    async def mock_get(*args, **kwargs):
+        return MockResponse(text=_oversized_ecfr_html("404.211"), status_code=200)
+
+    import httpx
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+
+    # Call the service directly with a single part to keep the assertion unambiguous.
+    async with db_module.async_session_factory() as s:
+        inserted = await knowledge_service.trigger_ecfr_ingestion(s, parts=[404])
+
+    assert inserted > 1  # one section became several sub-chunks
+    async with db_module.async_session_factory() as s:
+        res = await s.execute(
+            text(
+                "SELECT citation, section, part, text_content FROM disability_reg_chunks "
+                "WHERE source_corpus = 'eCFR'"
+            )
+        )
+        rows = res.fetchall()
+    assert len(rows) > 1
+    assert {r.citation for r in rows} == {"20 CFR § 404.211"}
+    assert {r.section for r in rows} == {"211"}
+    assert all(len(r.text_content) <= _CAP for r in rows)
+
+
+async def test_ecfr_persistent_chunk_failure_does_not_abort_run(monkeypatch, caplog):
+    """A section whose embedding persistently 400s must NOT roll back the whole run: the
+    other section is still ingested. (Pre-fix, one bad section aborted everything.)"""
+    monkeypatch.setattr(knowledge_service, "_EMBED_RETRY_BACKOFF_SECONDS", 0.0)
+
+    mock_html = """
+    <div class="part" id="part-404">
+        <div class="section" id="404.1520">
+            <h4>§ 404.1520 Evaluation of disability.</h4>
+            <p>We use a five-step sequential evaluation process to determine disability.</p>
+        </div>
+        <div class="section" id="404.211">
+            <h4>§ 404.211 Computing your average indexed monthly earnings.</h4>
+            <p>POISON section that the embedder rejects with a 400.</p>
+        </div>
+    </div>
+    """
+
+    async def mock_get(*args, **kwargs):
+        return MockResponse(text=mock_html, status_code=200)
+
+    async def selective_embed(texts):
+        if any("POISON" in t for t in texts):
+            raise RuntimeError("400 Bad Request")
+        return [[0.3] * 768 for _ in texts]
+
+    import httpx
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    monkeypatch.setattr(knowledge_service, "embed_documents", selective_embed)
+
+    with caplog.at_level("WARNING"):
+        async with db_module.async_session_factory() as s:
+            inserted = await knowledge_service.trigger_ecfr_ingestion(s, parts=[404])
+
+    # The good section survived; the run did not abort.
+    assert inserted >= 1
+    async with db_module.async_session_factory() as s:
+        res = await s.execute(
+            text(
+                "SELECT citation FROM disability_reg_chunks WHERE source_corpus = 'eCFR'"
+            )
+        )
+        citations = {r.citation for r in res.fetchall()}
+    assert "20 CFR § 404.1520" in citations
+    # The failing chunk was retried per-chunk (isolated), not allowed to abort the batch.
+    assert any("per-chunk embedding" in r.getMessage() for r in caplog.records)
