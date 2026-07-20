@@ -11,6 +11,7 @@ from app.api.auth_authentik import router as authentik_auth_router
 from app.api.caregiver import router as caregiver_router
 from app.api.internal import router as internal_router
 from app.api.pipeline import router as pipeline_router
+from app.api.public import router as public_router
 from app.api.v1 import router as v1_router
 from app.api.v1.auth_check import router as auth_router
 from app.api.v1.charges import router as charges_router
@@ -145,6 +146,11 @@ if settings.dev_auth_bypass:
     )
 app.include_router(charges_router)
 app.include_router(profile_router)
+# PUBLIC (unauthenticated, no-PHI) surface: the disability benefits-helper widget.
+# Carries its own anonymous free-question quota (fail-closed) and input caps — the
+# platform auth/per-user guards do not apply to anonymous callers. Cloudflare edge
+# rate-limiting/bot-protection is a separate infra task required before real launch.
+app.include_router(public_router)
 
 
 @app.get("/health")

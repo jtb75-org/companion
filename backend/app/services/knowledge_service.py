@@ -133,6 +133,68 @@ async def check_and_increment_quota(email: str, limit: int = 50) -> int:
         return 1
 
 
+# ── Anonymous free-question quota (PUBLIC endpoint) ────────────────────────────
+#
+# Powers POST /public/knowledge/ask — an UNAUTHENTICATED benefits helper. Distinct
+# from check_and_increment_quota above in two deliberate ways:
+#
+#   1. SEPARATE keyspace ("knowledge:anon:<id>", NOT "quota:knowledge:<email>") —
+#      the id is a random opaque anonymous-session token, never a user/email/PHI.
+#   2. FAIL-CLOSED, the OPPOSITE of the authed path. On the authed path a Redis
+#      outage fails OPEN (a logged-in caregiver keeps working). Here the caller is
+#      anonymous and every granted question is a billable LLM call, so if we CANNOT
+#      count we must DENY — otherwise a Redis outage silently converts this into an
+#      unmetered public LLM endpoint (cost/abuse). Availability is traded for cost
+#      safety on purpose.
+
+async def check_and_increment_anon_quota(
+    anon_id: str, *, limit: int, ttl_seconds: int
+) -> tuple[bool, int]:
+    """Count one free question against an anonymous session's allowance.
+
+    Returns ``(gated, questions_remaining)``:
+      * ``gated=False`` — the caller is UNDER the free limit; the count was
+        incremented (this question is consumed) and ``questions_remaining`` is how
+        many remain AFTER it.
+      * ``gated=True``  — the free allowance is exhausted (or Redis is unavailable,
+        see below); the caller must be shown the sign-up gate and the LLM MUST NOT
+        be called.
+
+    ATOMIC check-and-increment. The counter is advanced with a single Redis
+    ``INCR`` and the returned post-increment value IS the decision — there is no
+    GET-then-compare-then-INCR window in which two concurrent requests for the same
+    session could both read the same pre-increment count and each slip under the
+    limit (the TOCTOU race). Because ``INCR`` runs first, an already-exhausted
+    (gated) request also bumps the counter; that surplus increment is deliberately
+    ignored — we simply gate whenever the returned count exceeds ``limit`` — so the
+    boundary is exactly: the first ``limit`` questions are allowed and every one
+    after is gated.
+
+    FAIL-CLOSED: any Redis error → ``(True, 0)`` (gate). See module note above.
+    """
+    key = f"knowledge:anon:{anon_id}"
+    try:
+        r = get_redis()
+        new_count = await r.incr(key)
+        # Anchor the TTL to the session's FIRST question (INCR just created the key,
+        # returning 1). Never re-issue EXPIRE on later increments — including gated
+        # ones — so a steady trickle cannot keep the window alive indefinitely; it
+        # always expires on the fixed span measured from the first question.
+        if new_count == 1:
+            await r.expire(key, ttl_seconds)
+        await r.aclose()
+        if new_count > limit:
+            return True, 0
+        return False, limit - new_count
+    except Exception:
+        # FAIL-CLOSED (see module note): deny rather than hand out an unmetered
+        # public LLM call when the quota store is unreachable.
+        logger.warning(
+            "Anonymous knowledge quota unavailable in Redis — GATING (fail-closed)."
+        )
+        return True, 0
+
+
 # ── Database Capability Checks ────────────────────────────────────────────────
 
 _has_vector_extension = None
