@@ -157,26 +157,35 @@ async def check_and_increment_anon_quota(
         incremented (this question is consumed) and ``questions_remaining`` is how
         many remain AFTER it.
       * ``gated=True``  — the free allowance is exhausted (or Redis is unavailable,
-        see below); the count is NOT incremented and the caller must be shown the
-        sign-up gate. The LLM MUST NOT be called.
+        see below); the caller must be shown the sign-up gate and the LLM MUST NOT
+        be called.
+
+    ATOMIC check-and-increment. The counter is advanced with a single Redis
+    ``INCR`` and the returned post-increment value IS the decision — there is no
+    GET-then-compare-then-INCR window in which two concurrent requests for the same
+    session could both read the same pre-increment count and each slip under the
+    limit (the TOCTOU race). Because ``INCR`` runs first, an already-exhausted
+    (gated) request also bumps the counter; that surplus increment is deliberately
+    ignored — we simply gate whenever the returned count exceeds ``limit`` — so the
+    boundary is exactly: the first ``limit`` questions are allowed and every one
+    after is gated.
 
     FAIL-CLOSED: any Redis error → ``(True, 0)`` (gate). See module note above.
     """
     key = f"knowledge:anon:{anon_id}"
     try:
         r = get_redis()
-        current_raw = await r.get(key)
-        current = int(current_raw) if current_raw is not None else 0
-        if current >= limit:
-            await r.aclose()
-            return True, 0
         new_count = await r.incr(key)
-        # Set the TTL only when we created the key, so the window is anchored to the
-        # session's FIRST question and does not slide forward on every request.
+        # Anchor the TTL to the session's FIRST question (INCR just created the key,
+        # returning 1). Never re-issue EXPIRE on later increments — including gated
+        # ones — so a steady trickle cannot keep the window alive indefinitely; it
+        # always expires on the fixed span measured from the first question.
         if new_count == 1:
             await r.expire(key, ttl_seconds)
         await r.aclose()
-        return False, max(limit - new_count, 0)
+        if new_count > limit:
+            return True, 0
+        return False, limit - new_count
     except Exception:
         # FAIL-CLOSED (see module note): deny rather than hand out an unmetered
         # public LLM call when the quota store is unreachable.

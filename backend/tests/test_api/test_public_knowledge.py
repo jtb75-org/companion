@@ -46,10 +46,14 @@ async def _cleanup_reg_chunks():
 
 class _FakeRedis:
     """Minimal in-memory async Redis over a shared dict — enough for the anon quota
-    (get / incr / expire / aclose). Mirrors decode_responses=True (get → str)."""
+    (get / incr / expire / aclose). Mirrors decode_responses=True (get → str).
 
-    def __init__(self, store: dict):
+    ``expire_calls`` records every EXPIRE issued (key, ttl) so tests can assert the
+    24h window is set exactly ONCE (on the first question) and never extended."""
+
+    def __init__(self, store: dict, expire_calls: list | None = None):
         self.store = store
+        self.expire_calls = expire_calls if expire_calls is not None else []
 
     async def get(self, key):
         val = self.store.get(key)
@@ -60,6 +64,7 @@ class _FakeRedis:
         return self.store[key]
 
     async def expire(self, key, ttl):
+        self.expire_calls.append((key, ttl))
         return True
 
     async def aclose(self):
@@ -77,10 +82,16 @@ async def _setup(monkeypatch):
     await _cleanup_reg_chunks()
 
 
-def _use_fake_redis(monkeypatch) -> dict:
+def _use_fake_redis(monkeypatch) -> tuple[dict, list]:
+    """Install the in-memory fake Redis. Returns (store, expire_calls) so a test can
+    inspect the counter and every EXPIRE issued. Most tests use it only for its side
+    effect and ignore the return."""
     store: dict = {}
-    monkeypatch.setattr(knowledge_service, "get_redis", lambda: _FakeRedis(store))
-    return store
+    expire_calls: list = []
+    monkeypatch.setattr(
+        knowledge_service, "get_redis", lambda: _FakeRedis(store, expire_calls)
+    )
+    return store, expire_calls
 
 
 async def _insert_chunk(*, citation: str, text_content: str, program: str = "SSDI") -> None:
@@ -188,6 +199,76 @@ async def test_returning_session_continues_count(monkeypatch):
     async with _client() as fresh:
         r3 = await fresh.post(_ASK_ENDPOINT, json={"question": "five-step"})
         assert r3.json()["questions_remaining"] == _FREE_LIMIT - 1
+
+
+async def test_ttl_set_once_and_not_extended(monkeypatch):
+    """The 24h window is anchored to the FIRST question: EXPIRE is issued exactly
+    once (when INCR creates the key) and never again — not on later answered
+    questions, and not on the gated over-limit request. This keeps a steady trickle
+    from sliding the window forward forever."""
+    _store, expire_calls = _use_fake_redis(monkeypatch)
+    await _insert_chunk(
+        citation="20 CFR § 404.1520",
+        text_content="Five-step sequential evaluation process.",
+    )
+
+    async with _client() as ac:
+        # Exhaust the allowance AND go one past it (gated), all in one session.
+        for _ in range(_FREE_LIMIT + 1):
+            await ac.post(_ASK_ENDPOINT, json={"question": "five-step"})
+
+    # Despite _FREE_LIMIT+1 increments (the last one gated), EXPIRE fired only once.
+    assert len(expire_calls) == 1
+    key, ttl = expire_calls[0]
+    assert key.startswith("knowledge:anon:")
+    assert ttl == settings.public_knowledge_quota_ttl_seconds
+
+
+async def test_increment_is_atomic_distinct_counts(monkeypatch):
+    """Each call advances the counter exactly once via INCR and the returned count IS
+    the decision — there is no GET-then-INCR window where two calls for the same
+    session read the same stale pre-increment value. Two back-to-back calls yield
+    strictly distinct, decreasing remainders and a counter that advanced twice."""
+    store, expire_calls = _use_fake_redis(monkeypatch)
+    anon = "atomicsession0123456"
+    ttl = settings.public_knowledge_quota_ttl_seconds
+
+    g1, rem1 = await knowledge_service.check_and_increment_anon_quota(
+        anon, limit=_FREE_LIMIT, ttl_seconds=ttl
+    )
+    g2, rem2 = await knowledge_service.check_and_increment_anon_quota(
+        anon, limit=_FREE_LIMIT, ttl_seconds=ttl
+    )
+
+    assert (g1, rem1) == (False, _FREE_LIMIT - 1)
+    assert (g2, rem2) == (False, _FREE_LIMIT - 2)
+    # Counter advanced once per call (no double-count, no reuse of a stale read).
+    assert store[f"knowledge:anon:{anon}"] == 2
+    # TTL anchored on the first call only.
+    assert expire_calls == [(f"knowledge:anon:{anon}", ttl)]
+
+
+async def test_gated_boundary_is_exact(monkeypatch):
+    """Boundary check on the service directly: the first ``limit`` calls are allowed
+    (remaining counts down to 0), and every call after that gates with remaining 0 —
+    even though INCR-first keeps bumping the counter on gated calls."""
+    _store, _expire = _use_fake_redis(monkeypatch)
+    anon = "boundarysession01234"
+    ttl = settings.public_knowledge_quota_ttl_seconds
+
+    results = [
+        await knowledge_service.check_and_increment_anon_quota(
+            anon, limit=_FREE_LIMIT, ttl_seconds=ttl
+        )
+        for _ in range(_FREE_LIMIT + 2)
+    ]
+
+    # First _FREE_LIMIT allowed, remaining decrements to 0.
+    for i in range(_FREE_LIMIT):
+        assert results[i] == (False, _FREE_LIMIT - (i + 1))
+    # Everything past the limit is gated with 0 remaining.
+    assert results[_FREE_LIMIT] == (True, 0)
+    assert results[_FREE_LIMIT + 1] == (True, 0)
 
 
 async def test_redis_down_fails_closed(monkeypatch):
