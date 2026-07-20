@@ -247,6 +247,30 @@ class Settings(BaseSettings):
     # force it. Never raises; it is diagnostics, not the security control (RLS is).
     rls_guc_guard: str = "auto"  # auto | on | off
 
+    # ── Public disability-knowledge endpoint (Phase 2) ───────────────────────
+    # POST /public/knowledge/ask is an UNAUTHENTICATED, no-PHI benefits helper
+    # over the public federal-regulation corpus (disability_reg_chunks only —
+    # never the per-member PHI path). It hands out a small number of free LLM
+    # answers per anonymous session, then GATES (invites account creation).
+    #
+    # Free-question allowance per anonymous session before gating. Small on
+    # purpose: this is a public, billable LLM surface with no auth in front of
+    # it, so the count is the primary app-layer cost/abuse control (Cloudflare
+    # edge rate-limiting/bot-protection is a SEPARATE infra task that must ship
+    # alongside before real public launch).
+    public_knowledge_free_limit: int = 3
+    # TTL (seconds) of the per-anonymous-session quota key in Redis. When it
+    # expires the anonymous session's free count resets. 24h mirrors the authed
+    # knowledge quota window.
+    public_knowledge_quota_ttl_seconds: int = 24 * 3600
+    # Hard cap on the question length accepted by the public endpoint. Rejected
+    # (422) BEFORE embedding/LLM — an over-long prompt is a cost/abuse vector on
+    # an unauthenticated surface.
+    public_knowledge_max_question_chars: int = 1000
+    # Cookie name carrying the opaque anonymous-session id. NOT tied to any
+    # user/PHI — a random id used only to count free questions in Redis.
+    public_knowledge_anon_cookie_name: str = "dd_anon_kb"
+
     @property
     def authentik_enabled(self) -> bool:
         """True when Authentik is the active provider (the only supported value).

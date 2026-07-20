@@ -133,6 +133,59 @@ async def check_and_increment_quota(email: str, limit: int = 50) -> int:
         return 1
 
 
+# ── Anonymous free-question quota (PUBLIC endpoint) ────────────────────────────
+#
+# Powers POST /public/knowledge/ask — an UNAUTHENTICATED benefits helper. Distinct
+# from check_and_increment_quota above in two deliberate ways:
+#
+#   1. SEPARATE keyspace ("knowledge:anon:<id>", NOT "quota:knowledge:<email>") —
+#      the id is a random opaque anonymous-session token, never a user/email/PHI.
+#   2. FAIL-CLOSED, the OPPOSITE of the authed path. On the authed path a Redis
+#      outage fails OPEN (a logged-in caregiver keeps working). Here the caller is
+#      anonymous and every granted question is a billable LLM call, so if we CANNOT
+#      count we must DENY — otherwise a Redis outage silently converts this into an
+#      unmetered public LLM endpoint (cost/abuse). Availability is traded for cost
+#      safety on purpose.
+
+async def check_and_increment_anon_quota(
+    anon_id: str, *, limit: int, ttl_seconds: int
+) -> tuple[bool, int]:
+    """Count one free question against an anonymous session's allowance.
+
+    Returns ``(gated, questions_remaining)``:
+      * ``gated=False`` — the caller is UNDER the free limit; the count was
+        incremented (this question is consumed) and ``questions_remaining`` is how
+        many remain AFTER it.
+      * ``gated=True``  — the free allowance is exhausted (or Redis is unavailable,
+        see below); the count is NOT incremented and the caller must be shown the
+        sign-up gate. The LLM MUST NOT be called.
+
+    FAIL-CLOSED: any Redis error → ``(True, 0)`` (gate). See module note above.
+    """
+    key = f"knowledge:anon:{anon_id}"
+    try:
+        r = get_redis()
+        current_raw = await r.get(key)
+        current = int(current_raw) if current_raw is not None else 0
+        if current >= limit:
+            await r.aclose()
+            return True, 0
+        new_count = await r.incr(key)
+        # Set the TTL only when we created the key, so the window is anchored to the
+        # session's FIRST question and does not slide forward on every request.
+        if new_count == 1:
+            await r.expire(key, ttl_seconds)
+        await r.aclose()
+        return False, max(limit - new_count, 0)
+    except Exception:
+        # FAIL-CLOSED (see module note): deny rather than hand out an unmetered
+        # public LLM call when the quota store is unreachable.
+        logger.warning(
+            "Anonymous knowledge quota unavailable in Redis — GATING (fail-closed)."
+        )
+        return True, 0
+
+
 # ── Database Capability Checks ────────────────────────────────────────────────
 
 _has_vector_extension = None

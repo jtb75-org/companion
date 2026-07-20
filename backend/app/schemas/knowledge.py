@@ -38,3 +38,49 @@ class KnowledgeSearchResponse(BaseModel):
 class IngestionStatusResponse(BaseModel):
     status: str
     chunks_ingested: int
+
+
+# ── Public benefits-helper endpoint (Phase 2, UNAUTHENTICATED) ─────────────────
+#
+# POST /public/knowledge/ask. No auth, no PHI, no member/document_chunks path —
+# only the public federal-regulation corpus. The answer contract MIRRORS
+# KnowledgeSearchResponse (answer/provenance/disclaimer/citations/grounded) so the
+# web widget can share rendering, PLUS anonymous free-question quota fields.
+
+
+class PublicKnowledgeAskRequest(BaseModel):
+    # ``max_length`` bounds the input at the SCHEMA layer (422 before any
+    # embedding/LLM work). The endpoint additionally enforces
+    # settings.public_knowledge_max_question_chars as the authoritative,
+    # configurable cap — an over-long prompt is a cost/abuse vector on an
+    # unauthenticated surface. ``min_length=1`` rejects empty questions.
+    question: str = Field(
+        ...,
+        min_length=1,
+        max_length=8000,
+        description="The disability-benefits question to answer from federal regulations",
+    )
+    program: str | None = Field(
+        None, description="Optional program filter: 'SSDI', 'SSI', or 'Both'"
+    )
+
+
+class PublicKnowledgeAskResponse(BaseModel):
+    # Mirrors KnowledgeSearchResponse. When ``gated`` is True the request was NOT
+    # answered (free allowance exhausted or quota store unavailable): ``answer`` is
+    # a deterministic sign-up invitation, ``grounded`` is False, ``citations`` and
+    # ``sources`` are empty, and NO LLM was called. The disclaimer is always
+    # present.
+    answer: str
+    provenance: str
+    disclaimer: str
+    citations: list[str]
+    grounded: bool
+    sources: list[SourceChunkInfo]
+    # Anonymous free-question quota state for the "N free, then sign up" hook.
+    questions_remaining: int = Field(
+        ..., description="Free questions left for this anonymous session after this call"
+    )
+    gated: bool = Field(
+        ..., description="True when the free allowance is exhausted; answer is a sign-up prompt"
+    )
