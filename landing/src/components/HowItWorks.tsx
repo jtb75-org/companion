@@ -24,8 +24,8 @@ export function HowItWorks() {
             <div className="n" aria-hidden="true" />
             <h3>Get a cited answer</h3>
             <p>
-              A clear, calm reply drawn from the actual regulations and SSA’s own procedures — with
-              the section cited so you can trust it.
+              A clear, calm reply drawn from the official regulations — with the section cited so
+              you can trust it.
             </p>
           </li>
           <li className="step reveal d2">

@@ -1,60 +1,84 @@
 import { useEffect, useRef, useState } from 'react';
-import { knowledgeApi, type BenefitsAnswer } from '../lib/knowledgeApi';
+import {
+  knowledgeApi,
+  FREE_QUESTIONS,
+  type BenefitsAnswer,
+} from '../lib/knowledgeApi';
 import { CREATE_ACCOUNT_URL } from '../lib/config';
 import { Arrow, CiteIcon } from './icons';
 
-const FREE_QUESTIONS = 3;
+/** Client-side cap mirroring the endpoint's request bound (a courtesy limit;
+ *  the server is authoritative). */
+const MAX_QUESTION_CHARS = 1000;
 
 /**
- * The benefits-helper widget. This is the MOCK: it renders canned, cited
- * answers for the sample questions and a freemium gate. It talks only to
- * `knowledgeApi` (the integration seam) — never to a real endpoint. Free-text
- * questions are intentionally NOT answered (no fake answers); the visitor is
- * invited to create an account instead.
+ * The benefits-helper widget (Phase 2 — wired to the real public knowledge
+ * endpoint via `knowledgeApi`).
+ *
+ * A visitor can type their OWN disability-benefits question and get a cited
+ * answer grounded in public federal regulations. The endpoint meters a small
+ * number of free questions per anonymous session (server-side, via an httpOnly
+ * cookie) and then GATES with a sign-up invitation — we render that gate, never
+ * a fabricated answer.
+ *
+ * Rendering rule: `answer` text, citations, provenance, and the disclaimer are
+ * RUNTIME server data and are rendered as PLAIN TEXT nodes only. No
+ * dangerouslySetInnerHTML on server content — ever.
  */
 export function BenefitsHelper() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
-  const [selected, setSelected] = useState<number>(0);
+  const [selected, setSelected] = useState<number>(-1);
   const [answer, setAnswer] = useState<BenefitsAnswer | null>(null);
-  const [previewNote, setPreviewNote] = useState<string | null>(null);
-  const [used, setUsed] = useState<number>(0);
+  const [remaining, setRemaining] = useState<number>(FREE_QUESTIONS);
+  const [gated, setGated] = useState<boolean>(false);
+  const [gateMessage, setGateMessage] = useState<string | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [errored, setErrored] = useState<boolean>(false);
+  const [asked, setAsked] = useState<boolean>(false);
   const [fading, setFading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const remaining = Math.max(FREE_QUESTIONS - used, 0);
-  const exhausted = remaining <= 0;
-
-  // Load suggestions + render the first answer on mount (matches the concept,
-  // which shows question 0 answered on load; the initial render does not spend
-  // a free question).
+  // Load the suggestion chips on mount. We intentionally do NOT ask a question
+  // here — every real ask spends a server-side free question, so the first one
+  // must be the visitor's own action.
   useEffect(() => {
     let live = true;
     (async () => {
       const s = await knowledgeApi.suggestions();
       if (!live) return;
       setSuggestions(s);
-      const first = await knowledgeApi.ask({ question: s[0] });
-      if (!live) return;
-      setAnswer(first);
     })();
     return () => {
       live = false;
     };
   }, []);
 
-  async function renderAnswer(question: string, index: number, spend: boolean) {
-    if (spend && exhausted) return;
-    setPreviewNote(null);
-    setFading(true);
-    if (inputRef.current) inputRef.current.value = question;
+  async function ask(question: string, index: number) {
+    const trimmed = question.trim();
+    if (!trimmed || loading || gated) return;
     setSelected(index);
-    const result = await knowledgeApi.ask({ question });
-    // Brief fade matching the concept's 120ms swap.
-    window.setTimeout(() => {
-      setAnswer(result);
+    setErrored(false);
+    setLoading(true);
+    setFading(true);
+    try {
+      const result = await knowledgeApi.ask({ question: trimmed });
+      setAsked(true);
+      setRemaining(result.questionsRemaining);
+      if (result.gated) {
+        setGated(true);
+        setGateMessage(result.gateMessage ?? null);
+        setAnswer(null);
+      } else {
+        setAnswer(result.answer);
+      }
+    } catch {
+      // Calm, non-alarming retry message — never a stack trace, never a
+      // fabricated answer. Keep any prior answer visible beneath the notice.
+      setErrored(true);
+    } finally {
+      setLoading(false);
       setFading(false);
-      if (spend) setUsed((u) => u + 1);
-    }, 120);
+    }
   }
 
   function onSubmit(e: React.FormEvent) {
@@ -62,17 +86,15 @@ export function BenefitsHelper() {
     const question = inputRef.current?.value.trim() ?? '';
     if (!question) return;
     const idx = suggestions.findIndex((s) => s.toLowerCase() === question.toLowerCase());
-    if (idx >= 0) {
-      void renderAnswer(suggestions[idx], idx, true);
-      return;
-    }
-    // Free-text is a preview only — never fabricate an answer.
-    setAnswer(null);
-    setFading(false);
-    setPreviewNote(
-      'This preview answers the sample questions above. Create a free account to ask your own questions and get cited answers.',
-    );
+    void ask(question, idx);
   }
+
+  function onChip(question: string, index: number) {
+    if (inputRef.current) inputRef.current.value = question;
+    void ask(question, index);
+  }
+
+  const showInitialHint = !asked && !answer && !loading && !errored;
 
   return (
     <div className="tool reveal d2">
@@ -87,11 +109,12 @@ export function BenefitsHelper() {
             ref={inputRef}
             id="q"
             type="text"
-            placeholder="Explore a common question below…"
-            aria-label="Explore a common Social Security or SSDI question"
-            defaultValue={suggestions[0] ?? ''}
+            maxLength={MAX_QUESTION_CHARS}
+            placeholder="Ask your own question about SSDI or SSI…"
+            aria-label="Ask your own question about SSDI, SSI, or Social Security disability"
+            disabled={gated}
           />
-          <button className="go" type="submit" aria-label="Ask">
+          <button className="go" type="submit" aria-label="Ask" disabled={loading || gated}>
             <Arrow width={20} height={20} aria-hidden="true" />
           </button>
         </form>
@@ -104,15 +127,38 @@ export function BenefitsHelper() {
               type="button"
               role="listitem"
               aria-pressed={selected === i}
-              onClick={() => renderAnswer(s, i, true)}
+              disabled={loading || gated}
+              onClick={() => onChip(s, i)}
             >
               {s}
             </button>
           ))}
         </div>
 
-        <div className="answer" id="answer" aria-live="polite" style={{ opacity: fading ? 0 : 1 }}>
-          {answer && (
+        <div
+          className="answer"
+          id="answer"
+          aria-live="polite"
+          aria-busy={loading}
+          style={{ opacity: fading ? 0.35 : 1 }}
+        >
+          {loading && <div className="meta">Finding your answer…</div>}
+
+          {errored && !loading && (
+            <div className="disclaimer">
+              Something went wrong reaching the benefits helper. Please check your connection and try
+              again in a moment.
+            </div>
+          )}
+
+          {showInitialHint && (
+            <div className="meta">
+              Type a question above, or pick an example, to see a cited answer from the official
+              disability regulations.
+            </div>
+          )}
+
+          {answer && !loading && (
             <>
               <div className="q">
                 <span className="who">You</span>
@@ -120,52 +166,47 @@ export function BenefitsHelper() {
               </div>
               <div className="a">
                 {answer.paragraphs.map((p, i) => (
-                  // Trusted, constant canned content (see knowledgeApi contract).
-                  <p key={i} dangerouslySetInnerHTML={{ __html: p }} />
+                  // Server-returned runtime text — rendered as a PLAIN TEXT node.
+                  <p key={i}>{p}</p>
                 ))}
-                <div className="cites">
-                  {answer.citations.map((c) => {
-                    const inner = (
-                      <>
+                {answer.citations.length > 0 && (
+                  <div className="cites">
+                    {answer.citations.map((label) => (
+                      <span key={label} className="cite">
                         <CiteIcon aria-hidden="true" />
-                        {c.label}
-                      </>
-                    );
-                    return c.url ? (
-                      <a key={c.label} className="cite" href={c.url} rel="noopener">
-                        {inner}
-                      </a>
-                    ) : (
-                      <span key={c.label} className="cite">
-                        {inner}
+                        {label}
                       </span>
-                    );
-                  })}
-                </div>
-                <div className="meta">
-                  <span className="asof">{answer.asOf}</span>
-                </div>
-                <div className="disclaimer">{answer.disclaimer}</div>
+                    ))}
+                  </div>
+                )}
+                {answer.provenance && (
+                  <div className="meta">
+                    <span className="asof">{answer.provenance}</span>
+                  </div>
+                )}
+                {answer.disclaimer && <div className="disclaimer">{answer.disclaimer}</div>}
               </div>
             </>
           )}
-          {previewNote && <div className="disclaimer">{previewNote}</div>}
         </div>
 
         <div className="gate">
-          {exhausted ? (
+          {gated ? (
             <>
-              <b>That’s your 3 free questions.</b>{' '}
+              <b>{gateMessage ?? 'That’s your free questions for now.'}</b>{' '}
               <a href={CREATE_ACCOUNT_URL}>Create a free account</a> to keep going.
+            </>
+          ) : !asked ? (
+            <>
+              Ask your own question — <b>{FREE_QUESTIONS} free</b>, no account needed.
             </>
           ) : (
             <>
-              You have{' '}
               <b>
-                {remaining} of {FREE_QUESTIONS}
+                {remaining} free question{remaining === 1 ? '' : 's'} left.
               </b>{' '}
-              free questions left. <a href={CREATE_ACCOUNT_URL}>Create a free account</a> to keep
-              going.
+              <a href={CREATE_ACCOUNT_URL}>Create a free account</a> to keep going and save your
+              answers.
             </>
           )}
         </div>
