@@ -10,12 +10,24 @@ touches **no** PHI or member data.
 - **Vite + React + TypeScript** (no Tailwind — the approved design uses a
   CSS-custom-property token system with light **and** dark themes, kept intact
   in `src/styles.css`).
-- The **benefits helper** in the hero is a **MOCK** (`src/components/BenefitsHelper.tsx`):
-  canned, cited Q&A + a freemium gate. No network calls.
-- The integration seam for the future real widget is `src/lib/knowledgeApi.ts` —
-  a typed `KnowledgeApi` contract with a `MockKnowledgeApi` today. Phase 2 swaps
-  in an HTTP implementation of the same interface; components don't change. The
-  wire shape of the real public endpoint must be defined by backend-core first.
+- The page is **companion-first**: the hero is the D.D. companion app (with a
+  pure-CSS phone mockup standing in for a real screenshot). The **benefits
+  helper** lives lower down as a **free resource** section
+  (`src/components/BenefitsResource.tsx` → `src/components/BenefitsHelper.tsx`).
+- `src/lib/knowledgeApi.ts` holds a typed `KnowledgeApi` contract with **two**
+  implementations: a real `HttpKnowledgeApi` (calls `POST /public/knowledge/ask`)
+  and a `MockKnowledgeApi` (canned, cited, disclaimered answers + a freemium
+  gate, no network). Server answer text is always rendered as **plain text** —
+  never `dangerouslySetInnerHTML`.
+- **Client selection is FAIL-SAFE: the mock is the default everywhere, including
+  production builds.** The real HTTP client is used only on an explicit opt-in —
+  `VITE_KNOWLEDGE_API_BASE` (a base URL, may be cross-origin) or
+  `VITE_KNOWLEDGE_ENABLE_HTTP=true` (same-origin, the launch switch). This is
+  deliberate: the public endpoint is still launch-gated (backend #151 not merged,
+  no edge protection yet), so a no-env production build must serve the mock, not
+  hit a live/broken endpoint. Flip the enable flag in the deploy env once the
+  endpoint + Cloudflare edge protection are live — no code change needed.
+  (`VITE_KNOWLEDGE_USE_MOCK=true` remains a redundant explicit force-mock.)
 
 ## Develop
 

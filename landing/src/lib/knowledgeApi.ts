@@ -268,26 +268,45 @@ class MockKnowledgeApi implements KnowledgeApi {
 
 // ── Client selection ───────────────────────────────────────────────────────────
 //
-// Default to the real HTTP client in production and whenever an API base is
-// configured; fall back to the mock only for local/offline dev when nothing is
-// configured. An explicit VITE_KNOWLEDGE_USE_MOCK=true forces the mock anywhere.
+// FAIL-SAFE by design: the MOCK is the default EVERYWHERE, INCLUDING production.
+// The real HTTP client is used ONLY on an explicit, affirmative opt-in. This is
+// deliberate: the public `/public/knowledge/ask` endpoint is still launch-gated
+// (backend contract PR #151 not merged; no Cloudflare edge protection yet), so a
+// normal production build must NOT hit it. The deployed landing therefore serves
+// the mock (canned, cited, disclaimered answers) until someone deliberately flips
+// the launch switch in the build/deploy env — the moment #151 + edge protection
+// are live.
+//
+// Selection order:
+//   1. VITE_KNOWLEDGE_USE_MOCK === 'true'  → Mock (redundant explicit force-mock).
+//   2. VITE_KNOWLEDGE_API_BASE non-empty   → Http(base)  (explicit base opt-in;
+//                                            may be cross-origin).
+//   3. VITE_KNOWLEDGE_ENABLE_HTTP === 'true' → Http('')  (explicit same-origin
+//                                            opt-in — THE launch switch).
+//   4. anything else (incl. PROD with no env) → Mock.
+//
+// There is intentionally NO "PROD implies Http" branch: production alone never
+// enables the live endpoint.
 
 function selectClient(): KnowledgeApi {
   const env = import.meta.env;
   const base = env.VITE_KNOWLEDGE_API_BASE?.trim();
 
   if (env.VITE_KNOWLEDGE_USE_MOCK === 'true') {
+    // Explicit force-mock, anywhere.
     return new MockKnowledgeApi();
   }
   if (base) {
-    // Explicit base (may be cross-origin).
+    // Explicit base opt-in (may be cross-origin).
     return new HttpKnowledgeApi(base);
   }
-  if (env.PROD) {
-    // Production default: same-origin relative fetch.
+  if (env.VITE_KNOWLEDGE_ENABLE_HTTP === 'true') {
+    // Explicit same-origin opt-in — the launch switch, flipped once the public
+    // endpoint + edge protection are live.
     return new HttpKnowledgeApi('');
   }
-  // Local dev, nothing configured → offline mock.
+  // Default EVERYWHERE (including production builds with no env set): offline,
+  // fail-safe mock. Never silently reaches a launch-gated live endpoint.
   return new MockKnowledgeApi();
 }
 
