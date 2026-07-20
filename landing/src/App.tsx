@@ -1,21 +1,21 @@
 import { Header } from './components/Header';
 import { Hero } from './components/Hero';
-import { HowItWorks } from './components/HowItWorks';
-import { ProductBridge } from './components/ProductBridge';
+import { WhatItDoes } from './components/WhatItDoes';
+import { BenefitsResource } from './components/BenefitsResource';
 import { CTA } from './components/CTA';
 import { Footer } from './components/Footer';
 
 export function App() {
   return (
     <>
-      <a className="skip-link" href="#tool">
+      <a className="skip-link" href="#main">
         Skip to content
       </a>
       <Header />
       <main id="main">
         <Hero />
-        <HowItWorks />
-        <ProductBridge />
+        <WhatItDoes />
+        <BenefitsResource />
         <CTA />
       </main>
       <Footer />
