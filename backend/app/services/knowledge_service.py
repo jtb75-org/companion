@@ -158,6 +158,74 @@ async def _embed_batch_resilient(texts: list[str]) -> list[list[float] | None]:
     return results
 
 
+async def _embed_all_resilient(
+    texts: list[str], batch_size: int = 50
+) -> list[list[float] | None]:
+    """Resiliently embed EVERY text up front, returning an aligned list (``None`` marks a
+    chunk that still failed after retry + per-chunk isolation).
+
+    Batched to bound the gateway payload. This runs BEFORE any destructive delete so the
+    caller can inspect the success/failure split and abort (see the systemic-failure guard)
+    without ever having touched the existing corpus.
+    """
+    results: list[list[float] | None] = []
+    for i in range(0, len(texts), batch_size):
+        results.extend(await _embed_batch_resilient(texts[i:i + batch_size]))
+    return results
+
+
+# ── Systemic embedding-failure guard ──────────────────────────────────────────
+#
+# The per-chunk skip in _embed_batch_resilient is the RIGHT behaviour for a few isolated bad
+# chunks (an oversized/malformed section). It is the WRONG behaviour when the embedding
+# gateway/model is systemically DOWN: then every chunk's embedding fails and is skipped, and
+# if we had already deleted the old corpus we would commit an empty replacement — wiping it.
+#
+# Defence: embed BEFORE deleting, then check the success split. If embedding failed
+# systemically (zero embedded, or the success fraction fell below the floor), abort WITHOUT
+# deleting — the old corpus stays intact and the ingest can be retried when the gateway
+# recovers. A handful of skips above the floor is not systemic and proceeds normally.
+#
+# 0.5 (>=50% must succeed) is deliberately generous: a real outage embeds ~0% (well below
+# it), while even a run peppered with a few oversized/rejected sections embeds the vast
+# majority and clears it comfortably. Zero-embedded is ALWAYS treated as systemic regardless
+# of the fraction, so a corpus can never be replaced by nothing.
+_MIN_EMBED_SUCCESS_FRACTION = 0.5
+
+
+class SystemicEmbeddingError(RuntimeError):
+    """Embedding failed for all/most chunks of a corpus ingest — a gateway/model OUTAGE, not
+    a few isolated bad chunks. Because we embed before deleting, the existing corpus is still
+    intact when this is raised; callers must NOT delete or replace it."""
+
+
+def _guard_systemic_embedding(
+    *, source: str, parsed: int, embedded: int, has_vector: bool
+) -> None:
+    """Raise :class:`SystemicEmbeddingError` if the embedding result looks like an outage.
+
+    Only enforced when ``has_vector`` is True: in the no-pgvector path embeddings are absent
+    BY DESIGN (keyword-fallback corpus), so an all-``None`` result there is expected, not a
+    failure — the guard must not falsely abort it. When vectors ARE expected, a zero-embedded
+    or below-floor result means the gateway is down and we abort before touching old rows.
+    """
+    if not has_vector or parsed == 0:
+        return
+    fraction = embedded / parsed
+    if embedded == 0 or fraction < _MIN_EMBED_SUCCESS_FRACTION:
+        logger.error(
+            "Systemic embedding failure for %s: parsed=%d embedded=%d skipped=%d "
+            "(%.0f%% succeeded, floor %.0f%%). Aborting WITHOUT deleting — the existing "
+            "corpus is preserved for retry.",
+            source, parsed, embedded, parsed - embedded,
+            fraction * 100, _MIN_EMBED_SUCCESS_FRACTION * 100,
+        )
+        raise SystemicEmbeddingError(
+            f"Embedding failed systemically for {source} "
+            f"({embedded}/{parsed} chunks embedded); existing corpus left intact."
+        )
+
+
 # ── eCFR HTML Parser ──────────────────────────────────────────────────────────
 
 class ECFRHTMLParser(HTMLParser):
@@ -344,7 +412,29 @@ async def trigger_ecfr_ingestion(db: AsyncSession, parts: list[int] | None = Non
                             chunk["section"], len(chunk["text"]), len(sub_texts),
                         )
 
-                # Evict existing eCFR chunks for this part to prevent duplicates
+                # EMBED FIRST, before deleting anything. Retry transient errors and isolate
+                # any single chunk that still fails (embedding -> None -> skip). Only once we
+                # know the embedding gateway is healthy do we touch the existing corpus.
+                texts = [chunk["text"] for chunk in expanded_chunks]
+                embeddings = await _embed_all_resilient(texts)
+
+                parsed_count = len(expanded_chunks)
+                embedded_count = sum(1 for e in embeddings if e is not None)
+                skipped = parsed_count - embedded_count
+
+                # Systemic-failure guard: if the gateway is down (zero/near-zero embedded),
+                # abort WITHOUT deleting so the old corpus survives. Only enforced when
+                # vectors are expected — the no-pgvector path legitimately has no embeddings.
+                _guard_systemic_embedding(
+                    source=f"eCFR Part {part}",
+                    parsed=parsed_count,
+                    embedded=embedded_count,
+                    has_vector=has_vector,
+                )
+
+                # Guard passed → safe to replace. DELETE + INSERT happen in the same
+                # uncommitted transaction (committed once at the very end), so a failure
+                # mid-insert rolls the delete back too and the old corpus is never lost.
                 await db.execute(
                     delete(RegulationChunk).where(
                         RegulationChunk.source_corpus == "eCFR",
@@ -352,85 +442,73 @@ async def trigger_ecfr_ingestion(db: AsyncSession, parts: list[int] | None = Non
                     )
                 )
 
-                # Process in batches of 50 for embedding generation
-                batch_size = 50
-                skipped = 0
-                for i in range(0, len(expanded_chunks), batch_size):
-                    batch = expanded_chunks[i:i + batch_size]
-                    texts = [chunk["text"] for chunk in batch]
+                inserted_for_part = 0
+                for chunk_data, embedding in zip(expanded_chunks, embeddings, strict=True):
+                    if has_vector and embedding is None:
+                        continue
+                    text_content = chunk_data["text"]
+                    citation_section = (
+                        chunk_data["section"]
+                        .replace("p-", "")
+                        .replace("part-", "")
+                        .strip()
+                    )
 
-                    # Generate embeddings via shared gateway, retrying transient errors and
-                    # isolating any single chunk that still fails (embedding -> None -> skip).
-                    embeddings = await _embed_batch_resilient(texts)
+                    # Determine program context from section part
+                    program = "SSDI" if part == 404 else "SSI"
 
-                    inserted_in_batch = 0
-                    for chunk_data, embedding in zip(batch, embeddings, strict=True):
-                        if has_vector and embedding is None:
-                            skipped += 1
-                            continue
-                        text_content = chunk_data["text"]
-                        citation_section = (
-                            chunk_data["section"]
-                            .replace("p-", "")
-                            .replace("part-", "")
-                            .strip()
-                        )
+                    # Build citation label
+                    citation_label = f"20 CFR § {citation_section}"
 
-                        # Determine program context from section part
-                        program = "SSDI" if part == 404 else "SSI"
+                    sect_parts = citation_section.split(".")
+                    sect_num = sect_parts[-1] if len(sect_parts) > 1 else citation_section
 
-                        # Build citation label
-                        citation_label = f"20 CFR § {citation_section}"
+                    # Dynamically insert to survive absence of pgvector in testing
+                    columns = [
+                        "id", "jurisdiction", "source_corpus", "source_url",
+                        "citation", "title", "part", "section", "program",
+                        "text_content", "token_count", "effective_date"
+                    ]
+                    placeholders = [f":{col}" for col in columns]
+                    params = {
+                        "id": str(uuid.uuid4()),
+                        "jurisdiction": "US_Federal",
+                        "source_corpus": "eCFR",
+                        "source_url": url,
+                        "citation": citation_label,
+                        "title": "20",
+                        "part": str(part),
+                        "section": sect_num,
+                        "program": program,
+                        "text_content": text_content,
+                        "token_count": len(text_content) // 4,
+                        "effective_date": datetime.now()
+                    }
 
-                        sect_parts = citation_section.split(".")
-                        sect_num = sect_parts[-1] if len(sect_parts) > 1 else citation_section
+                    if has_vector:
+                        columns.append("embedding")
+                        placeholders.append(":embedding")
+                        params["embedding"] = str(embedding)
 
-                        # Dynamically insert to survive absence of pgvector in testing
-                        columns = [
-                            "id", "jurisdiction", "source_corpus", "source_url",
-                            "citation", "title", "part", "section", "program",
-                            "text_content", "token_count", "effective_date"
-                        ]
-                        placeholders = [f":{col}" for col in columns]
-                        params = {
-                            "id": str(uuid.uuid4()),
-                            "jurisdiction": "US_Federal",
-                            "source_corpus": "eCFR",
-                            "source_url": url,
-                            "citation": citation_label,
-                            "title": "20",
-                            "part": str(part),
-                            "section": sect_num,
-                            "program": program,
-                            "text_content": text_content,
-                            "token_count": len(text_content) // 4,
-                            "effective_date": datetime.now()
-                        }
+                    sql = (
+                        f"INSERT INTO disability_reg_chunks ({', '.join(columns)}) "
+                        f"VALUES ({', '.join(placeholders)})"
+                    )
+                    await db.execute(text(sql), params)
+                    inserted_for_part += 1
 
-                        if has_vector:
-                            columns.append("embedding")
-                            placeholders.append(":embedding")
-                            params["embedding"] = str(embedding)
-
-                        sql = (
-                            f"INSERT INTO disability_reg_chunks ({', '.join(columns)}) "
-                            f"VALUES ({', '.join(placeholders)})"
-                        )
-                        await db.execute(text(sql), params)
-                        inserted_in_batch += 1
-
-                    await db.flush()
-                    total_inserted += inserted_in_batch
+                await db.flush()
+                total_inserted += inserted_for_part
 
                 if skipped:
                     logger.warning(
-                        "Skipped %d chunk(s) for eCFR Part %d that failed to embed; "
-                        "ingested %d",
-                        skipped, part, total_inserted,
+                        "Skipped %d chunk(s) for eCFR Part %d that failed to embed "
+                        "(parsed=%d, embedded=%d); ingested %d",
+                        skipped, part, parsed_count, embedded_count, inserted_for_part,
                     )
                 logger.info(
                     "Successfully ingested %d chunks for eCFR Part %d",
-                    total_inserted,
+                    inserted_for_part,
                     part,
                 )
 
@@ -467,11 +545,6 @@ async def trigger_federal_register_ingestion(db: AsyncSession) -> int:
             if not results:
                 logger.warning("No recent Federal Register rules found")
                 return 0
-
-            # Evict existing Federal Register rules
-            await db.execute(
-                delete(RegulationChunk).where(RegulationChunk.source_corpus == "Federal_Register")
-            )
 
             valid_rules = []
 
@@ -515,14 +588,35 @@ async def trigger_federal_register_ingestion(db: AsyncSession) -> int:
 
             if valid_rules:
                 texts_to_embed = [rule["text"] for rule in valid_rules]
-                # Retry transient errors; isolate any chunk that still fails so one bad
-                # abstract cannot roll back the whole Federal Register ingest.
-                embeddings = await _embed_batch_resilient(texts_to_embed)
+                # EMBED FIRST, before deleting the existing rules. Retry transient errors and
+                # isolate any chunk that still fails so one bad abstract cannot abort the run.
+                embeddings = await _embed_all_resilient(texts_to_embed)
 
-                skipped = 0
+                parsed_count = len(valid_rules)
+                embedded_count = sum(1 for e in embeddings if e is not None)
+                skipped = parsed_count - embedded_count
+
+                # Systemic-failure guard: if the embedding gateway is down, abort WITHOUT
+                # deleting so the existing Federal Register corpus survives for retry. Only
+                # enforced when vectors are expected (no-op in the no-pgvector path).
+                _guard_systemic_embedding(
+                    source="Federal Register",
+                    parsed=parsed_count,
+                    embedded=embedded_count,
+                    has_vector=has_vector,
+                )
+
+                # Guard passed → replace atomically: DELETE + INSERT in the same uncommitted
+                # transaction (committed once at the end), so a mid-insert failure rolls the
+                # delete back too and the old corpus is never lost.
+                await db.execute(
+                    delete(RegulationChunk).where(
+                        RegulationChunk.source_corpus == "Federal_Register"
+                    )
+                )
+
                 for rule, embedding in zip(valid_rules, embeddings, strict=True):
                     if has_vector and embedding is None:
-                        skipped += 1
                         continue
                     columns = [
                         "id", "jurisdiction", "source_corpus", "source_url",
@@ -557,9 +651,9 @@ async def trigger_federal_register_ingestion(db: AsyncSession) -> int:
                 await db.flush()
                 if skipped:
                     logger.warning(
-                        "Skipped %d Federal Register chunk(s) that failed to embed; "
-                        "ingested %d",
-                        skipped, total_inserted,
+                        "Skipped %d Federal Register chunk(s) that failed to embed "
+                        "(parsed=%d, embedded=%d); ingested %d",
+                        skipped, parsed_count, embedded_count, total_inserted,
                     )
 
             logger.info("Successfully ingested %d Federal Register rule chunks", total_inserted)

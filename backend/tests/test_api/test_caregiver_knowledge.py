@@ -571,3 +571,194 @@ async def test_ecfr_persistent_chunk_failure_does_not_abort_run(monkeypatch, cap
     assert "20 CFR § 404.1520" in citations
     # The failing chunk was retried per-chunk (isolated), not allowed to abort the batch.
     assert any("per-chunk embedding" in r.getMessage() for r in caplog.records)
+
+
+# ── Systemic embedding-failure guard: embed-before-delete + corpus preservation ─
+#
+# niru's BLOCKER on PR #150: the resilient per-chunk skip (right for a FEW bad chunks) is
+# destructive under a SYSTEMIC embedding outage — the old code deleted the corpus, then every
+# chunk's embedding failed and was skipped, and it committed an empty replacement. Fix: embed
+# BEFORE deleting, and abort (no delete, no empty commit) if embedding failed systemically.
+# The guard only applies when vectors are expected (has_vector=True); the no-pgvector CI path
+# legitimately has no embeddings and must NOT be tripped.
+
+
+def test_systemic_guard_raises_on_zero_embedded():
+    """Zero chunks embedded with vectors expected → a gateway outage → abort."""
+    with pytest.raises(knowledge_service.SystemicEmbeddingError):
+        knowledge_service._guard_systemic_embedding(
+            source="eCFR Part 404", parsed=10, embedded=0, has_vector=True
+        )
+
+
+def test_systemic_guard_raises_below_success_floor():
+    """4/10 = 40% embedded is below the 50% floor → treated as systemic → abort."""
+    with pytest.raises(knowledge_service.SystemicEmbeddingError):
+        knowledge_service._guard_systemic_embedding(
+            source="eCFR Part 404", parsed=10, embedded=4, has_vector=True
+        )
+
+
+def test_systemic_guard_allows_a_few_skips_above_floor():
+    """8/10 = 80% embedded is above the floor → a few isolated skips, NOT systemic →
+    proceed (no raise). This is the accepted per-chunk-skip behaviour from the PR."""
+    knowledge_service._guard_systemic_embedding(
+        source="eCFR Part 404", parsed=10, embedded=8, has_vector=True
+    )
+
+
+def test_systemic_guard_is_noop_without_vector():
+    """No-pgvector path: embeddings are absent by design, so even zero embedded must NOT
+    abort — the guard is scoped to embedding-gateway failure when vectors ARE expected."""
+    knowledge_service._guard_systemic_embedding(
+        source="eCFR Part 404", parsed=10, embedded=0, has_vector=False
+    )
+
+
+async def test_ecfr_systemic_failure_preserves_existing_corpus(monkeypatch):
+    """(a) SYSTEMIC failure: every chunk fails to embed while vectors are expected. The guard
+    must ABORT before deleting — the existing corpus survives and nothing empty is committed.
+    Pre-fix (delete → embed-skip-all → commit) this wiped the corpus."""
+    monkeypatch.setattr(knowledge_service, "_EMBED_RETRY_BACKOFF_SECONDS", 0.0)
+
+    # Pre-seed an existing corpus row that MUST survive the failed re-ingest.
+    await _insert_chunk(
+        citation="20 CFR § 404.OLD", text_content="Existing corpus content."
+    )
+
+    mock_html = """
+    <div class="part" id="part-404">
+        <div class="section" id="404.1520">
+            <h4>§ 404.1520 Evaluation of disability.</h4>
+            <p>We use a five-step sequential evaluation process to determine disability.</p>
+        </div>
+    </div>
+    """
+
+    async def mock_get(*args, **kwargs):
+        return MockResponse(text=mock_html, status_code=200)
+
+    async def gateway_down(texts):
+        raise RuntimeError("embedding gateway down: connection refused")
+
+    async def vectors_expected(_db):
+        return True
+
+    import httpx
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    monkeypatch.setattr(knowledge_service, "embed_documents", gateway_down)
+    monkeypatch.setattr(knowledge_service, "has_pgvector", vectors_expected)
+
+    with pytest.raises(knowledge_service.SystemicEmbeddingError):
+        async with db_module.async_session_factory() as s:
+            await knowledge_service.trigger_ecfr_ingestion(s, parts=[404])
+
+    # Old corpus intact; the delete never ran and no empty replacement was committed.
+    async with db_module.async_session_factory() as s:
+        res = await s.execute(text("SELECT citation FROM disability_reg_chunks"))
+        citations = {r.citation for r in res.fetchall()}
+    assert citations == {"20 CFR § 404.OLD"}
+
+
+async def test_fedreg_systemic_failure_preserves_existing_corpus(monkeypatch):
+    """(a) SYSTEMIC failure on the Federal Register path: same guarantee — the existing
+    Federal Register corpus is preserved and the delete never runs when embedding is down."""
+    monkeypatch.setattr(knowledge_service, "_EMBED_RETRY_BACKOFF_SECONDS", 0.0)
+
+    # Pre-seed an existing Federal Register row that MUST survive.
+    async with db_module.async_session_factory() as s:
+        await s.execute(
+            text(
+                "INSERT INTO disability_reg_chunks "
+                "(id, jurisdiction, source_corpus, source_url, citation, program, "
+                " text_content, token_count, effective_date) "
+                "VALUES (:id, :jur, :corpus, :url, :cit, :prog, :txt, :tok, :eff)"
+            ),
+            {
+                "id": str(uuid.uuid4()),
+                "jur": "US_Federal",
+                "corpus": "Federal_Register",
+                "url": "https://www.federalregister.gov",
+                "cit": "Federal Register Vol. OLD-0001",
+                "prog": "Both",
+                "txt": "Existing federal register content.",
+                "tok": 5,
+                "eff": datetime(2024, 1, 1),
+            },
+        )
+        await s.commit()
+
+    mock_json = {
+        "results": [
+            {
+                "title": "New SSI Rule",
+                "abstract": "A new rule abstract that should have replaced the corpus.",
+                "document_number": "2024-99999",
+                "publication_date": "2024-07-15",
+                "html_url": "https://www.federalregister.gov/documents/2024/07/15/x",
+            }
+        ]
+    }
+
+    async def mock_get(*args, **kwargs):
+        return MockResponse(text="", status_code=200, json_data=mock_json)
+
+    async def gateway_down(texts):
+        raise RuntimeError("embedding gateway down")
+
+    async def vectors_expected(_db):
+        return True
+
+    import httpx
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    monkeypatch.setattr(knowledge_service, "embed_documents", gateway_down)
+    monkeypatch.setattr(knowledge_service, "has_pgvector", vectors_expected)
+
+    with pytest.raises(knowledge_service.SystemicEmbeddingError):
+        async with db_module.async_session_factory() as s:
+            await knowledge_service.trigger_federal_register_ingestion(s)
+
+    async with db_module.async_session_factory() as s:
+        res = await s.execute(text("SELECT citation FROM disability_reg_chunks"))
+        citations = {r.citation for r in res.fetchall()}
+    assert citations == {"Federal Register Vol. OLD-0001"}
+
+
+async def test_ecfr_no_vector_path_ingests_despite_embedding_failure(monkeypatch):
+    """(d) No-pgvector CI path: embeddings are absent by design and the run uses the keyword
+    corpus. Even with the gateway 'down', the guard must NOT falsely abort — the parsed chunk
+    is still ingested. Confirms has_vector=False keyword-fallback ingest is unbroken."""
+    monkeypatch.setattr(knowledge_service, "_EMBED_RETRY_BACKOFF_SECONDS", 0.0)
+
+    mock_html = """
+    <div class="part" id="part-404">
+        <div class="section" id="404.1520">
+            <h4>§ 404.1520 Evaluation of disability.</h4>
+            <p>We use a five-step sequential evaluation process to determine disability.</p>
+        </div>
+    </div>
+    """
+
+    async def mock_get(*args, **kwargs):
+        return MockResponse(text=mock_html, status_code=200)
+
+    async def gateway_down(texts):
+        raise RuntimeError("embedding gateway down")
+
+    async def no_vectors(_db):
+        return False
+
+    import httpx
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    monkeypatch.setattr(knowledge_service, "embed_documents", gateway_down)
+    monkeypatch.setattr(knowledge_service, "has_pgvector", no_vectors)
+
+    async with db_module.async_session_factory() as s:
+        inserted = await knowledge_service.trigger_ecfr_ingestion(s, parts=[404])
+
+    # Guard did not abort; the chunk was ingested for keyword fallback.
+    assert inserted == 1
+    async with db_module.async_session_factory() as s:
+        res = await s.execute(text("SELECT citation FROM disability_reg_chunks"))
+        citations = {r.citation for r in res.fetchall()}
+    assert citations == {"20 CFR § 404.1520"}
