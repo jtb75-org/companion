@@ -7,6 +7,9 @@ from app.auth.dependencies import get_current_admin
 from app.auth.principal import resolve_caregiver_session
 from app.config import settings
 from app.db import get_db
+from app.ingestion.adapters import ADAPTERS
+from app.ingestion.reconciler import run_source
+from app.ingestion.types import IngestionMode
 from app.models.admin_user import AdminUser
 from app.schemas.knowledge import (
     IngestionStatusResponse,
@@ -66,14 +69,55 @@ async def search_knowledge(
         ) from e
 
 
-# ── Ingestion (ADMIN-ONLY) ──────────────────────────────────────────────────────
-# These endpoints fetch external URLs, embed, and DELETE + re-insert the entire corpus.
-# They must NOT be reachable by an ordinary caregiver session (which resolve_caregiver_
-# session returns for ANY resolvable session with no role check), or any authenticated
-# caregiver could wipe/re-ingest the corpus (cost/DoS + integrity). Gate on
-# get_current_admin — same admin dependency used by app/api/admin/* — so only an active
-# admin_users row can trigger a rebuild. In prod these are also blockable at the edge; the
-# long-term home is an internal/CronJob path.
+# ── Reconcile trigger (ADMIN-ONLY, engine-backed) ────────────────────────────────
+# The go-forward on-demand trigger: runs the reconcile ENGINE (new/changed/unchanged/
+# absent diff + guards) for one source, the same code path the CronJob worker invokes
+# (python -m app.ingestion.worker). ADMIN-ONLY (get_current_admin) — never caregiver-
+# triggerable. Prefer this over the legacy full-replace endpoints below.
+
+
+@router.post("/knowledge/reconcile/{source}", response_model=IngestionStatusResponse)
+async def reconcile_source(
+    source: str,
+    mode: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin),
+):
+    """Reconcile one regulation source (``ecfr`` or ``fedreg``) via the engine.
+
+    ADMIN-ONLY. Runs the same reconcile spine as the CronJob worker: it diffs the
+    source against the corpus and applies new/changed/unchanged/absent per the
+    source's purge policy, guarded against ever wiping the corpus. ``mode`` may be
+    ``incremental`` or ``reconcile`` (defaults to the adapter's cadence)."""
+    if source not in ADAPTERS:
+        raise HTTPException(status_code=404, detail=f"Unknown source '{source}'.")
+    ingestion_mode = (
+        IngestionMode(mode)
+        if mode in {m.value for m in IngestionMode}
+        else (IngestionMode.INCREMENTAL if source == "fedreg" else IngestionMode.RECONCILE)
+    )
+    try:
+        summary = await run_source(db, ADAPTERS[source](), ingestion_mode)
+    except Exception as e:
+        logger.exception("Error reconciling source %s", source)
+        raise HTTPException(
+            status_code=500, detail="Failed to reconcile regulation source."
+        ) from e
+    # A guarded abort (bad fetch / embedding outage / mass-purge) is not a crash —
+    # surface it as the run status so the operator sees the corpus was preserved.
+    return IngestionStatusResponse(
+        status=summary.status, chunks_ingested=summary.rows_inserted
+    )
+
+
+# ── Ingestion (ADMIN-ONLY, LEGACY full-replace) ──────────────────────────────────
+# DEPRECATED in favour of /knowledge/reconcile/{source} above. These endpoints fetch
+# external URLs, embed, and DELETE + re-insert the entire corpus (no reconcile/diff).
+# Retained as a manual fallback only. They must NOT be reachable by an ordinary
+# caregiver session (which resolve_caregiver_session returns for ANY resolvable session
+# with no role check), or any authenticated caregiver could wipe/re-ingest the corpus
+# (cost/DoS + integrity). Gate on get_current_admin — same admin dependency used by
+# app/api/admin/* — so only an active admin_users row can trigger a rebuild.
 
 
 @router.post("/knowledge/ingest/ecfr", response_model=IngestionStatusResponse)

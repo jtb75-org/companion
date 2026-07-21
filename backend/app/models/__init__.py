@@ -44,6 +44,7 @@ from app.models.medication import Medication, MedicationConfirmation
 from app.models.pending_review import PendingReview
 from app.models.pipeline_metrics import PipelineMetric
 from app.models.question_tracker import QuestionTracker
+from app.models.reg_ingestion_run import RegIngestionRun
 from app.models.regulation_chunk import RegulationChunk
 from app.models.system_config import ConfigAuditLog, SystemConfig
 from app.models.todo import Todo
@@ -105,4 +106,5 @@ __all__ = [
     "UserEncryptionKey",
     "ActivationToken",
     "RegulationChunk",
+    "RegIngestionRun",
 ]
