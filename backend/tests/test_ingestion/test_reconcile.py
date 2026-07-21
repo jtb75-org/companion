@@ -331,7 +331,9 @@ async def test_ecfr_purge_on_absence_deletes_removed_citation(monkeypatch):
     import httpx
     monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
 
-    adapter = ECFRAdapter(parts=[404], min_expected_docs=1)
+    # This test exercises the section-body purge path only; the Blue Book appendix
+    # is covered by tests/test_ingestion/test_ecfr_appendix.py.
+    adapter = ECFRAdapter(parts=[404], min_expected_docs=1, include_appendix=False)
     async with db_module.async_session_factory() as db:
         summary = await run_source(db, adapter, IngestionMode.RECONCILE)
 
