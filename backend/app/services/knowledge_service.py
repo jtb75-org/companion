@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.conversation.llm import get_knowledge_llm_client
+from app.conversation.llm import LLM_FALLBACK_MESSAGE, get_knowledge_llm_client
 from app.db.redis import get_redis
 from app.models.regulation_chunk import RegulationChunk
 from app.pipeline.embedding_client import embed_documents, embed_query
@@ -41,23 +41,18 @@ _GROUNDED_REFUSAL = (
     "or your legal advocate for help."
 )
 
-# Every LLMClient._fallback_response (Gemini, OpenAI/gateway, Claude) begins with this
-# marker when the underlying generation failed or was blocked. Detecting it lets the
-# reg-helper substitute the grounded refusal above, provider-agnostically, instead of
-# serving the conversational fallback that echoes the user's query.
-_CONVERSATIONAL_FALLBACK_MARKER = "I heard you say:"
-
-
 def _is_unusable_answer_body(body: str | None) -> bool:
-    """True if the model body is empty or the shared conversational fallback.
+    """True if the model body is empty or the shared client fallback.
 
     The reg-helper must not ship either: an empty/None body has no grounded content, and
-    the "I heard you say: ..." fallback echoes the query and is off-contract here. Both
-    degrade to the deterministic grounded refusal. Provider-agnostic — the marker is emitted
-    by every provider's ``_fallback_response``."""
+    the generic ``LLM_FALLBACK_MESSAGE`` (returned by every provider's ``_fallback_response``
+    when generation fails or is blocked) is a member-assistant retry prompt, off-contract
+    for this surface. Both degrade to the deterministic grounded refusal. Provider-agnostic:
+    it matches the single shared constant imported from ``app.conversation.llm``, so it stays
+    correct if that copy changes."""
     if not body or not body.strip():
         return True
-    return body.strip().startswith(_CONVERSATIONAL_FALLBACK_MARKER)
+    return body.strip() == LLM_FALLBACK_MESSAGE.strip()
 
 # ── Embedding budget + resilience ─────────────────────────────────────────────
 #
@@ -1293,12 +1288,12 @@ async def generate_rag_answer(
 
     # 8. Degrade a failed/blocked/empty generation to the grounded refusal. A
     #    GeminiClient SAFETY/RECITATION fallback, a gateway/Qwen error, or an empty body
-    #    all surface as either "" or the shared conversational fallback ("I heard you
-    #    say: ..."). Neither is acceptable on this legal/as-of surface: the conversational
-    #    fallback echoes the user's query and is off-contract (§8.5). Substitute the same
-    #    deterministic refusal the no-chunks path uses. Provider-agnostic — applies to
-    #    Gemini and the Qwen/gateway path alike. Structural citations still ship (the
-    #    chunks were genuinely retrieved) but grounded=False signals no usable answer.
+    #    all surface as either "" or the shared LLM_FALLBACK_MESSAGE (the generic
+    #    member-assistant retry prompt). Neither is acceptable on this legal/as-of surface —
+    #    the member fallback is off-contract here — so substitute the same deterministic
+    #    refusal the no-chunks path uses. Provider-agnostic — applies to Gemini and the
+    #    Qwen/gateway path alike. Structural citations still ship (the chunks were genuinely
+    #    retrieved) but grounded=False signals no usable answer.
     if _is_unusable_answer_body(answer_body):
         logger.warning(
             "Reg-helper generation was empty or a fallback; serving the grounded refusal "

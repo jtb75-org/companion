@@ -12,6 +12,7 @@ import pytest
 
 from app import config as config_module
 from app.conversation.llm import (
+    LLM_FALLBACK_MESSAGE,
     GatewayLLMClient,
     GeminiClient,
     OpenAIClient,
@@ -230,17 +231,15 @@ async def test_answer_contract_wraps_gateway_response(monkeypatch):
     [
         "",
         '\n  ',
-        'I heard you say: "how does this work". '
-        "I'm having a little trouble connecting right now. Can you try again in a moment?",
-        'I heard you say: "how does this work". '
-        "I'm having a little trouble right now. Can you try again?",
+        LLM_FALLBACK_MESSAGE,
+        f"  {LLM_FALLBACK_MESSAGE}  ",  # tolerate surrounding whitespace
     ],
 )
 async def test_failed_generation_degrades_to_grounded_refusal(monkeypatch, bad_body):
-    """A blocked/empty/gateway-error body (empty or the shared conversational fallback)
-    must NOT be served on this legal surface. It degrades to the deterministic grounded
-    refusal — never the "I heard you say" copy — while still carrying provenance,
-    disclaimer and the structural citation. (Folds in safety follow-up #1.)"""
+    """A blocked/empty/gateway-error body (empty or the shared client fallback) must NOT
+    be served on this legal surface. It degrades to the deterministic grounded refusal —
+    never the member-assistant fallback copy — while still carrying provenance, disclaimer
+    and the structural citation. (Folds in safety follow-up #1.)"""
     _patch_search(monkeypatch, [_fake_chunk()])
     monkeypatch.setattr(
         knowledge_service,
@@ -251,7 +250,8 @@ async def test_failed_generation_degrades_to_grounded_refusal(monkeypatch, bad_b
     result = await knowledge_service.generate_rag_answer(None, "how does this work")
 
     assert result["grounded"] is False
-    assert "I heard you say" not in result["answer"]
+    assert LLM_FALLBACK_MESSAGE not in result["answer"]
+    assert "I heard you say" not in result["answer"]  # the old echoing form is gone
     assert "cannot find the answer" in result["answer"].lower()
     assert knowledge_service.NOT_LEGAL_ADVICE_DISCLAIMER in result["answer"]
     assert result["answer"].startswith("Provenance: As of ")

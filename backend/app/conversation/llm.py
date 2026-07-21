@@ -16,6 +16,17 @@ _BLOCKED_FINISH_REASONS = frozenset(
     {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}
 )
 
+# Member-facing fallback when a client can't produce a usable answer (model
+# unavailable, blocked, or errored). It MUST NOT echo the member's input:
+# dd-guidelines §8.5 explicitly forbids the "I heard you say: …" form, and
+# parroting the member's words back at the moment content was blocked can repeat
+# distressing input. A calm, bare retry prompt (§12.3). Single source of truth —
+# the public reg-helper detects this exact string to swap in its own grounded
+# refusal (see knowledge_service._is_unusable_answer_body).
+LLM_FALLBACK_MESSAGE = (
+    "I'm having trouble responding right now. Please try again in a moment."
+)
+
 
 def extract_json(text: str) -> dict:
     """Extract a JSON object from LLM output that may contain
@@ -366,12 +377,8 @@ class GeminiClient(LLMClient):
             return None
 
     def _fallback_response(self, messages: list[dict]) -> str:
-        last = messages[-1]["content"] if messages else ""
-        return (
-            f"I heard you say: \"{last[:100]}\". "
-            "I'm having a little trouble connecting right now. "
-            "Can you try again in a moment?"
-        )
+        # §8.5-compliant: a calm retry that never echoes the member's input.
+        return LLM_FALLBACK_MESSAGE
 
 
 class ClaudeClient(LLMClient):
@@ -409,12 +416,8 @@ class ClaudeClient(LLMClient):
             return self._fallback_response(messages)
 
     def _fallback_response(self, messages: list[dict]) -> str:
-        last = messages[-1]["content"] if messages else ""
-        return (
-            f"I heard you say: \"{last[:100]}\". "
-            "I'm having a little trouble connecting right now. "
-            "Can you try again in a moment?"
-        )
+        # §8.5-compliant: a calm retry that never echoes the member's input.
+        return LLM_FALLBACK_MESSAGE
 
 
 class OpenAIClient(LLMClient):
@@ -496,12 +499,8 @@ class OpenAIClient(LLMClient):
             return self._fallback_response(messages)
 
     def _fallback_response(self, messages: list[dict]) -> str:
-        last = messages[-1]["content"] if messages else ""
-        return (
-            f"I heard you say: \"{last[:100]}\". "
-            "I'm having a little trouble right now. "
-            "Can you try again?"
-        )
+        # §8.5-compliant: a calm retry that never echoes the member's input.
+        return LLM_FALLBACK_MESSAGE
 
 
 class GatewayLLMClient(OpenAIClient):
