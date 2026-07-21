@@ -366,16 +366,42 @@ class ClaudeClient(LLMClient):
 
 
 class OpenAIClient(LLMClient):
-    def __init__(self):
+    """OpenAI-compatible chat client.
+
+    Generalized to accept a ``base_url``, ``model`` and ``api_key`` so it can
+    front either the hosted OpenAI API (defaults: no base_url, ``gpt-4o``,
+    ``settings.openai_api_key``) OR any OpenAI-compatible gateway (e.g. the
+    self-hosted LiteLLM gateway fronting qwen2.5 — see :class:`GatewayLLMClient`).
+    All args are keyword-only with the historical defaults, so the existing
+    member-path construction ``OpenAIClient()`` is unchanged.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        model: str = "gpt-4o",
+        api_key: str | None = None,
+    ):
         self._client = None
+        self._base_url = base_url
+        self._model = model
+        self._api_key = (
+            api_key if api_key is not None else settings.openai_api_key
+        )
 
     def _get_client(self):
         if self._client is None:
             try:
                 import openai
-                self._client = openai.AsyncOpenAI(
-                    api_key=settings.openai_api_key
-                )
+                kwargs = {
+                    # LiteLLM/OpenAI reject empty keys; a placeholder keeps the
+                    # SDK constructable in local/test envs (mirrors embedding_client).
+                    "api_key": self._api_key or "missing",
+                }
+                if self._base_url:
+                    kwargs["base_url"] = self._base_url
+                self._client = openai.AsyncOpenAI(**kwargs)
             except Exception:
                 logger.warning("OpenAI client unavailable")
         return self._client
@@ -384,7 +410,7 @@ class OpenAIClient(LLMClient):
         self, system_prompt: str, messages: list[dict], max_tokens: int = 500
     ) -> str:
         client = self._get_client()
-        if client is None or not settings.openai_api_key:
+        if client is None or not self._api_key:
             return self._fallback_response(messages)
 
         try:
@@ -392,11 +418,27 @@ class OpenAIClient(LLMClient):
                 {"role": "system", "content": system_prompt}
             ] + messages
             response = await client.chat.completions.create(
-                model="gpt-4o",
+                model=self._model,
                 max_tokens=max_tokens,
                 messages=full_messages,
             )
-            return response.choices[0].message.content
+            choice = response.choices[0]
+            # Mirror the GeminiClient finish_reason guard: an OpenAI-compatible
+            # provider returns finish_reason="length" when the answer was cut at
+            # the token budget. qwen2.5 is NOT a thinking model, so max_tokens
+            # (3072 for the reg-helper) is ample and this should be rare — but
+            # log it so a recurrence is visible instead of silently serving a
+            # mid-sentence fragment. We still return the (partial) content; the
+            # answer contract stitches provenance + disclaimer around it in code.
+            if getattr(choice, "finish_reason", None) == "length":
+                logger.warning(
+                    "OpenAI-compatible generation hit finish_reason=length "
+                    "(model=%s, max_tokens=%s); the answer may be truncated. "
+                    "Raise the budget.",
+                    self._model,
+                    max_tokens,
+                )
+            return choice.message.content
         except Exception:
             logger.exception("OpenAI API call failed")
             return self._fallback_response(messages)
@@ -410,10 +452,50 @@ class OpenAIClient(LLMClient):
         )
 
 
+class GatewayLLMClient(OpenAIClient):
+    """OpenAI-compatible client pointed at the self-hosted LiteLLM gateway.
+
+    Used ONLY by the PUBLIC disability-benefits RAG surface (generate_rag_answer)
+    — a no-PHI, grounded federal-regulation helper. It NEVER serves the member
+    D.D./Arlo PHI assistant, which stays on Gemini via ``get_llm_client``.
+
+    Reads the knowledge-scoped config (base_url/model/key), all resolving to the
+    shared embedding gateway defaults when unset, so grounded summarization can
+    run on self-hosted qwen2.5 to save token cost.
+    """
+
+    def __init__(self):
+        super().__init__(
+            base_url=settings.knowledge_llm_api_base_resolved,
+            model=settings.knowledge_llm_model,
+            api_key=settings.knowledge_llm_api_key_resolved or "missing",
+        )
+
+
 def get_llm_client() -> LLMClient:
-    """Get the configured LLM client."""
+    """Get the configured LLM client for the member D.D./Arlo assistant path.
+
+    Dispatches on the GLOBAL ``settings.llm_provider``. This is the PHI member
+    path and stays on Gemini in prod. Do NOT route the public reg-helper through
+    here — use :func:`get_knowledge_llm_client`.
+    """
     if settings.llm_provider == "openai":
         return OpenAIClient()
     if settings.llm_provider == "anthropic":
         return ClaudeClient()
+    return GeminiClient()
+
+
+def get_knowledge_llm_client() -> LLMClient:
+    """Get the LLM client for the PUBLIC disability-benefits RAG surface ONLY.
+
+    Reads the knowledge-scoped ``settings.knowledge_llm_provider`` flag, which is
+    independent of the global ``settings.llm_provider`` that drives the member
+    PHI assistant. Defaults to Gemini so nothing changes until the flag is
+    flipped; "qwen" (alias "gateway") routes grounded summarization to
+    self-hosted qwen2.5 via the LiteLLM gateway. This selector is NEVER used by
+    the member path.
+    """
+    if settings.knowledge_llm_provider in ("qwen", "gateway"):
+        return GatewayLLMClient()
     return GeminiClient()

@@ -188,6 +188,12 @@ def stub_ai_backends(request, monkeypatch):
     import app.pipeline.embedding_client as embedding_module
 
     _patch_everywhere(monkeypatch, llm_module, "get_llm_client", lambda: client)
+    # The public disability-benefits reg-helper (knowledge_service.generate_rag_answer)
+    # selects its generator via get_knowledge_llm_client, NOT get_llm_client. Stub it too
+    # so those tests never reach a real backend regardless of the knowledge provider flag.
+    _patch_everywhere(
+        monkeypatch, llm_module, "get_knowledge_llm_client", lambda: client
+    )
 
     # Embeddings: NOT a google client. openai.AsyncOpenAI against the LAN LiteLLM
     # gateway (192.168.0.104:4000, 60s timeout) — unroutable from CI, so it blocks the

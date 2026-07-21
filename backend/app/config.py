@@ -190,6 +190,34 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     gemini_location: str = "us-central1"
 
+    # ── Knowledge-scoped LLM (PUBLIC disability-benefits RAG ONLY) ────────────
+    # A SEPARATE generation provider that governs ONLY generate_rag_answer — the
+    # public, no-PHI, grounded federal-regulation helper. It is deliberately
+    # independent of ``llm_provider`` above, which drives the member D.D./Arlo
+    # PHI assistant and MUST stay on Gemini. This flag lets us move the free,
+    # high-volume, PHI-free funnel onto the self-hosted Macs (qwen2.5 via the
+    # LiteLLM gateway) to save token cost, WITHOUT touching the member path.
+    #
+    # DEFAULT = "gemini" — nothing changes until this is flipped in gitops env
+    # (an owner-gated change after a live eval). Set to "qwen" (alias: "gateway")
+    # to route the public reg-helper's grounded summarization through the
+    # OpenAI-compatible LiteLLM gateway. The answer-contract guarantees
+    # (not-legal-advice disclaimer, provenance/as-of line, structural citations,
+    # grounded refusal) are enforced IN CODE and are model-agnostic — they hold
+    # regardless of which provider this selects.
+    knowledge_llm_provider: str = "gemini"  # gemini (default) | qwen | gateway
+    # OpenAI-compatible base URL for the gateway path. Empty → reuse the shared
+    # embedding gateway base (``embedding_api_base``), which already fronts the
+    # Macs and HA-balances across both. Override to point at a different gateway.
+    knowledge_llm_api_base: str = ""
+    # Model served by the gateway for the reg-helper. Defaults to a concrete
+    # pulled model; leave configurable so we can point at qwen2.5:32b later.
+    knowledge_llm_model: str = "qwen2.5:14b"
+    # Scoped gateway key. Empty → reuse the embedding gateway key
+    # (``embedding_api_key``); LiteLLM rejects empty keys, so the client falls
+    # back to a placeholder when neither is set (dev/test).
+    knowledge_llm_api_key: str = ""
+
     # RAG / Embeddings — via the shared LiteLLM gateway (OpenAI-compatible),
     # which load-balances nomic-embed-text (768-dim) across both Mac Studios.
     # Chat generation stays direct on Vertex (see llm_provider).
@@ -288,6 +316,22 @@ class Settings(BaseSettings):
         session resolvers in ``app/auth/principal.py`` are always active. Kept as a
         named alias of ``authentik_enabled`` for the call sites that read it."""
         return self.auth_provider == "authentik"
+
+    @property
+    def knowledge_llm_api_base_resolved(self) -> str:
+        """Gateway base URL for the knowledge (public reg-helper) LLM path.
+
+        Falls back to the shared embedding gateway base when unset, so the
+        reg-helper reuses the same in-cluster LiteLLM gateway the embeddings
+        already go through."""
+        return self.knowledge_llm_api_base or self.embedding_api_base
+
+    @property
+    def knowledge_llm_api_key_resolved(self) -> str:
+        """Gateway key for the knowledge (public reg-helper) LLM path.
+
+        Falls back to the shared embedding gateway key when unset."""
+        return self.knowledge_llm_api_key or self.embedding_api_key
 
     @property
     def oidc_audience(self) -> str:
