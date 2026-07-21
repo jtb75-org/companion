@@ -6,6 +6,7 @@ import {
 import { useRoute } from '@react-navigation/native'
 import { NativeModules } from 'react-native'
 import { api } from '../api/client'
+import { CutShortNote, CutReason, shouldShowCutShortNote } from '../components/CutShortNote'
 
 const { AudioPlayerModule, AudioRecorderModule } = NativeModules
 import { colors, brand } from '../theme/colors'
@@ -15,6 +16,10 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   audioData?: string // base64 MP3
+  // Set when the backend signals the answer was cut off mid-stream (a content
+  // or length cut). Additive + backward-safe: absent/false renders as before.
+  cutShort?: boolean
+  cutReason?: CutReason
 }
 
 export function ChatScreen() {
@@ -118,7 +123,12 @@ export function ChatScreen() {
       setMessages((prev) => [...prev, userMsg])
       setSending(true)
 
-      const res = await api<{ response: string; audio_data?: string }>(
+      const res = await api<{
+        response: string
+        audio_data?: string
+        cut_short?: boolean
+        cut_reason?: CutReason
+      }>(
         '/api/v1/conversation/message',
         {
           method: 'POST',
@@ -134,6 +144,8 @@ export function ChatScreen() {
         role: 'assistant',
         content: res.response,
         audioData: res.audio_data || undefined,
+        cutShort: res.cut_short === true,
+        cutReason: res.cut_reason,
       }
       setMessages((prev) => [...prev, assistantMsg])
 
@@ -174,7 +186,12 @@ export function ChatScreen() {
     setSending(true)
 
     try {
-      const res = await api<{ response: string; audio_data?: string }>(
+      const res = await api<{
+        response: string
+        audio_data?: string
+        cut_short?: boolean
+        cut_reason?: CutReason
+      }>(
         '/api/v1/conversation/message',
         {
           method: 'POST',
@@ -186,6 +203,8 @@ export function ChatScreen() {
         role: 'assistant',
         content: res.response,
         audioData: res.audio_data || undefined,
+        cutShort: res.cut_short === true,
+        cutReason: res.cut_reason,
       }
       setMessages((prev) => [...prev, assistantMsg])
 
@@ -247,6 +266,9 @@ export function ChatScreen() {
               </View>
             )}
             <Text style={[styles.bubbleText, item.role === 'user' && styles.userText]}>{item.content}</Text>
+            {shouldShowCutShortNote(item) && (
+              <CutShortNote reason={item.cutReason} />
+            )}
           </View>
         )}
       />
