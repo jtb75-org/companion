@@ -141,7 +141,7 @@ async def test_send_message_resets_tenant_context_before_persist(monkeypatch):
     _install_common_stubs(monkeypatch, db, session, set_ctx_calls)
 
     async def _generate_with_tools(*_a, **_k):
-        return "assistant reply"
+        return "assistant reply", None  # (text, cut_reason)
 
     monkeypatch.setattr(conv, "_generate_with_tools", _generate_with_tools)
 
@@ -166,6 +166,33 @@ async def test_send_message_resets_tenant_context_before_persist(monkeypatch):
     assert roles == ["assistant", "user"]
     assert db_session.message_count == 3  # 1 (greeting) + 2
     assert result["response"] == "assistant reply"
+    # A complete answer carries no cut-short signal.
+    assert "cut_short" not in result
+
+
+async def test_send_message_surfaces_cut_short(monkeypatch):
+    """When the final answer was cut off, /message surfaces cut_short + the coarse
+    reason so the client can show a soft "stopped early" note."""
+    user = _FakeUser()
+    db_session = _FakeDBSession(user.id)
+    db = _RecordingDB(db_session)
+    session = ConversationState(session_id="sess-cut", user_id=str(user.id))
+    _install_common_stubs(monkeypatch, db, session, [])
+
+    async def _generate_with_tools(*_a, **_k):
+        return "partial answer that got cut", "length"
+
+    monkeypatch.setattr(conv, "_generate_with_tools", _generate_with_tools)
+
+    result = await conv.send_message(
+        ConversationMessageRequest(text="tell me everything"),
+        user=user,
+        db=db,
+    )
+
+    assert result["response"] == "partial answer that got cut"
+    assert result["cut_short"] is True
+    assert result["cut_reason"] == "length"
 
 
 async def test_send_message_stream_resets_tenant_context_before_persist(monkeypatch):
