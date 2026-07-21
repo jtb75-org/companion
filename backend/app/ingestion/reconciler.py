@@ -59,6 +59,18 @@ class MassPurgeError(RuntimeError):
     The whole run is rolled back and the corpus preserved."""
 
 
+class LegacyPurgeShrinkError(RuntimeError):
+    """The one-time legacy (NULL source_id) sweep would shrink the corpus by more
+    than the allowed fraction on a FIRST run — almost certainly a partial fetch.
+
+    The mass-purge breaker cannot catch this: on the first post-migration run the
+    tracked index is empty (``existing`` == 0), so the breaker (which guards on
+    ``existing``) is skipped and every legacy row would be dropped regardless of
+    how few tracked rows this run produced. This applies the same >30%-shrink
+    guard against the LEGACY row count instead, so a thin fetch can't silently
+    replace the whole live corpus with a handful of rows."""
+
+
 @dataclass
 class RunSummary:
     """Terminal result of one reconcile run (mirrors the ``reg_ingestion_runs``
@@ -238,12 +250,56 @@ async def _purge_legacy_untracked(
     """Remove pre-reconcile rows (NULL ``source_id``) for a source after a healthy
     full reconcile has repopulated it with tracked rows.
 
-    Without this, the FIRST reconcile after the 047 migration would DOUBLE the
-    corpus (legacy untracked rows + new tracked rows with the same citations).
-    Safe: it only runs in RECONCILE mode, only after the new tracked rows are
-    already inserted in this same transaction (guards passed), and only touches
-    rows that predate reconcile tracking. Idempotent — a no-op on later runs.
+    Without this, the FIRST reconcile after migration 048 would DOUBLE the corpus
+    (legacy untracked rows + new tracked rows with the same citations). Safe: it
+    only runs in RECONCILE mode, only after the new tracked rows are already
+    inserted in this same transaction (guards passed), and only touches rows that
+    predate reconcile tracking. Idempotent — a no-op on later runs.
+
+    PROPORTIONALITY GUARD: compare the tracked-chunk count produced THIS run
+    against the legacy-chunk count. If replacing the legacy corpus would drop more
+    than ``_MASS_PURGE_MAX_FRACTION`` of it, raise :class:`LegacyPurgeShrinkError`
+    so the caller aborts the whole run and keeps the legacy rows. This is the
+    first-run analogue of the mass-purge breaker (which is blind here because the
+    tracked index is empty on the first run).
     """
+    legacy_count = (
+        await db.scalar(
+            select(func.count())
+            .select_from(RegulationChunk)
+            .where(
+                RegulationChunk.source_corpus == source_corpus,
+                RegulationChunk.source_id.is_(None),
+                RegulationChunk.ingestion_run_id.is_(None),
+            )
+        )
+    ) or 0
+    if legacy_count == 0:
+        return 0  # nothing to sweep — idempotent no-op on steady-state runs
+
+    reconciled_count = (
+        await db.scalar(
+            select(func.count())
+            .select_from(RegulationChunk)
+            .where(
+                RegulationChunk.source_corpus == source_corpus,
+                RegulationChunk.source_id.is_not(None),
+            )
+        )
+    ) or 0
+
+    # Require the fresh corpus to retain at least (1 - max-purge-fraction) of the
+    # legacy corpus's size; otherwise this "healthy" run would silently shrink the
+    # live corpus (e.g. a partial 60-section fetch replacing ~1,600 chunks).
+    min_keep_fraction = 1 - _MASS_PURGE_MAX_FRACTION
+    if reconciled_count < legacy_count * min_keep_fraction:
+        raise LegacyPurgeShrinkError(
+            f"legacy sweep for {source_corpus} would shrink the corpus from "
+            f"{legacy_count} to {reconciled_count} chunk(s) "
+            f"({reconciled_count / legacy_count:.0%} retained, floor "
+            f"{min_keep_fraction:.0%}); aborting to preserve the legacy corpus"
+        )
+
     res = await db.execute(
         delete(RegulationChunk).where(
             RegulationChunk.source_corpus == source_corpus,
@@ -255,8 +311,9 @@ async def _purge_legacy_untracked(
     removed = res.rowcount or 0
     if removed:
         logger.info(
-            "Purged %d legacy untracked %s chunk row(s) superseded by reconcile run %s",
-            removed, source_corpus, run_id,
+            "Purged %d legacy untracked %s chunk row(s) superseded by reconcile run "
+            "%s (reconciled %d tracked chunk(s))",
+            removed, source_corpus, run_id, reconciled_count,
         )
     return removed
 
@@ -429,9 +486,23 @@ async def run_source(
         summary.docs_purged += await _retention_sweep(
             db, adapter.source_corpus, adapter.retention_months, now
         )
-    #    f. One-time legacy (NULL source_id) sweep on a full reconcile.
+    #    f. One-time legacy (NULL source_id) sweep on a full reconcile, gated by a
+    #       proportionality check so a partial first-run fetch can't silently shrink
+    #       the live corpus.
     if mode is IngestionMode.RECONCILE:
-        await _purge_legacy_untracked(db, adapter.source_corpus, run_id)
+        try:
+            await _purge_legacy_untracked(db, adapter.source_corpus, run_id)
+        except LegacyPurgeShrinkError as exc:
+            logger.error(
+                "Legacy-purge shrink guard tripped for %s: %s. Rolling back — the "
+                "legacy corpus is preserved.",
+                adapter.source_corpus, exc,
+            )
+            summary.status = "aborted_legacy_purge"
+            summary.error = str(exc)
+            await db.rollback()
+            await _record_run(db, summary)
+            return summary
 
     # 8. Commit everything + record the successful run in the same transaction.
     summary.status = "success"

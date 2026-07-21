@@ -11,6 +11,7 @@ NO PHI. Public federal data only.
 """
 
 from app.ingestion.reconciler import (
+    LegacyPurgeShrinkError,
     MassPurgeError,
     RunSummary,
     SystemicFetchError,
@@ -32,4 +33,5 @@ __all__ = [
     "run_source",
     "SystemicFetchError",
     "MassPurgeError",
+    "LegacyPurgeShrinkError",
 ]

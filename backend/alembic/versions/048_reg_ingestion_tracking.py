@@ -9,16 +9,16 @@ These are PUBLIC federal-regulation tables — NO tenant RLS, NO PHI — so the
 FORCE-ROW-LEVEL-SECURITY silent-noop migration gotcha does not apply. This is
 DDL only (no tenant DML) regardless.
 
-Revision ID: 047
-Revises: 046
+Revision ID: 048
+Revises: 047
 """
 
 import sqlalchemy as sa
 
 from alembic import op
 
-revision = "047"
-down_revision = "046"
+revision = "048"
+down_revision = "047"
 
 
 def upgrade() -> None:

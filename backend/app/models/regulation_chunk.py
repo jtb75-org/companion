@@ -56,7 +56,7 @@ class RegulationChunk(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-    # ── Reconcile ingestion (Phase A, migration 047) ──────────────────────────
+    # ── Reconcile ingestion (Phase A, migration 048) ──────────────────────────
     # Stable per-source identity + change detection. All nullable/additive; the
     # answer/retrieval path never reads these — they drive the ingestion worker's
     # new/changed/unchanged/absent diff only. Every chunk row of one source doc

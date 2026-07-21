@@ -128,6 +128,32 @@ async def _seed(
         await s.commit()
 
 
+async def _seed_legacy(citation: str, body: str, *, corpus: str = "eCFR") -> None:
+    """Insert one pre-reconcile UNTRACKED row (NULL source_id / content_hash), as
+    prod holds today before the first reconcile run."""
+    async with db_module.async_session_factory() as s:
+        await s.execute(
+            text(
+                "INSERT INTO disability_reg_chunks "
+                "(id, jurisdiction, source_corpus, source_url, citation, program, "
+                " text_content, token_count, effective_date) "
+                "VALUES (:id, :jur, :corpus, :url, :cit, :prog, :txt, :tok, :eff)"
+            ),
+            {
+                "id": str(uuid.uuid4()),
+                "jur": "US_Federal",
+                "corpus": corpus,
+                "url": "https://example.gov/reg",
+                "cit": citation,
+                "prog": "SSDI",
+                "txt": body,
+                "tok": len(body) // 4,
+                "eff": datetime.now(UTC),
+            },
+        )
+        await s.commit()
+
+
 async def _rows(corpus: str) -> list:
     async with db_module.async_session_factory() as s:
         res = await s.execute(
@@ -427,3 +453,50 @@ async def test_reconcile_sweeps_legacy_untracked_rows(monkeypatch):
     assert len(rows) == 1
     assert rows[0].source_id == "20 CFR § 404.1"
     assert rows[0].text_content == "fresh tracked body"
+
+
+async def test_legacy_sweep_aborts_on_disproportionate_shrink(monkeypatch):
+    """FIRST-RUN corpus-shrink guard: a legacy corpus of N with a run that reconciles
+    FAR fewer than N must NOT purge the legacy rows (a partial fetch would otherwise
+    silently replace ~1,600 chunks with a handful). The whole run aborts; legacy rows
+    are preserved. The mass-purge breaker is blind here (empty tracked index)."""
+    _count_embed(monkeypatch)
+    for i in range(10):  # legacy corpus of 10 untracked chunks
+        await _seed_legacy(f"20 CFR § 404.{i}", f"legacy body {i}")
+
+    # A thin fetch producing only 2 tracked docs: 2 / 10 = 20% retained, below the
+    # 70% floor → the legacy sweep must abort the run.
+    adapter = FakeAdapter([
+        _doc("20 CFR § 404.0", "fresh body 0", citation="20 CFR § 404.0"),
+        _doc("20 CFR § 404.1", "fresh body 1", citation="20 CFR § 404.1"),
+    ])
+    async with db_module.async_session_factory() as db:
+        summary = await run_source(db, adapter, IngestionMode.RECONCILE)
+
+    assert summary.status == "aborted_legacy_purge"
+    assert summary.error
+    rows = await _rows("eCFR")
+    # Rolled back: the 10 legacy rows survive intact, no tracked rows were committed.
+    assert len(rows) == 10
+    assert all(r.source_id is None for r in rows)
+
+
+async def test_legacy_sweep_proceeds_on_comparable_count(monkeypatch):
+    """The legitimate first-run migration: a full re-fetch producing a comparable count
+    DOES sweep the legacy rows and leaves only the tracked corpus."""
+    _count_embed(monkeypatch)
+    for i in range(10):  # legacy corpus of 10 untracked chunks
+        await _seed_legacy(f"20 CFR § 404.{i}", f"legacy body {i}")
+
+    # A full fetch producing 10 tracked docs: 10 / 10 = 100% ≥ 70% floor → sweep proceeds.
+    adapter = FakeAdapter([
+        _doc(f"20 CFR § 404.{i}", f"fresh body {i}", citation=f"20 CFR § 404.{i}")
+        for i in range(10)
+    ])
+    async with db_module.async_session_factory() as db:
+        summary = await run_source(db, adapter, IngestionMode.RECONCILE)
+
+    assert summary.status == "success"
+    rows = await _rows("eCFR")
+    assert len(rows) == 10
+    assert all(r.source_id is not None for r in rows)  # only tracked rows remain

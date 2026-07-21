@@ -36,13 +36,17 @@ class ECFRAdapter(Adapter):
         self,
         parts: list[int] | None = None,
         *,
-        min_expected_docs: int = 50,
+        min_expected_docs: int = 300,
         timeout: float = 60.0,
     ) -> None:
         # 404 = SSDI (Title II), 416 = SSI (Title XVI).
         self.parts = parts or [404, 416]
-        # A healthy Title 20 pull is hundreds of sections; anything far below this
-        # is a broken fetch and must not be allowed to purge (see reconciler).
+        # A healthy Title 20 Part 404 + 416 pull is several HUNDRED sections (the
+        # prod corpus is ~1,623 sub-chunks across the two parts). A pull far below
+        # this is a broken/partial fetch and must not be allowed to purge — the
+        # systemic-fetch guard aborts the run instead (see reconciler). This floor
+        # is conservative and TUNABLE: raise it toward the real observed
+        # section-count once the first full ingest is measured.
         self.min_expected_docs = min_expected_docs
         self._timeout = timeout
 
