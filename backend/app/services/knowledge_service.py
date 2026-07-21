@@ -412,6 +412,35 @@ async def has_pgvector(db: AsyncSession) -> bool:
     return _has_vector_extension
 
 
+_has_pg_search_extension = None
+
+
+async def has_pg_search(db: AsyncSession) -> bool:
+    """Check whether the pg_search BM25 extension is INSTALLED in this database.
+
+    Unlike :func:`has_pgvector` (which checks *availability*), this checks that the
+    extension is actually created — the hybrid BM25 leg needs the extension present
+    AND the BM25 index built (migration 047). We check ``pg_extension`` (installed),
+    not ``pg_available_extensions`` (installable): a plain-Postgres CI/test DB has
+    neither, and a ParadeDB that has not yet run migration 047 has the extension
+    available but not installed. Either way the caller falls back to vector-only.
+
+    The actual BM25 query is still wrapped in its own try/except at the call site,
+    so an installed-extension-but-missing-index state (or any pg_search runtime
+    error) also degrades to vector-only rather than surfacing a 500.
+    """
+    global _has_pg_search_extension
+    if _has_pg_search_extension is None:
+        try:
+            res = await db.execute(
+                text("SELECT 1 FROM pg_extension WHERE extname = 'pg_search'")
+            )
+            _has_pg_search_extension = res.scalar() is not None
+        except Exception:
+            _has_pg_search_extension = False
+    return _has_pg_search_extension
+
+
 # ── Ingestion Service ─────────────────────────────────────────────────────────
 
 async def trigger_ecfr_ingestion(db: AsyncSession, parts: list[int] | None = None) -> int:
@@ -729,13 +758,187 @@ async def trigger_federal_register_ingestion(db: AsyncSession) -> int:
 
 
 # ── Search & Answer Generation ────────────────────────────────────────────────
+#
+# Retrieval is HYBRID: a lexical BM25 leg (ParadeDB pg_search) and a semantic vector
+# leg (pgvector cosine) are run independently, then fused with Reciprocal Rank Fusion
+# (RRF). Pure vector search is phrasing-sensitive — e.g. "What is the five-step
+# evaluation?" retrieved only tangential sections and the model DECLINED, even though
+# the answer lives at 20 CFR § 404.1520, because the exact chunk was not in the vector
+# top-k. A BM25 leg matches the "five-step" tokens / the citation directly, and RRF
+# lifts a chunk that either leg ranks highly into the fused top-k. See migration 047.
+
+# Per-leg candidate pool. Each leg retrieves this many rows; RRF then fuses the two
+# lists down to the caller's ``limit``. A pool wider than ``limit`` lets a chunk that
+# one leg ranks (say) 8th still win a top slot when the other leg also ranks it, which
+# is where the hybrid signal comes from.
+_CANDIDATE_POOL = 20
+
+# The conservative cosine floor for the SEMANTIC leg only. It preserves the prior
+# vector-search behaviour (weakly-similar chunks never entered the semantic candidate
+# set) WITHOUT gating the lexical leg — the whole point is that the correct chunk can
+# have a LOW cosine (that is why vector-only missed it) yet be an obvious lexical
+# match, so BM25 hits are never dropped on cosine.
+_VECTOR_SIM_FLOOR = 0.3
+
+# RRF constant. k=60 is the canonical value from the original RRF paper; it damps the
+# contribution of any single leg's top ranks so no one leg dominates, and needs no
+# score normalization (it fuses RANKS, not raw/incomparable BM25-vs-cosine scores).
+_RRF_K = 60
+
+
+def reciprocal_rank_fusion(
+    ranked_lists: list[list[Any]], *, k: int = _RRF_K, limit: int | None = None
+) -> list[Any]:
+    """Fuse several ranked lists of keys into one, by Reciprocal Rank Fusion.
+
+    ``score(key) = Σ_i 1 / (k + rank_i(key))`` over every list ``i`` the key appears
+    in, where ``rank`` is 1-based. Keys are returned in descending fused score. Ties
+    break by first appearance across the input lists, so the fusion is deterministic.
+
+    RRF needs no score normalization — it consumes only RANKS — which is exactly why it
+    is robust for fusing a BM25 leg and a cosine leg whose raw scores are not
+    comparable. Duplicate keys within a single list are scored at their FIRST (best)
+    rank in that list.
+    """
+    scores: dict[Any, float] = {}
+    first_seen: dict[Any, int] = {}
+    seq = 0
+    for ranked in ranked_lists:
+        seen_in_list: set[Any] = set()
+        for rank, key in enumerate(ranked, start=1):
+            if key in seen_in_list:
+                # Only the best rank within a given list contributes.
+                continue
+            seen_in_list.add(key)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+            if key not in first_seen:
+                first_seen[key] = seq
+                seq += 1
+
+    ordered = sorted(scores.keys(), key=lambda key: (-scores[key], first_seen[key]))
+    if limit is not None:
+        ordered = ordered[:limit]
+    return ordered
+
+
+def _row_to_chunk(r: Any) -> dict[str, Any]:
+    """Map a retrieval row to the chunk dict shape ``generate_rag_answer`` consumes.
+
+    ``similarity`` is kept as the cosine similarity (0..1) for every chunk regardless
+    of which leg surfaced it — BM25-surfaced rows still carry a real cosine value
+    (computed in the BM25 SQL) so the field's meaning is unchanged. A NULL cosine
+    (only possible for an embedding-less row, which the vector path does not produce)
+    coalesces to 0.0 so the response model's ``similarity: float`` never sees None.
+    """
+    sim = getattr(r, "similarity", None)
+    return {
+        "id": r.id,
+        "jurisdiction": r.jurisdiction,
+        "source_corpus": r.source_corpus,
+        "source_url": r.source_url,
+        "citation": r.citation,
+        "program": r.program,
+        "text_content": r.text_content,
+        "effective_date": r.effective_date,
+        "similarity": float(sim) if sim is not None else 0.0,
+    }
+
+
+_SELECT_COLS = (
+    "id, jurisdiction, source_corpus, source_url, citation, program, "
+    "text_content, effective_date"
+)
+
+_PROGRAM_FILTER_SQL = (
+    "(CAST(:program_filter AS VARCHAR) IS NULL "
+    " OR program = CAST(:program_filter AS VARCHAR) "
+    " OR program = 'Both')"
+)
+
+
+async def _vector_search(
+    db: AsyncSession, query_vec_str: str, program_filter: str | None, pool: int
+) -> list[Any]:
+    """Semantic leg: pgvector cosine top-``pool``, floored at ``_VECTOR_SIM_FLOOR``.
+
+    The floor preserves the prior conservative semantic behaviour for THIS leg; the
+    lexical leg is unfiltered so a low-cosine-but-lexically-obvious chunk still enters
+    the fusion via BM25.
+    """
+    sql = f"""
+        SELECT {_SELECT_COLS}, 1 - (embedding <=> :query_vec) AS similarity
+        FROM disability_reg_chunks
+        WHERE {_PROGRAM_FILTER_SQL}
+        ORDER BY embedding <=> :query_vec
+        LIMIT :pool
+    """
+    res = await db.execute(
+        text(sql),
+        {"query_vec": query_vec_str, "program_filter": program_filter, "pool": pool},
+    )
+    rows = res.fetchall()
+    return [
+        r for r in rows
+        if r.similarity is not None and float(r.similarity) >= _VECTOR_SIM_FLOOR
+    ]
+
+
+async def _bm25_search(
+    db: AsyncSession,
+    query_text: str,
+    query_vec_str: str,
+    program_filter: str | None,
+    pool: int,
+) -> list[Any]:
+    """Lexical leg: ParadeDB pg_search BM25 top-``pool``, ranked by BM25 score.
+
+    Matches the query tokens against BOTH the regulation body (``text_content``) and
+    the ``citation`` label, so "five-step"/"five step" and citation-style queries
+    ("404.1520") both land. ``paradedb.match`` tokenizes the bound query VALUE (no
+    Tantivy query-string is built from user input, so there is no query-syntax
+    injection surface). Each row also carries its cosine ``similarity`` so the fused
+    output keeps a uniform, meaningful ``similarity`` field.
+
+    Uses the pg_search 0.23.1 API: the ``@@@`` operator against the ``id`` key field,
+    ``paradedb.boolean(should => searchqueryinput[])`` to OR the two field matches,
+    and ``paradedb.score(id)`` for the BM25 rank.
+    """
+    sql = f"""
+        SELECT {_SELECT_COLS},
+               1 - (embedding <=> :query_vec) AS similarity,
+               paradedb.score(id) AS bm25_score
+        FROM disability_reg_chunks
+        WHERE id @@@ paradedb.boolean(
+                should => ARRAY[
+                    paradedb.match('text_content', :query_text),
+                    paradedb.match('citation', :query_text)
+                ]::searchqueryinput[]
+            )
+          AND {_PROGRAM_FILTER_SQL}
+        ORDER BY bm25_score DESC
+        LIMIT :pool
+    """
+    res = await db.execute(
+        text(sql),
+        {
+            "query_text": query_text,
+            "query_vec": query_vec_str,
+            "program_filter": program_filter,
+            "pool": pool,
+        },
+    )
+    return list(res.fetchall())
+
 
 async def search_regulations(
     db: AsyncSession, query_text: str, program_filter: str | None = None, limit: int = 5
 ) -> list[dict[str, Any]]:
-    """Query the regulation chunks index using pgvector cosine similarity.
+    """HYBRID retrieval over the regulation corpus: BM25 (lexical) + pgvector (semantic)
+    fused with Reciprocal Rank Fusion.
 
-    Falls back to a keyword ILIKE text search if pgvector is not available in the DB context.
+    Falls back to a keyword ILIKE search when pgvector is absent (e.g. a plain-Postgres
+    test DB), and to VECTOR-ONLY when pg_search/BM25 is unavailable at runtime — never a
+    500. The returned shape is unchanged (``generate_rag_answer`` consumes it as-is).
     """
     has_vector = await has_pgvector(db)
 
@@ -778,59 +981,51 @@ async def search_regulations(
                 "limit": limit
             }
         )
-    else:
-        query_embedding = await embed_query(query_text)
-        query_vec_str = str(query_embedding)
+        return [_row_to_chunk(r) for r in res.fetchall()]
 
-        sql_text = """
-            SELECT
-                id,
-                jurisdiction,
-                source_corpus,
-                source_url,
-                citation,
-                program,
-                text_content,
-                effective_date,
-                1 - (embedding <=> :query_vec) AS similarity
-            FROM disability_reg_chunks
-            WHERE (CAST(:program_filter AS VARCHAR) IS NULL
-                   OR program = CAST(:program_filter AS VARCHAR)
-                   OR program = 'Both')
-            ORDER BY embedding <=> :query_vec
-            LIMIT :limit
-        """
-        res = await db.execute(
-            text(sql_text),
-            {
-                "query_vec": query_vec_str,
-                "program_filter": program_filter,
-                "limit": limit
-            }
+    # ── Hybrid path (pgvector present) ────────────────────────────────────────
+    query_embedding = await embed_query(query_text)
+    query_vec_str = str(query_embedding)
+
+    # Semantic leg (always runs when pgvector is present).
+    vector_rows = await _vector_search(db, query_vec_str, program_filter, _CANDIDATE_POOL)
+
+    # Lexical leg (best-effort). If pg_search/BM25 is unavailable or errors at runtime,
+    # degrade to vector-only rather than 500 — the whole answer path stays up.
+    bm25_rows: list[Any] = []
+    if await has_pg_search(db):
+        try:
+            bm25_rows = await _bm25_search(
+                db, query_text, query_vec_str, program_filter, _CANDIDATE_POOL
+            )
+        except Exception:
+            # Roll back the aborted BM25 statement so the shared session stays usable
+            # for the rest of the request, then continue vector-only.
+            await db.rollback()
+            logger.exception(
+                "BM25 lexical leg failed; falling back to vector-only retrieval"
+            )
+            bm25_rows = []
+    else:
+        logger.info(
+            "pg_search/BM25 index unavailable; using vector-only retrieval "
+            "(deploy migration 047 to enable the hybrid lexical leg)"
         )
 
-    rows = res.fetchall()
-    results = []
+    # Index every retrieved row by id so the fused order can be rehydrated to chunks.
+    row_by_id: dict[Any, Any] = {}
+    for r in vector_rows:
+        row_by_id.setdefault(r.id, r)
+    for r in bm25_rows:
+        row_by_id.setdefault(r.id, r)
 
-    for r in rows:
-        sim = float(r.similarity)
-        # Apply a conservative relevance threshold
-        if sim < 0.3:
-            continue
-
-        results.append({
-            "id": r.id,
-            "jurisdiction": r.jurisdiction,
-            "source_corpus": r.source_corpus,
-            "source_url": r.source_url,
-            "citation": r.citation,
-            "program": r.program,
-            "text_content": r.text_content,
-            "effective_date": r.effective_date,
-            "similarity": sim
-        })
-
-    return results
+    # Fuse the two ranked id-lists with RRF and rehydrate the fused top-``limit``.
+    fused_ids = reciprocal_rank_fusion(
+        [[r.id for r in vector_rows], [r.id for r in bm25_rows]],
+        k=_RRF_K,
+        limit=limit,
+    )
+    return [_row_to_chunk(row_by_id[i]) for i in fused_ids]
 
 
 def _compose_answer(provenance_line: str, body: str) -> str:
@@ -847,7 +1042,8 @@ def _compose_answer(provenance_line: str, body: str) -> str:
 async def generate_rag_answer(
     db: AsyncSession, query_text: str, program_filter: str | None = None, limit: int = 5
 ) -> dict[str, Any]:
-    """Perform regulation vector retrieval and pass standard chunks as grounding to the LLM.
+    """Perform hybrid regulation retrieval (BM25 + vector, RRF-fused) and pass the
+    grounded chunks to the LLM.
 
     Safety-critical output rules (not-legal-advice disclaimer, provenance/as-of line, and
     the presence of citations) are enforced SERVER-SIDE in code — never delegated to the
