@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.conversation.llm import get_llm_client
+from app.conversation.llm import get_knowledge_llm_client
 from app.db.redis import get_redis
 from app.models.regulation_chunk import RegulationChunk
 from app.pipeline.embedding_client import embed_documents, embed_query
@@ -27,6 +27,37 @@ NOT_LEGAL_ADVICE_DISCLAIMER = (
     "This is not legal, financial, or professional advice. Always verify with the "
     "Social Security Administration or a qualified professional."
 )
+
+# Deterministic, on-contract refusal for this surface. Used in TWO places: (1) when
+# retrieval returns no chunk (nothing to cite → do not call the LLM), and (2) when the
+# LLM call fails or is cut (blocked/empty/gateway error) so we must NOT ship the model's
+# output. Reusing one string keeps a degraded answer congruent with a genuine no-grounding
+# refusal — and crucially avoids echoing the shared CONVERSATIONAL fallback ("I heard you
+# say: ...") on this legal/as-of surface, which guidelines §8.5 forbids and which reads
+# incongruously wrapped in the not-legal-advice disclaimer.
+_GROUNDED_REFUSAL = (
+    "I cannot find the answer in the official retrieved regulation chunks. "
+    "Please rephrase your question, or contact the Social Security Administration "
+    "or your legal advocate for help."
+)
+
+# Every LLMClient._fallback_response (Gemini, OpenAI/gateway, Claude) begins with this
+# marker when the underlying generation failed or was blocked. Detecting it lets the
+# reg-helper substitute the grounded refusal above, provider-agnostically, instead of
+# serving the conversational fallback that echoes the user's query.
+_CONVERSATIONAL_FALLBACK_MARKER = "I heard you say:"
+
+
+def _is_unusable_answer_body(body: str | None) -> bool:
+    """True if the model body is empty or the shared conversational fallback.
+
+    The reg-helper must not ship either: an empty/None body has no grounded content, and
+    the "I heard you say: ..." fallback echoes the query and is off-contract here. Both
+    degrade to the deterministic grounded refusal. Provider-agnostic — the marker is emitted
+    by every provider's ``_fallback_response``."""
+    if not body or not body.strip():
+        return True
+    return body.strip().startswith(_CONVERSATIONAL_FALLBACK_MARKER)
 
 # ── Embedding budget + resilience ─────────────────────────────────────────────
 #
@@ -1142,14 +1173,9 @@ async def generate_rag_answer(
     #    ungrounded answer would have no citation and risks fabrication); return a
     #    deterministic refusal that still carries provenance + disclaimer.
     if not chunks:
-        refusal = (
-            "I cannot find the answer in the official retrieved regulation chunks. "
-            "Please rephrase your question, or contact the Social Security Administration "
-            "or your legal advocate for help."
-        )
         return {
             "query": query_text,
-            "answer": _compose_answer(provenance_line, refusal),
+            "answer": _compose_answer(provenance_line, _GROUNDED_REFUSAL),
             "provenance": provenance_line,
             "disclaimer": NOT_LEGAL_ADVICE_DISCLAIMER,
             "citations": [],
@@ -1238,18 +1264,46 @@ async def generate_rag_answer(
     #    (verified: 800 -> MAX_TOKENS/truncated, 3072 -> STOP/complete). The
     #    GeminiClient also now guards finish_reason so a blocked/partial response
     #    is not served as a fragment.
-    llm = get_llm_client()
+    # Knowledge-scoped selector (NOT the global member-path get_llm_client): this
+    # public reg-helper runs on whichever provider settings.knowledge_llm_provider
+    # names — Gemini by default, or self-hosted qwen2.5 via the gateway when flipped.
+    # The answer contract below (provenance + disclaimer + structural citations) is
+    # enforced in code regardless of which provider this returns.
+    llm = get_knowledge_llm_client()
     answer_body = await llm.generate(
         system_prompt=system_prompt,
         messages=messages,
         max_tokens=3072
     )
 
-    # 8. Deterministically stitch provenance + disclaimer around the model body. Even if
-    #    the model returned empty/partial text, the answer still carries both.
+    # 8. Degrade a failed/blocked/empty generation to the grounded refusal. A
+    #    GeminiClient SAFETY/RECITATION fallback, a gateway/Qwen error, or an empty body
+    #    all surface as either "" or the shared conversational fallback ("I heard you
+    #    say: ..."). Neither is acceptable on this legal/as-of surface: the conversational
+    #    fallback echoes the user's query and is off-contract (§8.5). Substitute the same
+    #    deterministic refusal the no-chunks path uses. Provider-agnostic — applies to
+    #    Gemini and the Qwen/gateway path alike. Structural citations still ship (the
+    #    chunks were genuinely retrieved) but grounded=False signals no usable answer.
+    if _is_unusable_answer_body(answer_body):
+        logger.warning(
+            "Reg-helper generation was empty or a fallback; serving the grounded refusal "
+            "instead of the conversational fallback."
+        )
+        return {
+            "query": query_text,
+            "answer": _compose_answer(provenance_line, _GROUNDED_REFUSAL),
+            "provenance": provenance_line,
+            "disclaimer": NOT_LEGAL_ADVICE_DISCLAIMER,
+            "citations": citations,
+            "grounded": False,
+            "sources": chunks,
+        }
+
+    # 9. Deterministically stitch provenance + disclaimer around the model body. Even if
+    #    the model returned partial text, the answer still carries both.
     return {
         "query": query_text,
-        "answer": _compose_answer(provenance_line, answer_body or ""),
+        "answer": _compose_answer(provenance_line, answer_body),
         "provenance": provenance_line,
         "disclaimer": NOT_LEGAL_ADVICE_DISCLAIMER,
         "citations": citations,
