@@ -237,11 +237,19 @@ def _parse_listing_appendix(
             cur_sys = sys
             continue
 
-        # An individual listing: its body-system prefix must match the section we
-        # are inside (guards against formula/reference numbers like "9.57 ×" that
-        # appear mid-criteria). Reserved slots carry no retrievable content.
-        if cur_sys is not None and sys == cur_sys and "[Reserved]" not in block:
+        # A same-body-system listing header (its prefix matches the section we are
+        # inside — this guards against formula/reference numbers like "9.57 ×" that
+        # appear mid-criteria and belong to the open listing's body).
+        if cur_sys is not None and sys == cur_sys:
+            # Close the previous listing regardless: a new listing header ends it,
+            # and a [Reserved] slot marks the boundary of the previous listing too.
             _flush()
+            if "[Reserved]" in block:
+                # Reserved slots carry no criteria — do NOT open a doc for them and,
+                # critically, do NOT let the header fall through and get appended to
+                # the previously-open listing (that would bolt "12.03 [Reserved]"
+                # onto 12.02's text). Skip the block entirely.
+                continue
             open_doc = {
                 "kind": "listing",
                 "part": part_letter,

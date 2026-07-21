@@ -48,6 +48,18 @@ def test_reserved_listings_are_skipped(docs):
     assert "12.03" not in _by_section(docs)
 
 
+def test_reserved_marker_never_leaks_into_any_doc(docs):
+    """A reserved header must not become its own doc AND must not be appended to the
+    previously-open listing (e.g. "12.03 [Reserved]" bolted onto 12.02's text)."""
+    for d in docs:
+        assert "[Reserved]" not in d.text, f"reserved marker leaked into {d.source_id}"
+        assert "12.03" not in d.text, f"12.03 contaminated {d.source_id}"
+    # The listing immediately before the reserved slot stays clean.
+    assert _by_section(docs)["12.02"].text.rstrip().endswith(
+        "areas of mental functioning."
+    )
+
+
 def test_no_spurious_docs_and_no_empty_text(docs):
     """Exactly the expected doc set; no empty-text docs; the TOC rows + editorial
     banner + provenance box are all excluded."""
