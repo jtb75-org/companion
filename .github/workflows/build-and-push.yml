@@ -182,13 +182,22 @@ jobs:
       - name: Build landing bundle (outside Docker)
         # Static marketing bundle (landing/dist). Built outside the Dockerfile so
         # the landing image stays single-stage (kaniko + multi-stage = registry
-        # push-auth bug), exactly like the web bundle above. No VITE_* / secrets —
-        # the landing page is public, unauthed, and touches no PHI. Only built
-        # when landing/ changed (see Detect changed paths).
+        # push-auth bug), exactly like the web bundle above. The landing page is
+        # public, unauthed, and touches no PHI. Only built when landing/ changed
+        # (see Detect changed paths).
+        #
+        # LAUNCH SWITCH: VITE_KNOWLEDGE_API_BASE points the public benefits helper
+        # at the live public endpoint (POST /public/knowledge/ask, #151). Per
+        # selectClient() in landing/src/lib/knowledgeApi.ts, a non-empty API base
+        # selects HttpKnowledgeApi(base) — the widget then makes REAL, anonymous
+        # LLM calls cross-origin to api.mydailydignity.com. Unsetting this reverts
+        # to the fail-safe Mock. DO NOT merge until the launch prerequisites in the
+        # PR body (Bot Fight Mode ON, CORS www PR deployed, owner go) are all true.
         if: steps.changes.outputs.landing == 'true'
         working-directory: landing
         env:
           COREPACK_ENABLE_STRICT: "0"
+          VITE_KNOWLEDGE_API_BASE: https://api.mydailydignity.com
         run: |
           npm install
           npm run build
