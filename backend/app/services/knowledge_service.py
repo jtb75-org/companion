@@ -1193,15 +1193,26 @@ async def generate_rag_answer(
         "chunks. Format citations inline or at the end of sentences.\n"
         "3. Do NOT add a provenance/as-of line or a disclaimer — those are added "
         "automatically. Write only the grounded, cited answer body.\n"
-        "4. Refuse and redirect: If the user asks about:\n"
-        "   - State-specific regulations or state-run eligibility rules (such as state Medicaid "
-        "or specific county support programs).\n"
-        "   - Personal eligibility determinations (e.g. \"Do I qualify?\", \"Will I get SSI?\").\n"
-        "   - Legal, medical, or clinical recommendations (e.g. \"Should I appeal?\", "
-        "\"What doctor should I see?\").\n"
-        "   Then politely refuse to answer, explaining that you cannot answer state-specific, "
-        "eligibility, or professional recommendation questions, and redirect them to contact "
-        "the Social Security Administration, their local caseworker, or their legal advocate.\n"
+        "4. Scope — answer vs. refuse. Distinguish FACTUAL questions about how the "
+        "federal disability process works (IN SCOPE) from PERSONAL or state-specific "
+        "questions (refuse):\n"
+        "   - IN SCOPE — answer from the chunks, with citations: how a process works and "
+        "what the rules require, including the STEPS TO APPEAL a denial (reconsideration, "
+        "ALJ hearing, Appeals Council, federal court review), what the five-step evaluation "
+        "is, how substantial gainful activity is defined, filing deadlines, and continuing "
+        "reviews. Questions like \"What can I do to appeal?\" or \"How does the appeals "
+        "process work?\" ARE in scope — describe the process the regulations lay out. Do "
+        "NOT refuse a general how-does-this-work question just because it contains the word "
+        "\"appeal\" or \"qualify.\"\n"
+        "   - REFUSE and redirect ONLY for: (a) state-specific or state-run program rules "
+        "(state Medicaid, county programs); (b) a PERSONAL determination or prediction about "
+        "the individual's own case (e.g. \"Do I qualify?\", \"Will I get SSI?\", \"Should I "
+        "appeal MY denial?\"); or (c) individualized legal, medical, or clinical advice. For "
+        "these, politely explain you cannot give personalized or state-specific answers and "
+        "redirect them to the Social Security Administration, their local caseworker, or "
+        "their legal advocate. When a question mixes the two (a personal framing of a general "
+        "process question), ANSWER the general process from the regulations and add the "
+        "redirect for the personalized part rather than refusing outright.\n"
         "5. Formatting: Write in clean, readable markdown. When the answer is a sequence of "
         "steps or a set of distinct items, format them as a proper markdown list — put EACH "
         "item on its OWN line as a numbered (\"1.\") or bulleted (\"-\") list item, never as an "
@@ -1218,11 +1229,20 @@ async def generate_rag_answer(
     ]
 
     # 7. Call LLM Client for the answer BODY only.
+    #    max_tokens must comfortably exceed the answer length because the Gemini
+    #    generation model is a THINKING model: its internal reasoning tokens are
+    #    billed against max_output_tokens. At 800 the reasoning consumed almost
+    #    the whole budget and the visible answer was truncated mid-sentence
+    #    (finish_reason=MAX_TOKENS) — e.g. "...However, if you are appealing" cut
+    #    off. 3072 leaves ample room for reasoning + a complete cited answer
+    #    (verified: 800 -> MAX_TOKENS/truncated, 3072 -> STOP/complete). The
+    #    GeminiClient also now guards finish_reason so a blocked/partial response
+    #    is not served as a fragment.
     llm = get_llm_client()
     answer_body = await llm.generate(
         system_prompt=system_prompt,
         messages=messages,
-        max_tokens=800
+        max_tokens=3072
     )
 
     # 8. Deterministically stitch provenance + disclaimer around the model body. Even if

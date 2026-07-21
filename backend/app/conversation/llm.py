@@ -152,6 +152,38 @@ class GeminiClient(LLMClient):
                 contents,
                 generation_config=GenerationConfig(**gen_kwargs),
             )
+            # Inspect finish_reason BEFORE trusting the text. Vertex silently
+            # returns whatever partial text it produced when a generation is cut
+            # short, so `response.text` on a truncated/blocked response yields a
+            # mid-sentence fragment with no error.
+            candidate = response.candidates[0] if response.candidates else None
+            finish_name = getattr(
+                getattr(candidate, "finish_reason", None), "name", ""
+            )
+            # Content-blocked / recitation-cut responses must NOT be served as a
+            # partial fragment — fall back cleanly instead.
+            if finish_name in {
+                "SAFETY",
+                "RECITATION",
+                "BLOCKLIST",
+                "PROHIBITED_CONTENT",
+                "SPII",
+            }:
+                logger.warning(
+                    "Gemini generation terminated by %s; returning fallback "
+                    "instead of a partial response.",
+                    finish_name,
+                )
+                return self._fallback_response(messages)
+            # MAX_TOKENS => the answer was cut at the token budget. With the
+            # budgets callers now pass this should be rare; log it so a recurrence
+            # is visible (the fix is a larger budget or disabled thinking).
+            if finish_name == "MAX_TOKENS":
+                logger.warning(
+                    "Gemini generation hit MAX_TOKENS (max_output_tokens=%s); the "
+                    "answer may be truncated. Raise the budget or disable thinking.",
+                    max_tokens,
+                )
             # Try response.text first, fall back to extracting
             # from candidates if the model returned thinking
             # tokens but no direct text
