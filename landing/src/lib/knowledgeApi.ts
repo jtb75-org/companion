@@ -20,17 +20,20 @@
  *    returns member data / PHI. It answers general questions about public
  *    federal regulations only.
  *  - Every answer carries citations and a "not legal advice" disclaimer.
- *  - Server-returned `answer` text is RUNTIME data and MUST be rendered as plain
- *    text by the component — never via dangerouslySetInnerHTML.
+ *  - Server-returned `answer` text is RUNTIME data. The component renders it as
+ *    SAFE MARKDOWN (a React element tree — bold / lists / paragraphs), never via
+ *    dangerouslySetInnerHTML and never as raw-HTML passthrough. Any HTML the
+ *    model emits is escaped to inert literal text, not executed.
  */
 
 export interface BenefitsAnswer {
   /** The question this answer responds to (as asked). */
   question: string;
   /**
-   * Answer body split into paragraphs for layout. Each entry is PLAIN TEXT and
-   * MUST be rendered as a text node — the server returns runtime, untrusted-shape
-   * content, so no HTML is ever interpreted from here.
+   * Answer body split into blocks (on blank lines) for layout. Each entry is
+   * runtime, untrusted-shape text that may contain light markdown (bold, lists).
+   * It is rendered by the component's SAFE markdown renderer, which emits a React
+   * element tree only — no raw HTML is ever interpreted from here.
    */
   paragraphs: string[];
   /**

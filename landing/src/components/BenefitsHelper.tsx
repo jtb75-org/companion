@@ -6,6 +6,7 @@ import {
 } from '../lib/knowledgeApi';
 import { CREATE_ACCOUNT_URL } from '../lib/config';
 import { Arrow, CiteIcon } from './icons';
+import { MarkdownBlock } from './Markdown';
 
 /** Client-side cap mirroring the endpoint's request bound (a courtesy limit;
  *  the server is authoritative). */
@@ -21,9 +22,12 @@ const MAX_QUESTION_CHARS = 1000;
  * cookie) and then GATES with a sign-up invitation — we render that gate, never
  * a fabricated answer.
  *
- * Rendering rule: `answer` text, citations, provenance, and the disclaimer are
- * RUNTIME server data and are rendered as PLAIN TEXT nodes only. No
- * dangerouslySetInnerHTML on server content — ever.
+ * Rendering rule: `answer` text is RUNTIME server (LLM-generated) data. It is
+ * rendered as SAFE MARKDOWN via `MarkdownBlock`, which emits a React element
+ * tree only (bold / lists / paragraphs) and NEVER interprets raw HTML — there is
+ * no dangerouslySetInnerHTML and no HTML-string passthrough anywhere on this
+ * surface. Citations, provenance, and the disclaimer stay structured/plain text
+ * and render independently of markdown parsing (the disclaimer must always show).
  */
 export function BenefitsHelper() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
@@ -166,8 +170,9 @@ export function BenefitsHelper() {
               </div>
               <div className="a">
                 {answer.paragraphs.map((p, i) => (
-                  // Server-returned runtime text — rendered as a PLAIN TEXT node.
-                  <p key={i}>{p}</p>
+                  // Server-returned runtime text — rendered as SAFE markdown
+                  // (React element tree, no raw HTML, no dangerouslySetInnerHTML).
+                  <MarkdownBlock key={i} source={p} />
                 ))}
                 {answer.citations.length > 0 && (
                   <div className="cites">
