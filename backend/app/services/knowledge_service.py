@@ -786,6 +786,74 @@ _VECTOR_SIM_FLOOR = 0.3
 _RRF_K = 60
 
 
+# ── BM25 query normalization ──────────────────────────────────────────────────
+#
+# Typographic (curly/smart) punctuation in the user's question silently breaks the
+# BM25 lexical leg. The ParadeDB/Tantivy tokenizer that ``paradedb.match`` runs over
+# the query VALUE does not treat curly quotes (U+201C/U+201D/U+2018/U+2019) as token
+# separators the way it does straight ASCII ones, so a quoted term fuses the quote
+# into the token: the curly-quoted "five-step" tokenizes as `"five` / `step"` instead
+# of `five` / `step` and never matches the unquoted indexed terms.
+#
+# Confirmed live: the landing sample chip `What is the "five-step" evaluation?` typed
+# with U+201C/U+201D declined (it cited 416.1407/416.924/... — grounded but WRONG
+# chunks), while the identical PLAIN-ASCII question retrieved 20 CFR § 416.920 (the
+# actual five-step sequential-evaluation reg) and answered correctly. Users' keyboards
+# and autocorrect emit curly punctuation constantly, so this hits real traffic.
+#
+# We normalize ONLY the BM25 leg's query string here: map typographic punctuation to
+# ASCII, strip boundary quote characters so `"five-step"` → `five-step`, and collapse
+# whitespace. The mapping is intra-word safe — hyphens are preserved (so `five-step`
+# stays a matchable token) and an apostrophe INSIDE a word (`claimant's`) is kept; only
+# quotes wrapping a token are stripped. No words are dropped, so nothing meaningful is
+# lost. The vector leg keeps embedding the RAW query — embeddings are robust to
+# punctuation, so normalizing it would only add risk without benefit.
+
+# Typographic → ASCII fold applied before tokenization. Covers the smart quotes/dashes a
+# keyboard or autocorrect substitutes for their ASCII equivalents.
+_BM25_TYPOGRAPHIC_MAP = {
+    "“": '"',   # “ left double quotation mark
+    "”": '"',   # ” right double quotation mark
+    "„": '"',   # „ double low-9 quotation mark
+    "″": '"',   # ″ double prime
+    "‘": "'",   # ‘ left single quotation mark
+    "’": "'",   # ’ right single quotation mark / apostrophe
+    "‚": "'",   # ‚ single low-9 quotation mark
+    "′": "'",   # ′ prime
+    "–": "-",   # – en dash
+    "—": "-",   # — em dash
+    "…": " ",   # … horizontal ellipsis
+    " ": " ",   # non-breaking space
+}
+_BM25_TYPOGRAPHIC_TRANSLATION = str.maketrans(_BM25_TYPOGRAPHIC_MAP)
+
+# Quote characters stripped from a TOKEN'S BOUNDARY (leading/trailing) only. Stripping at
+# the boundary — not globally — is what keeps an intra-word apostrophe (`claimant's`)
+# intact while unwrapping a quoted term (`"five-step"` → `five-step`, `'appeal'` → `appeal`).
+_BM25_BOUNDARY_QUOTES = "\"'`"
+
+
+def _normalize_bm25_query(query_text: str) -> str:
+    """Normalize a user question for the BM25 (``paradedb.match``) leg only.
+
+    Folds typographic/curly punctuation to ASCII, strips quote characters wrapping a
+    token, and collapses whitespace, so autocorrected input tokenizes the same as
+    plain text. See the module note above: the curly-quoted `"five-step"` chip declined
+    (mangled tokens) while the plain form retrieved 20 CFR § 416.920 — this closes that
+    gap. Conservative by design: hyphens and intra-word apostrophes are preserved and no
+    words are dropped. The result is still passed as a BOUND parameter to
+    ``paradedb.match`` (no string interpolation), so there is no query-syntax injection
+    surface.
+    """
+    folded = query_text.translate(_BM25_TYPOGRAPHIC_TRANSLATION)
+    tokens = [
+        stripped
+        for token in folded.split()
+        if (stripped := token.strip(_BM25_BOUNDARY_QUOTES))
+    ]
+    return " ".join(tokens)
+
+
 def reciprocal_rank_fusion(
     ranked_lists: list[list[Any]], *, k: int = _RRF_K, limit: int | None = None
 ) -> list[Any]:
@@ -995,8 +1063,12 @@ async def search_regulations(
     bm25_rows: list[Any] = []
     if await has_pg_search(db):
         try:
+            # Normalize typographic punctuation for the LEXICAL leg only. Curly quotes
+            # otherwise fuse into tokens and break the match (see _normalize_bm25_query);
+            # the vector leg keeps the raw query since embeddings are punctuation-robust.
+            bm25_query = _normalize_bm25_query(query_text)
             bm25_rows = await _bm25_search(
-                db, query_text, query_vec_str, program_filter, _CANDIDATE_POOL
+                db, bm25_query, query_vec_str, program_filter, _CANDIDATE_POOL
             )
         except Exception:
             # Roll back the aborted BM25 statement so the shared session stays usable

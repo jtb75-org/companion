@@ -180,6 +180,64 @@ async def test_five_step_regression_vector_misses_hybrid_finds(monkeypatch):
 
 @pytest.mark.parametrize(
     "query",
+    [
+        # The EXACT landing sample chip, with U+201C / U+201D curly quotes — the live
+        # bug: this DECLINED (mangled BM25 tokens) while the plain form answered.
+        "What is the “five-step” evaluation?",
+        # The plain-ASCII control that already worked; both must now behave the same.
+        "What is the five-step evaluation?",
+    ],
+)
+async def test_curly_quote_five_step_surfaces_section(monkeypatch, query):
+    """ACCEPTANCE: the curly-quote chip AND its plain form both retrieve the five-step
+    sequential-evaluation regs (20 CFR § 416.920 / § 404.1520) in the top-k.
+
+    The target sections sit ORTHOGONAL to the query in embedding space (cosine 0.0,
+    below the semantic floor) so ONLY the BM25 lexical leg can rescue them — which is
+    exactly the leg that curly quotes used to break. Query-aligned distractors with no
+    "five-step" wording dominate the vector leg, mirroring the live decline where the
+    curly variant cited 416.1407/416.924/... instead of the correct section."""
+    query_vec = _unit_vec(0)
+    _patch_query_vec(monkeypatch, query_vec)
+
+    # The two real five-step sequential-evaluation regs (SSI 416.920, SSDI 404.1520).
+    await _insert(
+        citation="20 CFR § 416.920",
+        text_content=(
+            "We use a five-step sequential evaluation process to decide whether "
+            "you are disabled for SSI."
+        ),
+        embedding=_unit_vec(5),
+        program="SSI",
+    )
+    await _insert(
+        citation="20 CFR § 404.1520",
+        text_content=(
+            "We use a five-step sequential evaluation process to determine "
+            "whether you are disabled."
+        ),
+        embedding=_unit_vec(6),
+    )
+    # Query-aligned distractors (dominate the vector leg) with NO "five-step" wording —
+    # the exact tangential sections the curly variant wrongly cited in prod.
+    for cit, sect in [
+        ("20 CFR § 416.1407", "notice of reconsideration determinations"),
+        ("20 CFR § 416.924", "how we determine disability for a child"),
+        ("20 CFR § 404.967", "the Appeals Council review procedure"),
+    ]:
+        await _insert(citation=cit, text_content=sect, embedding=query_vec, program="SSI")
+
+    async with db_module.async_session_factory() as s:
+        results = await knowledge_service.search_regulations(s, query, None, limit=5)
+
+    cits = _citations(results)
+    assert "20 CFR § 416.920" in cits or "20 CFR § 404.1520" in cits, (
+        f"five-step regs missing from top-k for {query!r}: {cits}"
+    )
+
+
+@pytest.mark.parametrize(
+    "query",
     ["five step", "five-step sequential evaluation", "What is the five-step evaluation?"],
 )
 async def test_five_step_phrasings_all_surface_the_section(monkeypatch, query):
