@@ -1201,7 +1201,15 @@ async def generate_rag_answer(
         "\"What doctor should I see?\").\n"
         "   Then politely refuse to answer, explaining that you cannot answer state-specific, "
         "eligibility, or professional recommendation questions, and redirect them to contact "
-        "the Social Security Administration, their local caseworker, or their legal advocate.\n\n"
+        "the Social Security Administration, their local caseworker, or their legal advocate.\n"
+        "5. Formatting: Write in clean, readable markdown. When the answer is a sequence of "
+        "steps or a set of distinct items, format them as a proper markdown list — put EACH "
+        "item on its OWN line as a numbered (\"1.\") or bulleted (\"-\") list item, never as an "
+        "inline run-on, and leave a blank line between the list and any surrounding paragraphs. "
+        "Use \"**bold**\" for a short item label or header where it aids scanning. Keep ordinary "
+        "prose as plain paragraphs separated by blank lines. Favour light structure only — no "
+        "heavy headings and no padding; keep the answer warm, plain, and tight for a caregiver "
+        "or claimant to read.\n\n"
         f"Provided regulation chunks:\n{chunks_context}\n"
     )
 
