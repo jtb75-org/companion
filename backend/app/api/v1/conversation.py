@@ -491,10 +491,17 @@ async def send_message_stream(
 
     async def event_generator():
         full_response = ""
+        cut_short: dict | None = None
         try:
             async for token in llm.generate_stream(
                 system_prompt, llm_messages, max_tokens=1024
             ):
+                # A dict chunk is a terminal meta-event (e.g. a mid-answer cut),
+                # NOT answer text — capture it for the done event, don't forward
+                # it as a token or fold it into full_response.
+                if isinstance(token, dict):
+                    cut_short = token
+                    continue
                 full_response += token
                 event = json.dumps({"token": token})
                 yield f"data: {event}\n\n"
@@ -562,9 +569,13 @@ async def send_message_stream(
                 logger.error("Failed to persist streamed chat: %s", str(e), exc_info=True)
                 await db.rollback()
 
-            done_event = json.dumps(
-                {"done": True, "full_response": full_response}
-            )
+            done_payload = {"done": True, "full_response": full_response}
+            if cut_short:
+                # Signal the client to render a soft "response stopped early"
+                # note. reason is a coarse category ("content" | "length").
+                done_payload["cut_short"] = True
+                done_payload["cut_reason"] = cut_short.get("reason", "content")
+            done_event = json.dumps(done_payload)
             yield f"data: {done_event}\n\n"
         except Exception:
             logger.exception("SSE stream error")

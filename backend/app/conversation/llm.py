@@ -27,6 +27,19 @@ LLM_FALLBACK_MESSAGE = (
     "I'm having trouble responding right now. Please try again in a moment."
 )
 
+# A streaming client normally yields plain text tokens (str). When a partial
+# answer was already streamed but generation was then cut (content block or token
+# budget), it yields ONE terminal structured chunk (dict) carrying this key, so
+# the consumer can distinguish "the answer ended" from "the answer was cut off."
+# `reason` is a coarse, non-sensitive category ("content" | "length") — never the
+# raw provider finish_reason.
+STREAM_CUT_SHORT_KEY = "cut_short"
+
+
+def stream_cut_event(reason: str) -> dict:
+    """Structured terminal stream chunk signalling a mid-answer cut (not a token)."""
+    return {STREAM_CUT_SHORT_KEY: True, "reason": reason}
+
 
 def extract_json(text: str) -> dict:
     """Extract a JSON object from LLM output that may contain
@@ -65,7 +78,7 @@ class LLMClient(ABC):
         system_prompt: str,
         messages: list[dict],
         max_tokens: int = 500,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[str | dict]:
         """Yield text chunks. Default: single chunk fallback."""
         text = await self.generate(
             system_prompt, messages, max_tokens
@@ -227,7 +240,7 @@ class GeminiClient(LLMClient):
         max_tokens: int = 500,
         temperature: float = 0.7,
         disable_thinking: bool = False,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[str | dict]:
         model = self._get_model(system_prompt)
         if model is None:
             yield self._fallback_response(messages)
@@ -303,12 +316,20 @@ class GeminiClient(LLMClient):
                 )
                 if not emitted_any:
                     yield self._fallback_response(messages)
+                else:
+                    # A partial answer already reached the member and can't be
+                    # retracted — emit a terminal cut-short signal so the client
+                    # can render a soft "response stopped early" note instead of
+                    # leaving the member with an unexplained mid-sentence stop.
+                    yield stream_cut_event("content")
             elif finish_name == "MAX_TOKENS":
                 logger.warning(
                     "Gemini stream hit MAX_TOKENS (max_output_tokens=%s); the "
                     "response may be truncated.",
                     max_tokens,
                 )
+                if emitted_any:
+                    yield stream_cut_event("length")
         except Exception:
             logger.exception("Gemini streaming failed")
             yield self._fallback_response(messages)
