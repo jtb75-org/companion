@@ -84,9 +84,9 @@ export interface KnowledgeApi {
 /** Sample questions shown as chips. Client-side constants (there is no
  *  suggestions endpoint) — purely a UI affordance, not answers. */
 const SUGGESTED_QUESTIONS: string[] = [
-  'How long does an SSDI decision take?',
-  'What is the “five-step” evaluation?',
-  'What if my claim is denied?',
+  'What is the five-step evaluation?',
+  'What counts as substantial gainful activity?',
+  'What is a continuing disability review?',
 ];
 
 /** Free-question allowance. Mirrors the server default; the server is
