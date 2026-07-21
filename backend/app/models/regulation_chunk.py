@@ -55,3 +55,17 @@ class RegulationChunk(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+    # ── Reconcile ingestion (Phase A, migration 047) ──────────────────────────
+    # Stable per-source identity + change detection. All nullable/additive; the
+    # answer/retrieval path never reads these — they drive the ingestion worker's
+    # new/changed/unchanged/absent diff only. Every chunk row of one source doc
+    # shares that doc's ``source_id`` and ``content_hash``.
+    source_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ingestion_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )

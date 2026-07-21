@@ -21,6 +21,8 @@ pytestmark = requires_db
 _SEARCH_ENDPOINT = "/api/v1/caregiver/knowledge/search"
 _INGEST_ECFR_ENDPOINT = "/api/v1/caregiver/knowledge/ingest/ecfr"
 _INGEST_FEDREG_ENDPOINT = "/api/v1/caregiver/knowledge/ingest/fedreg"
+_RECONCILE_ECFR_ENDPOINT = "/api/v1/caregiver/knowledge/reconcile/ecfr"
+_RECONCILE_FEDREG_ENDPOINT = "/api/v1/caregiver/knowledge/reconcile/fedreg"
 
 # The exact not-legal-advice disclaimer the service appends in code (BLOCKER 1). Kept in
 # sync with knowledge_service.NOT_LEGAL_ADVICE_DISCLAIMER on purpose so the test breaks
@@ -762,3 +764,83 @@ async def test_ecfr_no_vector_path_ingests_despite_embedding_failure(monkeypatch
         res = await s.execute(text("SELECT citation FROM disability_reg_chunks"))
         citations = {r.citation for r in res.fetchall()}
     assert citations == {"20 CFR § 404.1520"}
+
+
+# ── Reconcile trigger endpoint (ADMIN-ONLY, engine-backed) ──────────────────────
+
+
+async def test_reconcile_requires_admin_not_just_caregiver(monkeypatch):
+    """The engine-backed reconcile trigger must be admin-only: a resolvable non-admin
+    caregiver session is 403'd, and the corpus is untouched."""
+    subject = f"kb-cg-subj-{uuid.uuid4().hex[:8]}"
+    cg_email, member_email = await _seed_caregiver(subject)
+    _authentik_session(monkeypatch, subject)
+
+    async def _explode(*args, **kwargs):
+        raise AssertionError("reconcile engine ran for a non-admin caller")
+
+    from app.api.caregiver import knowledge as knowledge_api
+
+    monkeypatch.setattr(knowledge_api, "run_source", _explode)
+
+    try:
+        async with _client() as ac:
+            r1 = await ac.post(_RECONCILE_ECFR_ENDPOINT)
+            assert r1.status_code == 403, f"caregiver got {r1.status_code} on ecfr reconcile"
+            r2 = await ac.post(_RECONCILE_FEDREG_ENDPOINT)
+            assert r2.status_code == 403, f"caregiver got {r2.status_code} on fedreg reconcile"
+        async with db_module.async_session_factory() as s:
+            res = await s.execute(text("SELECT count(*) AS n FROM disability_reg_chunks"))
+            assert res.scalar() == 0
+    finally:
+        await _cleanup_accounts(cg_email, member_email)
+
+
+async def test_reconcile_fedreg_admin_runs_engine(monkeypatch):
+    """An admin can trigger a fedreg reconcile; it runs the engine and reports the run
+    status + inserted-row count (Federal Register loaded for the first time)."""
+    subject = f"kb-admin-subj-{uuid.uuid4().hex[:8]}"
+    admin_email = await _seed_admin(subject)
+    _authentik_session(monkeypatch, subject)
+
+    mock_json = {
+        "results": [
+            {
+                "title": "SSI Rental Subsidy Expansion",
+                "abstract": "Applying nationwide the ISM rental subsidy exception.",
+                "document_number": "2024-54321",
+                "publication_date": "2024-07-15",
+                "html_url": "https://www.federalregister.gov/documents/2024/07/15/2024-54321",
+            }
+        ]
+    }
+
+    async def mock_get(*args, **kwargs):
+        return MockResponse(text="", status_code=200, json_data=mock_json)
+
+    import httpx
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+
+    try:
+        async with _client() as ac:
+            resp = await ac.post(_RECONCILE_FEDREG_ENDPOINT)
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["status"] == "success"
+            assert body["chunks_ingested"] == 1
+        async with db_module.async_session_factory() as s:
+            res = await s.execute(
+                text(
+                    "SELECT source_id, source_corpus FROM disability_reg_chunks "
+                    "WHERE source_corpus = 'Federal_Register'"
+                )
+            )
+            rows = res.fetchall()
+        assert len(rows) == 1
+        assert rows[0].source_id == "2024-54321"
+    finally:
+        await _cleanup_accounts(admin_email)
+        async with db_module.async_session_factory() as s:
+            await s.execute(text("DELETE FROM disability_reg_chunks"))
+            await s.execute(text("DELETE FROM reg_ingestion_runs"))
+            await s.commit()
