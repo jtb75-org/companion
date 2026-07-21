@@ -154,6 +154,8 @@ async def test_stream_normal_passes_chunks_through():
     )
     assert "".join(out) == "You may appeal."
     assert "trouble" not in "".join(out).lower()
+    # a clean stream yields only text tokens — no cut-short meta event
+    assert all(isinstance(o, str) for o in out)
 
 
 @pytest.mark.asyncio
@@ -166,13 +168,39 @@ async def test_stream_blocked_with_no_content_yields_fallback():
 
 
 @pytest.mark.asyncio
-async def test_stream_blocked_after_emitting_does_not_append_fallback():
+async def test_stream_blocked_after_emitting_yields_cut_short_not_fallback():
     # Streamed text can't be retracted; we must NOT tack the fallback onto a
-    # partial that already reached the user.
+    # partial that already reached the user — but we DO emit a terminal cut-short
+    # signal so the client can render a soft "stopped early" note.
     out = await _collect(
         _streaming_client(
             [_Chunk("partial answer "), _Chunk("", finish="RECITATION", raises=True)]
         )
     )
-    assert out == ["partial answer "]
-    assert "trouble" not in "".join(out).lower()
+    text = "".join(o for o in out if isinstance(o, str))
+    assert text == "partial answer "
+    assert "trouble" not in text.lower()
+    cut = [o for o in out if isinstance(o, dict)]
+    assert cut and cut[-1].get("cut_short") is True and cut[-1].get("reason") == "content"
+
+
+@pytest.mark.asyncio
+async def test_stream_max_tokens_after_emitting_yields_length_cut():
+    # A token-budget cut mid-answer is also a truncation the member should see.
+    out = await _collect(
+        _streaming_client(
+            [_Chunk("long answer "), _Chunk("", finish="MAX_TOKENS", raises=True)]
+        )
+    )
+    assert "".join(o for o in out if isinstance(o, str)) == "long answer "
+    cut = [o for o in out if isinstance(o, dict)]
+    assert cut and cut[-1].get("reason") == "length"
+
+
+@pytest.mark.asyncio
+async def test_stream_normal_stop_has_no_cut_signal():
+    # STOP (clean finish) must not emit a cut-short event even after text.
+    out = await _collect(
+        _streaming_client([_Chunk("done."), _Chunk("", finish="STOP", raises=True)])
+    )
+    assert not any(isinstance(o, dict) for o in out)
