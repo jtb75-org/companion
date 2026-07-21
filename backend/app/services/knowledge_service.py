@@ -1252,7 +1252,16 @@ async def generate_rag_answer(
         "Use \"**bold**\" for a short item label or header where it aids scanning. Keep ordinary "
         "prose as plain paragraphs separated by blank lines. Favour light structure only — no "
         "heavy headings and no padding; keep the answer warm, plain, and tight for a caregiver "
-        "or claimant to read.\n\n"
+        "or claimant to read.\n"
+        "6. Plain language: write for a caregiver or claimant with no legal "
+        "training (aim for an everyday reading level). The FIRST time you use a "
+        "technical or legal term (e.g. \"substantial gainful activity,\" "
+        "\"reconsideration,\" \"Appeals Council,\" \"onset date\"), give the term "
+        "and then a short plain-English explanation in the same sentence — read "
+        "the term, then translate it. Prefer everyday words, keep sentences "
+        "short, and spell out acronyms on first use. Do NOT drop the precise "
+        "term or its citation to simplify — translate alongside the exact term, "
+        "never instead of it.\n\n"
         f"Provided regulation chunks:\n{chunks_context}\n"
     )
 

@@ -81,3 +81,82 @@ async def test_max_tokens_still_returns_text():
     )
 
     assert out == text
+
+
+# --- streaming path (generate_stream) ---------------------------------------
+
+
+class _Chunk:
+    """A stand-in Vertex stream chunk. `raises=True` models a text-less chunk
+    (Vertex raises ValueError on `.text` for a safety/finish-only chunk)."""
+
+    def __init__(self, text: str, finish: str | None = None, raises: bool = False):
+        self._text = text
+        self._raises = raises
+        self.candidates = (
+            [SimpleNamespace(finish_reason=SimpleNamespace(name=finish))]
+            if finish
+            else []
+        )
+
+    @property
+    def text(self) -> str:
+        if self._raises:
+            raise ValueError("no text part in this chunk")
+        return self._text
+
+
+def _streaming_client(chunks: list[_Chunk]) -> GeminiClient:
+    client = GeminiClient()
+
+    async def _agen():
+        for c in chunks:
+            yield c
+
+    stream = MagicMock()
+    stream.__aiter__ = lambda self: _agen()
+    model = MagicMock()
+    model.generate_content_async = AsyncMock(return_value=stream)
+    client._get_model = MagicMock(return_value=model)  # type: ignore[method-assign]
+    return client
+
+
+async def _collect(client: GeminiClient) -> list[str]:
+    return [
+        piece
+        async for piece in client.generate_stream(
+            system_prompt="cite the regs",
+            messages=[{"role": "user", "content": "appeal?"}],
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_normal_passes_chunks_through():
+    out = await _collect(
+        _streaming_client([_Chunk("You may "), _Chunk("appeal.", finish="STOP")])
+    )
+    assert "".join(out) == "You may appeal."
+    assert "trouble" not in "".join(out).lower()
+
+
+@pytest.mark.asyncio
+async def test_stream_blocked_with_no_content_yields_fallback():
+    # A stream blocked before emitting any text should still say something graceful.
+    out = await _collect(
+        _streaming_client([_Chunk("", finish="SAFETY", raises=True)])
+    )
+    assert "trouble" in "".join(out).lower()
+
+
+@pytest.mark.asyncio
+async def test_stream_blocked_after_emitting_does_not_append_fallback():
+    # Streamed text can't be retracted; we must NOT tack the fallback onto a
+    # partial that already reached the user.
+    out = await _collect(
+        _streaming_client(
+            [_Chunk("partial answer "), _Chunk("", finish="RECITATION", raises=True)]
+        )
+    )
+    assert out == ["partial answer "]
+    assert "trouble" not in "".join(out).lower()
