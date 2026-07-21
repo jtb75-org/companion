@@ -1002,6 +1002,12 @@ async def _bm25_search(
     ``paradedb.boolean(should => searchqueryinput[])`` to OR the two field matches,
     and ``paradedb.score(id)`` for the BM25 rank.
     """
+    # NOTE: the ``searchqueryinput[]`` cast MUST be schema-qualified as
+    # ``paradedb.searchqueryinput[]``. pg_search installs into the ``paradedb``
+    # schema, and the runtime role (companion_app) has no ``paradedb`` on its
+    # search_path — an unqualified cast raises UndefinedObjectError, which
+    # silently drops the whole BM25 leg to vector-only (hybrid → vector). The
+    # ``paradedb.*`` functions are already qualified; the type cast must be too.
     sql = f"""
         SELECT {_SELECT_COLS},
                1 - (embedding <=> :query_vec) AS similarity,
@@ -1011,7 +1017,7 @@ async def _bm25_search(
                 should => ARRAY[
                     paradedb.match('text_content', :query_text),
                     paradedb.match('citation', :query_text)
-                ]::searchqueryinput[]
+                ]::paradedb.searchqueryinput[]
             )
           AND {_PROGRAM_FILTER_SQL}
         ORDER BY bm25_score DESC
