@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.conversation.llm import GeminiClient
+from app.conversation.llm import LLM_FALLBACK_MESSAGE, GeminiClient
 
 
 def _fake_response(finish_name: str, text: str) -> MagicMock:
@@ -54,7 +54,23 @@ async def test_blocked_finish_reason_returns_fallback_not_fragment(finish_name):
 
     # The truncated/blocked fragment must NOT be served.
     assert fragment not in out
-    assert "trouble" in out.lower()  # the deterministic fallback copy
+    assert out.strip() == LLM_FALLBACK_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_blocked_fallback_never_echoes_member_input():
+    # dd-guidelines §8.5: the fallback must never parrot the member's words back —
+    # especially at the moment content was blocked, when the input may be distressing.
+    member_text = "I feel hopeless and I want to hurt myself"
+    client = _client_returning("SAFETY", "blocked fragment")
+
+    out = await client.generate(
+        system_prompt="x", messages=[{"role": "user", "content": member_text}]
+    )
+
+    assert member_text not in out
+    assert "hurt myself" not in out
+    assert out.strip() == LLM_FALLBACK_MESSAGE
 
 
 @pytest.mark.asyncio

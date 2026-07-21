@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.conversation.llm import get_knowledge_llm_client
+from app.conversation.llm import LLM_FALLBACK_MESSAGE, get_knowledge_llm_client
 from app.db.redis import get_redis
 from app.models.regulation_chunk import RegulationChunk
 from app.pipeline.embedding_client import embed_documents, embed_query
@@ -41,23 +41,18 @@ _GROUNDED_REFUSAL = (
     "or your legal advocate for help."
 )
 
-# Every LLMClient._fallback_response (Gemini, OpenAI/gateway, Claude) begins with this
-# marker when the underlying generation failed or was blocked. Detecting it lets the
-# reg-helper substitute the grounded refusal above, provider-agnostically, instead of
-# serving the conversational fallback that echoes the user's query.
-_CONVERSATIONAL_FALLBACK_MARKER = "I heard you say:"
-
-
 def _is_unusable_answer_body(body: str | None) -> bool:
-    """True if the model body is empty or the shared conversational fallback.
+    """True if the model body is empty or the shared client fallback.
 
     The reg-helper must not ship either: an empty/None body has no grounded content, and
-    the "I heard you say: ..." fallback echoes the query and is off-contract here. Both
-    degrade to the deterministic grounded refusal. Provider-agnostic — the marker is emitted
-    by every provider's ``_fallback_response``."""
+    the generic ``LLM_FALLBACK_MESSAGE`` (returned by every provider's ``_fallback_response``
+    when generation fails or is blocked) is a member-assistant retry prompt, off-contract
+    for this surface. Both degrade to the deterministic grounded refusal. Provider-agnostic:
+    it matches the single shared constant imported from ``app.conversation.llm``, so it stays
+    correct if that copy changes."""
     if not body or not body.strip():
         return True
-    return body.strip().startswith(_CONVERSATIONAL_FALLBACK_MARKER)
+    return body.strip() == LLM_FALLBACK_MESSAGE.strip()
 
 # ── Embedding budget + resilience ─────────────────────────────────────────────
 #
