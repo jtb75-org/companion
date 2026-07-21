@@ -8,6 +8,14 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Vertex finish_reasons that mean the model was BLOCKED / its output cut for
+# content reasons. On these, any text produced is a partial/blocked fragment and
+# must not be trusted as a complete answer. Shared by the non-streaming and
+# streaming Gemini paths so both guard identically.
+_BLOCKED_FINISH_REASONS = frozenset(
+    {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}
+)
+
 
 def extract_json(text: str) -> dict:
     """Extract a JSON object from LLM output that may contain
@@ -162,13 +170,7 @@ class GeminiClient(LLMClient):
             )
             # Content-blocked / recitation-cut responses must NOT be served as a
             # partial fragment — fall back cleanly instead.
-            if finish_name in {
-                "SAFETY",
-                "RECITATION",
-                "BLOCKLIST",
-                "PROHIBITED_CONTENT",
-                "SPII",
-            }:
+            if finish_name in _BLOCKED_FINISH_REASONS:
                 logger.warning(
                     "Gemini generation terminated by %s; returning fallback "
                     "instead of a partial response.",
@@ -258,9 +260,44 @@ class GeminiClient(LLMClient):
                 stream=True,
                 generation_config=GenerationConfig(**gen_kwargs),
             )
+            # Track finish_reason as it arrives (the terminal chunk carries it).
+            # Streamed text can't be retracted, but a blocked stream that emitted
+            # NOTHING should still yield a graceful fallback rather than silence,
+            # and every blocked/truncated cut is logged for parity with generate().
+            emitted_any = False
+            finish_name = ""
             async for chunk in response:
-                if chunk.text:
-                    yield chunk.text
+                candidate = (
+                    chunk.candidates[0]
+                    if getattr(chunk, "candidates", None)
+                    else None
+                )
+                name = getattr(
+                    getattr(candidate, "finish_reason", None), "name", ""
+                )
+                if name:
+                    finish_name = name
+                try:
+                    text = chunk.text
+                except (ValueError, IndexError):
+                    text = ""
+                if text:
+                    emitted_any = True
+                    yield text
+            if finish_name in _BLOCKED_FINISH_REASONS:
+                logger.warning(
+                    "Gemini stream terminated by %s (emitted_any=%s).",
+                    finish_name,
+                    emitted_any,
+                )
+                if not emitted_any:
+                    yield self._fallback_response(messages)
+            elif finish_name == "MAX_TOKENS":
+                logger.warning(
+                    "Gemini stream hit MAX_TOKENS (max_output_tokens=%s); the "
+                    "response may be truncated.",
+                    max_tokens,
+                )
         except Exception:
             logger.exception("Gemini streaming failed")
             yield self._fallback_response(messages)
@@ -306,6 +343,21 @@ class GeminiClient(LLMClient):
                 contents,
                 generation_config=GenerationConfig(**gen_kwargs),
             )
+            # Surface a blocked/recitation cut for observability. The caller owns
+            # the response (it may carry tool calls), so we don't alter it here —
+            # but a content-block should not pass silently.
+            candidate = (
+                response.candidates[0]
+                if getattr(response, "candidates", None)
+                else None
+            )
+            finish_name = getattr(
+                getattr(candidate, "finish_reason", None), "name", ""
+            )
+            if finish_name in _BLOCKED_FINISH_REASONS:
+                logger.warning(
+                    "Gemini tool-use generation terminated by %s.", finish_name
+                )
             return response
         except Exception:
             logger.exception(
