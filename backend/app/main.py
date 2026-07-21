@@ -87,7 +87,11 @@ CORS_ORIGINS = {
     ],
     "prod": [
         "https://app.mydailydignity.com",
-        "https://companion-prod-web-mtfid4sksa-uc.a.run.app",
+        # Public landing (www) — hosts the benefits-helper widget, which makes a
+        # credentialed cross-origin POST to api.mydailydignity.com/public/knowledge/ask.
+        # Exact-origin (no wildcard) so allow_credentials=True stays safe. www is our own
+        # static, no-auth landing; the PHI/auth endpoints still enforce their own auth.
+        "https://www.mydailydignity.com",
     ],
 }
 
