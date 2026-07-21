@@ -1288,12 +1288,12 @@ async def generate_rag_answer(
 
     # 8. Degrade a failed/blocked/empty generation to the grounded refusal. A
     #    GeminiClient SAFETY/RECITATION fallback, a gateway/Qwen error, or an empty body
-    #    all surface as either "" or the shared conversational fallback ("I heard you
-    #    say: ..."). Neither is acceptable on this legal/as-of surface: the conversational
-    #    fallback echoes the user's query and is off-contract (§8.5). Substitute the same
-    #    deterministic refusal the no-chunks path uses. Provider-agnostic — applies to
-    #    Gemini and the Qwen/gateway path alike. Structural citations still ship (the
-    #    chunks were genuinely retrieved) but grounded=False signals no usable answer.
+    #    all surface as either "" or the shared LLM_FALLBACK_MESSAGE (the generic
+    #    member-assistant retry prompt). Neither is acceptable on this legal/as-of surface —
+    #    the member fallback is off-contract here — so substitute the same deterministic
+    #    refusal the no-chunks path uses. Provider-agnostic — applies to Gemini and the
+    #    Qwen/gateway path alike. Structural citations still ship (the chunks were genuinely
+    #    retrieved) but grounded=False signals no usable answer.
     if _is_unusable_answer_body(answer_body):
         logger.warning(
             "Reg-helper generation was empty or a fallback; serving the grounded refusal "
