@@ -122,6 +122,19 @@ def test_cors_never_combines_credentials_with_wildcard_or_regex():
         assert "*" not in origins, f"CORS_ORIGINS[{env!r}] must not contain '*'"
 
 
+def test_cors_prod_allows_www_landing_origin():
+    """The public benefits-helper widget on the www landing makes a credentialed
+    cross-origin POST to api.mydailydignity.com/public/knowledge/ask, so www must be an
+    allowed prod origin. Exact-origin match only — a look-alike is still rejected."""
+    from app.main import CORS_ORIGINS
+
+    prod = CORS_ORIGINS["prod"]
+    assert "https://www.mydailydignity.com" in prod
+    # Exact-origin allowlist: a non-listed / look-alike origin must NOT be permitted.
+    assert "https://evil.mydailydignity.com.attacker.com" not in prod
+    assert "https://www.mydailydignity.com.evil.com" not in prod
+
+
 # ── gate #2: TLS to Authentik — CA bundle threads config → authenticator → httpx ──
 
 
