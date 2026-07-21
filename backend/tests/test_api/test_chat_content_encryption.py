@@ -157,7 +157,7 @@ async def test_send_message_persists_encrypted_content(keyring, monkeypatch):
     _install_stubs(monkeypatch, session)
 
     async def _generate_with_tools(*_a, **_k):
-        return "the assistant reply about your bill"
+        return "the assistant reply about your bill", None  # (text, cut_reason)
 
     monkeypatch.setattr(conv, "_generate_with_tools", _generate_with_tools)
 

@@ -41,6 +41,18 @@ def stream_cut_event(reason: str) -> dict:
     return {STREAM_CUT_SHORT_KEY: True, "reason": reason}
 
 
+def cut_reason_for_finish(finish_name: str) -> str | None:
+    """Map a Vertex finish_reason NAME to the coarse, non-sensitive cut category
+    used by the member client ("content" for a block, "length" for a token-budget
+    cut), or None when the generation finished normally. Same category surface as
+    the streaming ``stream_cut_event`` — never exposes the raw finish_reason."""
+    if finish_name in _BLOCKED_FINISH_REASONS:
+        return "content"
+    if finish_name == "MAX_TOKENS":
+        return "length"
+    return None
+
+
 def extract_json(text: str) -> dict:
     """Extract a JSON object from LLM output that may contain
     preamble text, markdown fences, or thinking blocks."""

@@ -10,7 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
 from app.auth.dependencies import User, require_complete_profile
-from app.conversation.llm import GeminiClient, get_llm_client
+from app.conversation.llm import (
+    GeminiClient,
+    cut_reason_for_finish,
+    get_llm_client,
+)
 from app.conversation.prompt_builder import build_system_prompt
 from app.conversation.state_manager import state_manager
 from app.conversation.stt import transcribe_audio
@@ -62,17 +66,43 @@ async def _generate_with_tools(
     llm_messages: list[dict],
     db,
     user_id,
-) -> str:
+) -> tuple[str, str | None]:
     """Generate a response, executing tool calls.
 
-    Falls back to plain generate for non-Gemini clients.
+    Returns ``(text, cut_reason)`` where ``cut_reason`` is the coarse category
+    ("content" | "length") when the FINAL answer was cut off — a content block or
+    a token-budget cut — or None on a normal finish. The member endpoint surfaces
+    it so the client can show a soft "response stopped early" note.
+
+    Falls back to plain generate for non-Gemini clients (no cut detection there).
     """
     if not isinstance(llm, GeminiClient):
         return await llm.generate(
             system_prompt, llm_messages, max_tokens=1024
-        )
+        ), None
 
     from vertexai.generative_models import Content, Part
+
+    def _finalize(resp) -> tuple[str, str | None]:
+        """Turn a final (no-tool-call) response into (safe_text, cut_reason).
+
+        A block/empty response never ships a fragment — it degrades to the calm
+        fallback with no cut flag (there's no partial to explain). A partial that
+        was cut ships the text plus its coarse cut category."""
+        from app.conversation.safety import check_response_safety
+
+        cand = resp.candidates[0]
+        finish_name = getattr(
+            getattr(cand, "finish_reason", None), "name", ""
+        )
+        cut = cut_reason_for_finish(finish_name)
+        try:
+            text = resp.text
+        except (ValueError, IndexError):
+            text = ""
+        if not text:
+            return llm._fallback_response(llm_messages), None
+        return check_response_safety(text, str(user_id)), cut
 
     # Convert dict messages to Content objects
     contents = []
@@ -97,7 +127,7 @@ async def _generate_with_tools(
             max_tokens=2048,
         )
         if response is None:
-            return llm._fallback_response(llm_messages)
+            return llm._fallback_response(llm_messages), None
 
         candidate = response.candidates[0]
         parts = candidate.content.parts
@@ -110,14 +140,8 @@ async def _generate_with_tools(
                 break
 
         if fn_call is None:
-            # No tool call — return text (with safety check)
-            from app.conversation.safety import (
-                check_response_safety,
-            )
-
-            return check_response_safety(
-                response.text, str(user_id)
-            )
+            # No tool call — this is the final answer.
+            return _finalize(response)
 
         # Execute the tool
         fn_name = fn_call.name
@@ -145,10 +169,9 @@ async def _generate_with_tools(
             )
         )
 
-    # Exhausted iterations — return whatever we have (with safety check)
-    from app.conversation.safety import check_response_safety
-
-    return check_response_safety(response.text, str(user_id))
+    # Exhausted iterations — return whatever we have (finalized like the
+    # no-tool-call path: safety-checked, with any cut reason).
+    return _finalize(response)
 
 
 @router.post("/start", status_code=status.HTTP_201_CREATED)
@@ -186,7 +209,7 @@ async def start_conversation(
             {"role": m.role, "content": m.content}
             for m in session.messages
         ]
-        followup = await _generate_with_tools(
+        followup, _ = await _generate_with_tools(
             llm, system_prompt, llm_messages,
             db, user.id,
         )
@@ -353,7 +376,7 @@ async def send_message(
 
     # Generate response — with tool use for Gemini
     llm = get_llm_client()
-    response_text = await _generate_with_tools(
+    response_text, cut_reason = await _generate_with_tools(
         llm, system_prompt, llm_messages, db, user.id
     )
 
@@ -450,12 +473,19 @@ async def send_message(
             "TTS failed for response, returning text only"
         )
 
-    return {
+    result = {
         "session_id": session.session_id,
         "response": response_text,
         "audio_data": audio_b64,
         "message_count": len(session.messages),
     }
+    if cut_reason:
+        # The final answer was cut off (content block or token budget). Surface a
+        # coarse category so the client can show a soft "response stopped early"
+        # note. response_text above is the partial answer as shown to the member.
+        result["cut_short"] = True
+        result["cut_reason"] = cut_reason
+    return result
 
 
 @router.post("/message/stream")
