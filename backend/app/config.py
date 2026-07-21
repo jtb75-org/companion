@@ -149,6 +149,12 @@ class Settings(BaseSettings):
     session_cookie_domain: str = ""  # empty → host-only cookie
     session_ttl_seconds: int = 60 * 60 * 8  # 8h sliding
 
+    # D.D. chat generation token budget (the Gemini tool path a member turn uses).
+    # env COMPANION_CHAT_MAX_TOKENS. Default preserves prior behavior (2048);
+    # exposed so response length / cost can be tuned, and so a cut can be forced
+    # for verifying the "response stopped early" note.
+    chat_max_tokens: int = 2048
+
     # Password-strength floor enforced on the branded set-password seams
     # (/invitations/set-password, /activation/set-password). The Authentik admin
     # set_password API bypasses Authentik's own flow password policy, so this — plus

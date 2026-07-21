@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
 from app.auth.dependencies import User, require_complete_profile
+from app.config import settings
 from app.conversation.llm import (
     GeminiClient,
     cut_reason_for_finish,
@@ -124,7 +125,7 @@ async def _generate_with_tools(
             system_prompt,
             contents,
             tools=tools,
-            max_tokens=2048,
+            max_tokens=settings.chat_max_tokens,
         )
         if response is None:
             return llm._fallback_response(llm_messages), None
