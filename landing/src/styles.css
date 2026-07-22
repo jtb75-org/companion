@@ -571,6 +571,38 @@ header {
   margin-top: 16px;
   border-top: 1px dashed var(--line);
   padding-top: 18px;
+  /* Fixed reading window: the card (.tool) stays a constant size no matter how
+     long the answer is — long answers scroll HERE instead of growing the card
+     and reflowing the page. Height is the same in the empty and answered
+     states; the empty hint just gets some breathing room below it (intended).
+     200px is ~6 answer lines plus the question line — a comfortable read while
+     keeping the card's compact, proportional look. */
+  height: 200px;
+  overflow-y: auto;
+  /* Keep scrolled text off the scrollbar gutter. */
+  padding-right: 6px;
+  /* Firefox — thin, muted, theme-aware (tokens resolve per light/dark). */
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+/* WebKit (Safari/Chrome) — subtle inset pill thumb, muted via palette tokens
+   so it tracks the light/dark theme automatically. */
+.answer::-webkit-scrollbar {
+  width: 8px;
+}
+.answer::-webkit-scrollbar-track {
+  background: transparent;
+}
+.answer::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 8px;
+  /* Transparent border + padding-box clip reads as a slim pill, not a full bar. */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.answer::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+  background-clip: padding-box;
 }
 .q {
   font-weight: 600;
@@ -793,6 +825,16 @@ section {
   .res-grid {
     grid-template-columns: 1fr;
     gap: 28px;
+  }
+}
+/* On small screens vertical space is precious and answers wrap to more lines.
+   Cap the answer window with max-height instead of a fixed height so the empty
+   state stays compact (no big void under the hint) while long answers still
+   scroll inside the card rather than growing it. */
+@media (max-width: 760px) {
+  .answer {
+    height: auto;
+    max-height: 240px;
   }
 }
 
