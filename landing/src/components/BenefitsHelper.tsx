@@ -6,6 +6,7 @@ import {
 } from '../lib/knowledgeApi';
 import { CREATE_ACCOUNT_URL } from '../lib/config';
 import { Arrow, CiteIcon } from './icons';
+import { citationToEcfrUrl } from '../lib/ecfr';
 import { MarkdownBlock } from './Markdown';
 
 /** Client-side cap mirroring the endpoint's request bound (a courtesy limit;
@@ -182,12 +183,27 @@ export function BenefitsHelper() {
                 ))}
                 {answer.citations.length > 0 && (
                   <div className="cites">
-                    {answer.citations.map((label) => (
-                      <span key={label} className="cite">
-                        <CiteIcon aria-hidden="true" />
-                        {label}
-                      </span>
-                    ))}
+                    {answer.citations.map((label) => {
+                      const href = citationToEcfrUrl(label);
+                      return href ? (
+                        <a
+                          key={label}
+                          className="cite cite-link"
+                          href={href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={`View ${label} on eCFR (opens in a new tab)`}
+                        >
+                          <CiteIcon aria-hidden="true" />
+                          {label}
+                        </a>
+                      ) : (
+                        <span key={label} className="cite">
+                          <CiteIcon aria-hidden="true" />
+                          {label}
+                        </span>
+                      );
+                    })}
                   </div>
                 )}
                 {answer.provenance && (
