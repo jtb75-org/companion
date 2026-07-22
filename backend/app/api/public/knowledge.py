@@ -138,6 +138,7 @@ async def public_ask(
         # present for consistency with the answer contract.
         return PublicKnowledgeAskResponse(
             answer=_GATE_MESSAGE,
+            body=_GATE_MESSAGE,
             provenance="",
             disclaimer=knowledge_service.NOT_LEGAL_ADVICE_DISCLAIMER,
             citations=[],
@@ -170,6 +171,7 @@ async def public_ask(
 
     return PublicKnowledgeAskResponse(
         answer=res["answer"],
+        body=res["body"],
         provenance=res["provenance"],
         disclaimer=res["disclaimer"],
         citations=res["citations"],
