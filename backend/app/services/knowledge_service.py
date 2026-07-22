@@ -1177,6 +1177,7 @@ async def generate_rag_answer(
         return {
             "query": query_text,
             "answer": _compose_answer(provenance_line, _GROUNDED_REFUSAL),
+            "body": _GROUNDED_REFUSAL,
             "provenance": provenance_line,
             "disclaimer": NOT_LEGAL_ADVICE_DISCLAIMER,
             "citations": [],
@@ -1302,6 +1303,7 @@ async def generate_rag_answer(
         return {
             "query": query_text,
             "answer": _compose_answer(provenance_line, _GROUNDED_REFUSAL),
+            "body": _GROUNDED_REFUSAL,
             "provenance": provenance_line,
             "disclaimer": NOT_LEGAL_ADVICE_DISCLAIMER,
             "citations": citations,
@@ -1314,6 +1316,7 @@ async def generate_rag_answer(
     return {
         "query": query_text,
         "answer": _compose_answer(provenance_line, answer_body),
+        "body": answer_body,
         "provenance": provenance_line,
         "disclaimer": NOT_LEGAL_ADVICE_DISCLAIMER,
         "citations": citations,

@@ -113,7 +113,11 @@ function toParagraphs(answer: string): string[] {
 // ── Wire types (mirror backend PR #151 PublicKnowledgeAskResponse) ─────────────
 
 interface PublicAskResponseWire {
+  // `answer` is the self-contained composed string (provenance + body + disclaimer).
   answer: string;
+  // `body` is the grounded prose alone — render THIS so provenance + disclaimer
+  // (below) aren't duplicated. Optional so an older server still works (falls back).
+  body?: string;
   provenance: string;
   disclaimer: string;
   citations: string[];
@@ -179,7 +183,7 @@ export class HttpKnowledgeApi implements KnowledgeApi {
     return {
       answer: {
         question,
-        paragraphs: toParagraphs(data.answer ?? ''),
+        paragraphs: toParagraphs(data.body ?? data.answer ?? ''),
         citations: Array.isArray(data.citations) ? data.citations : [],
         provenance: data.provenance ?? '',
         disclaimer: data.disclaimer ?? '',

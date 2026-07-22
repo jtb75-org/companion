@@ -220,10 +220,30 @@ async def test_answer_contract_wraps_gateway_response(monkeypatch):
     result = await knowledge_service.generate_rag_answer(None, "how does the five-step work")
 
     assert result["grounded"] is True
+    # ``answer`` is the self-contained composed string (provenance + body + disclaimer).
     assert knowledge_service.NOT_LEGAL_ADVICE_DISCLAIMER in result["answer"]
     assert result["answer"].startswith("Provenance: As of ")
     assert "five steps" in result["answer"]
     assert "20 CFR § 404.1520" in result["citations"]
+    # ``body`` is the SAME prose WITHOUT the provenance/disclaimer wrapper, so a UI can
+    # render it once and not duplicate them. The disclaimer still ships in its own field.
+    assert result["body"] == "The process has five steps (20 CFR § 404.1520)."
+    assert knowledge_service.NOT_LEGAL_ADVICE_DISCLAIMER not in result["body"]
+    assert "Provenance:" not in result["body"]
+    assert result["disclaimer"] == knowledge_service.NOT_LEGAL_ADVICE_DISCLAIMER
+
+
+async def test_grounded_refusal_body_excludes_wrapper(monkeypatch):
+    """The no-chunks refusal path also exposes a wrapper-free ``body`` (the raw refusal),
+    while ``answer`` stays self-contained."""
+    _patch_search(monkeypatch, [])  # no chunks -> deterministic grounded refusal
+
+    result = await knowledge_service.generate_rag_answer(None, "unanswerable")
+
+    assert result["grounded"] is False
+    assert result["body"] == knowledge_service._GROUNDED_REFUSAL
+    assert knowledge_service.NOT_LEGAL_ADVICE_DISCLAIMER not in result["body"]
+    assert knowledge_service.NOT_LEGAL_ADVICE_DISCLAIMER in result["answer"]
 
 
 @pytest.mark.parametrize(

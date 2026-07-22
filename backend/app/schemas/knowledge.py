@@ -22,8 +22,12 @@ class KnowledgeSearchResponse(BaseModel):
     query: str
     # ``answer`` always carries the server-appended provenance line and not-legal-advice
     # disclaimer (see knowledge_service.generate_rag_answer) — these are enforced in code,
-    # never left to the (untrusted) model.
+    # never left to the (untrusted) model. Use it for API/copy-paste (self-contained).
     answer: str
+    # ``body`` is the same grounded prose WITHOUT the provenance/disclaimer wrapper, so a
+    # UI can render it once and show provenance + disclaimer structurally (below) without
+    # duplicating them. The disclaimer must still always render from its own field.
+    body: str
     # Server-computed provenance/as-of line and disclaimer, surfaced structurally so a
     # client can render them independently of the model prose.
     provenance: str
@@ -72,6 +76,10 @@ class PublicKnowledgeAskResponse(BaseModel):
     # ``sources`` are empty, and NO LLM was called. The disclaimer is always
     # present.
     answer: str
+    # Grounded prose WITHOUT the provenance/disclaimer wrapper (see
+    # KnowledgeSearchResponse.body) — the UI renders this and shows provenance +
+    # disclaimer structurally once, instead of duplicating them.
+    body: str
     provenance: str
     disclaimer: str
     citations: list[str]
