@@ -1,9 +1,15 @@
 # RESUME — Companion self-hosted migration
 
-Session handoff. Last updated **2026-07-13**. Source of truth for live state is
+Session handoff. Last updated **2026-07-21**. Source of truth for live state is
 this file + `MEMORY.md` (+ linked notes). `CLAUDE.md` "Current state" is also
 current as of 2026-07-12. The older 2026-06-18 history below the line is kept
 for context but is superseded.
+
+> The migration is DONE and stable; work since ~2026-07-13 has moved to
+> PRODUCT features. RESUME.md only summarizes the biggest landings — the fuller,
+> current breadth (Authentik auth cutover, self-service password reset, the
+> pentest, account-deletion, doc dedup, caregiver gates, etc.) lives in
+> `MEMORY.md` + its linked notes.
 
 ## Status: DEPLOYED + functionally wired
 
@@ -37,6 +43,54 @@ for context but is superseded.
     write `dd_persona/system_prompt`, bounded by `_guard_persona` (admin role,
     length cap, override-phrase denylist) with safety canaries. Persona/safety
     changes still require safety-privacy-reviewer sign-off.
+
+## Where we landed (2026-07-21 session)
+
+### 🚀 Disability-benefits RAG — LAUNCHED + fully operationalized, on self-hosted Qwen
+A NEW public, caregiver/claimant-facing knowledge assistant over federal SSA/SSDI
+disability regulations — SEPARATE from the per-member PHI RAG (own
+`disability_reg_chunks` table, no user_id/RLS/encryption, never co-queried). Full
+detail in [[disability-rag-module]] + [[product-positioning-landing]]. State:
+
+- **LIVE at `www.mydailydignity.com`** (companion-first landing; the helper is a
+  "free resource"). Public `POST /public/knowledge/ask`, anon cookie + Redis
+  quota (3/24h, fail-closed). Cloudflare rate-limit + Bot Fight Mode on;
+  **Turnstile still TODO before broad advertising.**
+- **Hybrid retrieval** (BM25 pg_search + vector, RRF). NOTE a real bug fixed this
+  session: the BM25 leg had been silently degrading to vector-only in prod
+  (unqualified `::searchqueryinput[]` cast; `paradedb` not on the app role's
+  search_path) — fixed by schema-qualifying the cast (#169).
+- **Ingestion worker OPERATIONALIZED** ([[disability-rag-module]]): eCFR
+  reconciled (1641 tracked chunks) + Federal Register loaded + **Blue Book /
+  Listings of Impairments** ingested (243 listings, #166); scheduled via K8s
+  CronJobs (gitops #27) with an egress NetworkPolicy (gitops #28→30 — see the
+  kube-router POST-DNAT gotcha in [[k3s-kube-router-egress-postdnat]]).
+- **Generation moved to self-hosted qwen2.5:14b** for THIS public surface (env
+  flag `COMPANION_KNOWLEDGE_LLM_PROVIDER=qwen`, #168 + gitops #31), HA across both
+  Macs via the LiteLLM gateway — **$0 tokens**, eval-comparable to Gemini. The
+  member PHI D.D. assistant STAYS on Gemini/Vertex (separate `COMPANION_LLM_PROVIDER`).
+  Gateway needed the companion virtual key broadened to the qwen model (LiteLLM
+  `/key/update`); qwen HA entry added to `~/.config/litellm/config.yaml` on
+  studio-ultra. Phase 1b (POMS/HALLEX crawlers) + reranker still to come.
+
+### 🩹 D.D. chat robustness (member assistant)
+- **Truncation fixed (#167):** the public helper served mid-sentence answers —
+  Gemini is a THINKING model so reasoning tokens ate the 800-token budget
+  (`MAX_TOKENS`). Bumped to 3072 + guarded `finish_reason` (SAFETY/RECITATION/
+  MAX_TOKENS) on the non-stream path; also fixed over-refusal + added plain-
+  language prompt guidance.
+- **finish_reason guards everywhere (#170):** `generate_stream` + `generate_with_tools`
+  now guard blocked/truncated cuts too (shared `_BLOCKED_FINISH_REASONS`).
+- **§8.5 fallback fix (#171):** all client `_fallback_response`s consolidated to a
+  single input-free `LLM_FALLBACK_MESSAGE` (no more echoing member input); the
+  reg-helper detects it via the shared constant to swap in the grounded refusal.
+- **"Response stopped early" note (cut-short):** when a member answer is cut, the
+  backend returns `cut_short`/`cut_reason` (coarse `content`/`length`, never the
+  raw finish_reason) — SSE path #172, and the **non-streaming `/message` path the
+  app actually uses** #174; mobile renders a soft note #173 (`CutShortNote`,
+  safety-approved copy). `COMPANION_CHAT_MAX_TOKENS` is now an env knob
+  (default 2048, #175). A temporary low-override used to demo the note on the
+  iOS simulator was REVERTED (gitops #33) — prod chat is back to normal.
 
 ## ✅ OCR migration — PaddleOCR PRIMARY (resolved 2026-07-12)
 
@@ -179,8 +233,11 @@ Done earlier: `source_metadata.ocr_text` is encrypted in `process_camera_scan`
   bootstrap OpenBao token; merge argocd-apps #69 (audit-log alert); key rotation
   automation.
 
-> NOTE: DB currently has **1 member user** (`smoketest@mydailydignity.com`,
-> active) + **1 admin** (`joe.buhr@gmail.com`). See [[prod-access-model]].
+> NOTE: prod now has **seeded test members** beyond the original
+> `smoketest@mydailydignity.com` — e.g. `alex@ng20.org`, populated with bills /
+> medications / appointments (used for the D.D. chat demo this session) — plus
+> the admin `joe.buhr@gmail.com`. Still a small, non-real-PHI test set. See
+> [[prod-access-model]] (verify counts against the live DB before relying on them).
 
 ## Handy context
 - Macs (Ollama bare-metal): `studio-max` 192.168.0.94 (M4 Max 64GB),
