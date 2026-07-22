@@ -142,8 +142,14 @@ export function BenefitsHelper() {
         <div
           className="answer"
           id="answer"
+          role="region"
+          aria-label="Answer"
           aria-live="polite"
           aria-busy={loading}
+          // The answer is a fixed-height scroll container with no interactive
+          // children, so give it a tab stop — keyboard users can focus it and
+          // scroll long answers (WCAG 2.1.1). :focus-visible shows the outline.
+          tabIndex={0}
           style={{ opacity: fading ? 0.35 : 1 }}
         >
           {loading && <div className="meta">Finding your answer…</div>}
