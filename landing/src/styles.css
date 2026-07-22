@@ -688,6 +688,23 @@ header {
   height: 13px;
   opacity: 0.7;
 }
+/* Clickable citation chips → the referenced regulation on ecfr.gov. */
+a.cite {
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+a.cite:hover {
+  border-color: var(--primary-deep);
+  background: var(--sage);
+}
+a.cite:hover svg {
+  opacity: 1;
+}
+a.cite:focus-visible {
+  outline: 2px solid var(--primary-deep);
+  outline-offset: 2px;
+}
 .meta {
   margin-top: 14px;
   font-size: 0.84rem;
